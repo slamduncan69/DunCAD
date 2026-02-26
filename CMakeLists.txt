@@ -65,9 +65,11 @@ add_library(dc_core STATIC
     src/core/error.c
     src/core/log.c
     src/core/manifest.c
+    src/bezier/bezier_curve.c
 )
 target_include_directories(dc_core PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(dc_core
+    PUBLIC m
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
 )
@@ -119,6 +121,7 @@ endmacro()
 dc_add_test(test_array       tests/test_array.c)
 dc_add_test(test_string_builder tests/test_string_builder.c)
 dc_add_test(test_manifest    tests/test_manifest.c)
+dc_add_test(test_bezier_curve tests/test_bezier_curve.c)
 
 # Bezier canvas test — needs GTK4 + the canvas source
 add_executable(test_bezier_canvas
@@ -144,6 +147,6 @@ set_tests_properties(test_bezier_canvas PROPERTIES
 # ---------------------------------------------------------------------------
 add_custom_target(tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_array test_string_builder test_manifest test_bezier_canvas
+    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_bezier_canvas
     COMMENT "Building and running all DunCAD tests"
 )
