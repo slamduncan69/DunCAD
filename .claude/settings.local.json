@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake:*)",
+      "Bash(pacman:*)",
+      "Bash(sudo pacman:*)",
+      "Bash(cd build && ctest --output-on-failure 2>&1)",
+      "Bash(cmake --build build 2>&1 && cd build && ctest --output-on-failure 2>&1)",
+      "Bash(cd:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
