@@ -7,9 +7,9 @@
  * Internal structure definition
  * ---------------------------------------------------------------------- */
 
-#define EF_ARRAY_INITIAL_CAPACITY 8
+#define DC_ARRAY_INITIAL_CAPACITY 8
 
-struct EF_Array {
+struct DC_Array {
     void   *data;         /* heap-allocated buffer of (capacity * element_size) bytes */
     size_t  length;       /* number of elements currently stored */
     size_t  capacity;     /* number of elements the buffer can hold */
@@ -17,19 +17,19 @@ struct EF_Array {
 };
 
 /* -------------------------------------------------------------------------
- * ef_array_new
+ * dc_array_new
  * ---------------------------------------------------------------------- */
-EF_Array *
-ef_array_new(size_t element_size)
+DC_Array *
+dc_array_new(size_t element_size)
 {
     if (element_size == 0) return NULL;
 
-    EF_Array *arr = malloc(sizeof(EF_Array));
+    DC_Array *arr = malloc(sizeof(DC_Array));
     if (!arr) return NULL;
 
     arr->element_size = element_size;
     arr->length       = 0;
-    arr->capacity     = EF_ARRAY_INITIAL_CAPACITY;
+    arr->capacity     = DC_ARRAY_INITIAL_CAPACITY;
 
     arr->data = malloc(arr->capacity * element_size);
     if (!arr->data) {
@@ -41,10 +41,10 @@ ef_array_new(size_t element_size)
 }
 
 /* -------------------------------------------------------------------------
- * ef_array_free
+ * dc_array_free
  * ---------------------------------------------------------------------- */
 void
-ef_array_free(EF_Array *arr)
+dc_array_free(DC_Array *arr)
 {
     if (!arr) return;
     free(arr->data);
@@ -52,10 +52,10 @@ ef_array_free(EF_Array *arr)
 }
 
 /* -------------------------------------------------------------------------
- * ef_array_push
+ * dc_array_push
  * ---------------------------------------------------------------------- */
 int
-ef_array_push(EF_Array *arr, const void *element)
+dc_array_push(DC_Array *arr, const void *element)
 {
     if (!arr || !element) return -1;
 
@@ -77,20 +77,20 @@ ef_array_push(EF_Array *arr, const void *element)
 }
 
 /* -------------------------------------------------------------------------
- * ef_array_get
+ * dc_array_get
  * ---------------------------------------------------------------------- */
 void *
-ef_array_get(EF_Array *arr, size_t index)
+dc_array_get(DC_Array *arr, size_t index)
 {
     if (!arr || index >= arr->length) return NULL;
     return (char *)arr->data + index * arr->element_size;
 }
 
 /* -------------------------------------------------------------------------
- * ef_array_remove
+ * dc_array_remove
  * ---------------------------------------------------------------------- */
 int
-ef_array_remove(EF_Array *arr, size_t index)
+dc_array_remove(DC_Array *arr, size_t index)
 {
     if (!arr || index >= arr->length) return -1;
 
@@ -107,20 +107,20 @@ ef_array_remove(EF_Array *arr, size_t index)
 }
 
 /* -------------------------------------------------------------------------
- * ef_array_length
+ * dc_array_length
  * ---------------------------------------------------------------------- */
 size_t
-ef_array_length(EF_Array *arr)
+dc_array_length(DC_Array *arr)
 {
     if (!arr) return 0;
     return arr->length;
 }
 
 /* -------------------------------------------------------------------------
- * ef_array_clear
+ * dc_array_clear
  * ---------------------------------------------------------------------- */
 void
-ef_array_clear(EF_Array *arr)
+dc_array_clear(DC_Array *arr)
 {
     if (!arr) return;
     arr->length = 0;

@@ -1,5 +1,5 @@
-#ifndef EF_MANIFEST_H
-#define EF_MANIFEST_H
+#ifndef DC_MANIFEST_H
+#define DC_MANIFEST_H
 
 /*
  * manifest.h — Project manifest: tracks all design artifacts and their status.
@@ -9,16 +9,16 @@
  * endpoint, or a Unix socket in the future.
  *
  * Ownership rules:
- *   - EF_Manifest owns its EF_Array *artifacts and EF_Array *active_errors.
- *   - Each EF_Artifact stored in the artifacts array is stored by value
- *     (copied in), so EF_Manifest owns those copies.
- *   - EF_Artifact.depends_on is an EF_Array * of (char *) path strings
- *     stored by value.  Each EF_Artifact owns its depends_on array.
- *   - ef_manifest_free() releases everything.
- *   - ef_manifest_capture_context() returns a heap-allocated string; caller
+ *   - DC_Manifest owns its DC_Array *artifacts and DC_Array *active_errors.
+ *   - Each DC_Artifact stored in the artifacts array is stored by value
+ *     (copied in), so DC_Manifest owns those copies.
+ *   - DC_Artifact.depends_on is an DC_Array * of (char *) path strings
+ *     stored by value.  Each DC_Artifact owns its depends_on array.
+ *   - dc_manifest_free() releases everything.
+ *   - dc_manifest_capture_context() returns a heap-allocated string; caller
  *     must free() it.
- *   - ef_manifest_load() returns a heap-allocated EF_Manifest; caller must
- *     free with ef_manifest_free().
+ *   - dc_manifest_load() returns a heap-allocated DC_Manifest; caller must
+ *     free with dc_manifest_free().
  */
 
 #include "array.h"
@@ -28,27 +28,27 @@
  * Artifact type — describes the role of a design file.
  * ---------------------------------------------------------------------- */
 typedef enum {
-    EF_ARTIFACT_SCAD,
-    EF_ARTIFACT_SCAD_GENERATED,
-    EF_ARTIFACT_KICAD_PCB,
-    EF_ARTIFACT_KICAD_SCH,
-    EF_ARTIFACT_STEP,
-    EF_ARTIFACT_STL,
-    EF_ARTIFACT_UNKNOWN
-} EF_ArtifactType;
+    DC_ARTIFACT_SCAD,
+    DC_ARTIFACT_SCAD_GENERATED,
+    DC_ARTIFACT_KICAD_PCB,
+    DC_ARTIFACT_KICAD_SCH,
+    DC_ARTIFACT_STEP,
+    DC_ARTIFACT_STL,
+    DC_ARTIFACT_UNKNOWN
+} DC_ArtifactType;
 
 /* -------------------------------------------------------------------------
  * Artifact status — reflects the last known build/validation state.
  * ---------------------------------------------------------------------- */
 typedef enum {
-    EF_STATUS_CLEAN,
-    EF_STATUS_MODIFIED,
-    EF_STATUS_ERROR,
-    EF_STATUS_UNKNOWN
-} EF_ArtifactStatus;
+    DC_STATUS_CLEAN,
+    DC_STATUS_MODIFIED,
+    DC_STATUS_ERROR,
+    DC_STATUS_UNKNOWN
+} DC_ArtifactStatus;
 
 /* -------------------------------------------------------------------------
- * EF_Artifact — a single tracked design file.
+ * DC_Artifact — a single tracked design file.
  *
  * Fields:
  *   path          — relative or absolute path to the file (NUL-terminated)
@@ -57,57 +57,57 @@ typedef enum {
  *   last_error    — human-readable error string; empty if no error
  *   last_modified — ISO-8601 timestamp of last modification
  *   generated_by  — tool or source that generated this file; empty if manual
- *   depends_on    — EF_Array of char[512] paths this artifact depends on;
+ *   depends_on    — DC_Array of char[512] paths this artifact depends on;
  *                   owned by this struct; may be NULL (no dependencies)
  * ---------------------------------------------------------------------- */
 typedef struct {
     char              path[512];
-    EF_ArtifactType   type;
-    EF_ArtifactStatus status;
+    DC_ArtifactType   type;
+    DC_ArtifactStatus status;
     char              last_error[1024];
     char              last_modified[64];
     char              generated_by[256];
-    EF_Array         *depends_on; /* EF_Array of char[512]; owned */
-} EF_Artifact;
+    DC_Array         *depends_on; /* DC_Array of char[512]; owned */
+} DC_Artifact;
 
 /* -------------------------------------------------------------------------
- * EF_Manifest — the top-level workspace model.
+ * DC_Manifest — the top-level workspace model.
  *
  * Fields:
  *   project_name  — human-readable project name
  *   project_root  — absolute path to the project root directory
- *   artifacts     — EF_Array of EF_Artifact (stored by value); owned
- *   active_errors — EF_Array of char[1024] error messages; owned
+ *   artifacts     — DC_Array of DC_Artifact (stored by value); owned
+ *   active_errors — DC_Array of char[1024] error messages; owned
  * ---------------------------------------------------------------------- */
 typedef struct {
     char      project_name[256];
     char      project_root[512];
-    EF_Array *artifacts;     /* EF_Array of EF_Artifact; owned */
-    EF_Array *active_errors; /* EF_Array of char[1024]; owned */
-} EF_Manifest;
+    DC_Array *artifacts;     /* DC_Array of DC_Artifact; owned */
+    DC_Array *active_errors; /* DC_Array of char[1024]; owned */
+} DC_Manifest;
 
 /* -------------------------------------------------------------------------
- * ef_manifest_new — create an empty manifest.
+ * dc_manifest_new — create an empty manifest.
  *
  * Parameters:
  *   project_name — display name for the project; copied in; must not be NULL
  *   root_path    — absolute path to project root; copied in; must not be NULL
  *
- * Returns: new EF_Manifest, or NULL on allocation failure.
- * Ownership: caller owns; free with ef_manifest_free().
+ * Returns: new DC_Manifest, or NULL on allocation failure.
+ * Ownership: caller owns; free with dc_manifest_free().
  * ---------------------------------------------------------------------- */
-EF_Manifest *ef_manifest_new(const char *project_name, const char *root_path);
+DC_Manifest *dc_manifest_new(const char *project_name, const char *root_path);
 
 /* -------------------------------------------------------------------------
- * ef_manifest_free — release all memory owned by manifest.
+ * dc_manifest_free — release all memory owned by manifest.
  *
  * Parameters:
  *   manifest — may be NULL (no-op)
  * ---------------------------------------------------------------------- */
-void ef_manifest_free(EF_Manifest *manifest);
+void dc_manifest_free(DC_Manifest *manifest);
 
 /* -------------------------------------------------------------------------
- * ef_manifest_add_artifact — copy artifact into the manifest's artifact list.
+ * dc_manifest_add_artifact — copy artifact into the manifest's artifact list.
  *
  * Parameters:
  *   m        — must not be NULL
@@ -118,22 +118,22 @@ void ef_manifest_free(EF_Manifest *manifest);
  *
  * Returns: 0 on success, -1 on allocation failure.
  * ---------------------------------------------------------------------- */
-int ef_manifest_add_artifact(EF_Manifest *m, EF_Artifact *artifact);
+int dc_manifest_add_artifact(DC_Manifest *m, DC_Artifact *artifact);
 
 /* -------------------------------------------------------------------------
- * ef_manifest_find_artifact — look up an artifact by its path.
+ * dc_manifest_find_artifact — look up an artifact by its path.
  *
  * Parameters:
  *   m    — must not be NULL
- *   path — NUL-terminated path string to match against EF_Artifact.path
+ *   path — NUL-terminated path string to match against DC_Artifact.path
  *
  * Returns: pointer into internal array (borrowed), or NULL if not found.
  * Ownership: borrowed; invalidated by any mutating operation on the manifest.
  * ---------------------------------------------------------------------- */
-EF_Artifact *ef_manifest_find_artifact(EF_Manifest *m, const char *path);
+DC_Artifact *dc_manifest_find_artifact(DC_Manifest *m, const char *path);
 
 /* -------------------------------------------------------------------------
- * ef_manifest_save — serialise the manifest to a JSON file.
+ * dc_manifest_save — serialise the manifest to a JSON file.
  *
  * Parameters:
  *   m    — must not be NULL
@@ -142,10 +142,10 @@ EF_Artifact *ef_manifest_find_artifact(EF_Manifest *m, const char *path);
  *
  * Returns: 0 on success, -1 on failure.
  * ---------------------------------------------------------------------- */
-int ef_manifest_save(EF_Manifest *m, const char *path, EF_Error *err);
+int dc_manifest_save(DC_Manifest *m, const char *path, DC_Error *err);
 
 /* -------------------------------------------------------------------------
- * ef_manifest_load — deserialise a manifest from a JSON file.
+ * dc_manifest_load — deserialise a manifest from a JSON file.
  *
  * TODO: Phase 1 implementation is a minimal stub that reads the project_name
  * and project_root fields.  Full round-trip deserialisation is deferred to
@@ -155,13 +155,13 @@ int ef_manifest_save(EF_Manifest *m, const char *path, EF_Error *err);
  *   path — JSON file path to read
  *   err  — populated on failure; may be NULL
  *
- * Returns: new EF_Manifest, or NULL on failure.
- * Ownership: caller owns; free with ef_manifest_free().
+ * Returns: new DC_Manifest, or NULL on failure.
+ * Ownership: caller owns; free with dc_manifest_free().
  * ---------------------------------------------------------------------- */
-EF_Manifest *ef_manifest_load(const char *path, EF_Error *err);
+DC_Manifest *dc_manifest_load(const char *path, DC_Error *err);
 
 /* -------------------------------------------------------------------------
- * ef_manifest_capture_context — serialise workspace state to JSON for LLM.
+ * dc_manifest_capture_context — serialise workspace state to JSON for LLM.
  *
  * The returned string is valid JSON containing:
  *   - project_name and project_root
@@ -180,10 +180,10 @@ EF_Manifest *ef_manifest_load(const char *path, EF_Error *err);
  * Returns: heap-allocated NUL-terminated JSON string, or NULL on OOM.
  * Ownership: caller must free().
  * ---------------------------------------------------------------------- */
-char *ef_manifest_capture_context(EF_Manifest *m);
+char *dc_manifest_capture_context(DC_Manifest *m);
 
 /* -------------------------------------------------------------------------
- * ef_manifest_export_context_to_file — write capture_context output to file.
+ * dc_manifest_export_context_to_file — write capture_context output to file.
  *
  * Parameters:
  *   m    — must not be NULL
@@ -192,19 +192,19 @@ char *ef_manifest_capture_context(EF_Manifest *m);
  *
  * Returns: 0 on success, -1 on failure.
  * ---------------------------------------------------------------------- */
-int ef_manifest_export_context_to_file(EF_Manifest *m, const char *path,
-                                        EF_Error *err);
+int dc_manifest_export_context_to_file(DC_Manifest *m, const char *path,
+                                        DC_Error *err);
 
 /* -------------------------------------------------------------------------
- * Helper — return string label for EF_ArtifactType.
+ * Helper — return string label for DC_ArtifactType.
  * Returns a static string literal; caller must not free.
  * ---------------------------------------------------------------------- */
-const char *ef_artifact_type_string(EF_ArtifactType type);
+const char *dc_artifact_type_string(DC_ArtifactType type);
 
 /* -------------------------------------------------------------------------
- * Helper — return string label for EF_ArtifactStatus.
+ * Helper — return string label for DC_ArtifactStatus.
  * Returns a static string literal; caller must not free.
  * ---------------------------------------------------------------------- */
-const char *ef_artifact_status_string(EF_ArtifactStatus status);
+const char *dc_artifact_status_string(DC_ArtifactStatus status);
 
-#endif /* EF_MANIFEST_H */
+#endif /* DC_MANIFEST_H */

@@ -1,20 +1,20 @@
-#ifndef EF_STRING_BUILDER_H
-#define EF_STRING_BUILDER_H
+#ifndef DC_STRING_BUILDER_H
+#define DC_STRING_BUILDER_H
 
 /*
  * string_builder.h — Dynamic string construction utility.
  *
- * EF_StringBuilder maintains a heap-allocated buffer that grows as needed.
+ * DC_StringBuilder maintains a heap-allocated buffer that grows as needed.
  * It always stores a NUL-terminated C string internally.
  *
  * Ownership:
- *   - EF_StringBuilder owns its internal buffer.
- *   - ef_sb_get() returns a borrowed pointer; do not free it; the pointer is
+ *   - DC_StringBuilder owns its internal buffer.
+ *   - dc_sb_get() returns a borrowed pointer; do not free it; the pointer is
  *     invalidated by any mutating operation.
- *   - ef_sb_take() transfers ownership of the buffer to the caller; the
+ *   - dc_sb_take() transfers ownership of the buffer to the caller; the
  *     caller must free() the returned pointer.  The builder is reset to an
  *     empty state afterwards.
- *   - ef_sb_free() releases both the internal buffer and the struct itself.
+ *   - dc_sb_free() releases both the internal buffer and the struct itself.
  *
  * Error return values: 0 = success, -1 = allocation failure or invalid arg.
  */
@@ -23,28 +23,28 @@
 #include <stdarg.h>
 
 /* -------------------------------------------------------------------------
- * EF_StringBuilder — opaque handle
+ * DC_StringBuilder — opaque handle
  * ---------------------------------------------------------------------- */
-typedef struct EF_StringBuilder EF_StringBuilder;
+typedef struct DC_StringBuilder DC_StringBuilder;
 
 /* -------------------------------------------------------------------------
- * ef_sb_new — allocate and initialise an empty StringBuilder.
+ * dc_sb_new — allocate and initialise an empty StringBuilder.
  *
- * Returns: new EF_StringBuilder, or NULL on allocation failure.
- * Ownership: caller owns; free with ef_sb_free() or ef_sb_take().
+ * Returns: new DC_StringBuilder, or NULL on allocation failure.
+ * Ownership: caller owns; free with dc_sb_free() or dc_sb_take().
  * ---------------------------------------------------------------------- */
-EF_StringBuilder *ef_sb_new(void);
+DC_StringBuilder *dc_sb_new(void);
 
 /* -------------------------------------------------------------------------
- * ef_sb_free — release all memory owned by sb, including sb itself.
+ * dc_sb_free — release all memory owned by sb, including sb itself.
  *
  * Parameters:
  *   sb — may be NULL (no-op)
  * ---------------------------------------------------------------------- */
-void ef_sb_free(EF_StringBuilder *sb);
+void dc_sb_free(DC_StringBuilder *sb);
 
 /* -------------------------------------------------------------------------
- * ef_sb_append — append a NUL-terminated string to sb.
+ * dc_sb_append — append a NUL-terminated string to sb.
  *
  * Parameters:
  *   sb  — must not be NULL
@@ -52,10 +52,10 @@ void ef_sb_free(EF_StringBuilder *sb);
  *
  * Returns: 0 on success, -1 on allocation failure.
  * ---------------------------------------------------------------------- */
-int ef_sb_append(EF_StringBuilder *sb, const char *str);
+int dc_sb_append(DC_StringBuilder *sb, const char *str);
 
 /* -------------------------------------------------------------------------
- * ef_sb_appendf — printf-style formatted append.
+ * dc_sb_appendf — printf-style formatted append.
  *
  * Parameters:
  *   sb  — must not be NULL
@@ -64,11 +64,11 @@ int ef_sb_append(EF_StringBuilder *sb, const char *str);
  *
  * Returns: 0 on success, -1 on allocation failure or format error.
  * ---------------------------------------------------------------------- */
-int ef_sb_appendf(EF_StringBuilder *sb, const char *fmt, ...)
+int dc_sb_appendf(DC_StringBuilder *sb, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 
 /* -------------------------------------------------------------------------
- * ef_sb_append_char — append a single character.
+ * dc_sb_append_char — append a single character.
  *
  * Parameters:
  *   sb — must not be NULL
@@ -76,35 +76,35 @@ int ef_sb_appendf(EF_StringBuilder *sb, const char *fmt, ...)
  *
  * Returns: 0 on success, -1 on allocation failure.
  * ---------------------------------------------------------------------- */
-int ef_sb_append_char(EF_StringBuilder *sb, char c);
+int dc_sb_append_char(DC_StringBuilder *sb, char c);
 
 /* -------------------------------------------------------------------------
- * ef_sb_get — return a borrowed pointer to the current string contents.
+ * dc_sb_get — return a borrowed pointer to the current string contents.
  *
  * Returns: NUL-terminated string; never NULL (returns "" for empty builder).
  * Ownership: borrowed; do not free; invalidated by any mutating operation.
  * ---------------------------------------------------------------------- */
-const char *ef_sb_get(EF_StringBuilder *sb);
+const char *dc_sb_get(DC_StringBuilder *sb);
 
 /* -------------------------------------------------------------------------
- * ef_sb_length — return the number of bytes in the current string (not
+ * dc_sb_length — return the number of bytes in the current string (not
  * counting the NUL terminator).
  *
  * Parameters:
  *   sb — must not be NULL
  * ---------------------------------------------------------------------- */
-size_t ef_sb_length(EF_StringBuilder *sb);
+size_t dc_sb_length(DC_StringBuilder *sb);
 
 /* -------------------------------------------------------------------------
- * ef_sb_clear — reset the builder to empty without freeing the buffer.
+ * dc_sb_clear — reset the builder to empty without freeing the buffer.
  *
  * Parameters:
  *   sb — must not be NULL
  * ---------------------------------------------------------------------- */
-void ef_sb_clear(EF_StringBuilder *sb);
+void dc_sb_clear(DC_StringBuilder *sb);
 
 /* -------------------------------------------------------------------------
- * ef_sb_take — transfer ownership of the internal buffer to the caller.
+ * dc_sb_take — transfer ownership of the internal buffer to the caller.
  *
  * The builder is reset to an empty state.  The caller must free() the
  * returned string.
@@ -115,6 +115,6 @@ void ef_sb_clear(EF_StringBuilder *sb);
  * Returns: heap-allocated NUL-terminated string; caller must free().
  *          Returns NULL on allocation failure during the internal reset.
  * ---------------------------------------------------------------------- */
-char *ef_sb_take(EF_StringBuilder *sb);
+char *dc_sb_take(DC_StringBuilder *sb);
 
-#endif /* EF_STRING_BUILDER_H */
+#endif /* DC_STRING_BUILDER_H */

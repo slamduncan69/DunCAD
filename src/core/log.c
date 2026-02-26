@@ -11,36 +11,36 @@
  * ---------------------------------------------------------------------- */
 static struct {
     FILE       *log_file;   /* JSON structured log; NULL if not configured */
-    EF_LogLevel min_level;
+    DC_LogLevel min_level;
     int         initialised;
-} g_log = { NULL, EF_LOG_DEBUG, 0 };
+} g_log = { NULL, DC_LOG_DEBUG, 0 };
 
 /* -------------------------------------------------------------------------
  * Internal helpers
  * ---------------------------------------------------------------------- */
 
 static const char *
-level_to_string(EF_LogLevel level)
+level_to_string(DC_LogLevel level)
 {
     switch (level) {
-        case EF_LOG_DEBUG: return "DEBUG";
-        case EF_LOG_INFO:  return "INFO";
-        case EF_LOG_WARN:  return "WARN";
-        case EF_LOG_ERROR: return "ERROR";
+        case DC_LOG_DEBUG: return "DEBUG";
+        case DC_LOG_INFO:  return "INFO";
+        case DC_LOG_WARN:  return "WARN";
+        case DC_LOG_ERROR: return "ERROR";
         default:           return "UNKNOWN";
     }
 }
 
 static const char *
-event_to_string(EF_LogEventType event)
+event_to_string(DC_LogEventType event)
 {
     switch (event) {
-        case EF_LOG_EVENT_APP:    return "APP";
-        case EF_LOG_EVENT_RENDER: return "RENDER";
-        case EF_LOG_EVENT_FILE:   return "FILE";
-        case EF_LOG_EVENT_BUILD:  return "BUILD";
-        case EF_LOG_EVENT_TOOL:   return "TOOL";
-        case EF_LOG_EVENT_LLM:    return "LLM";
+        case DC_LOG_EVENT_APP:    return "APP";
+        case DC_LOG_EVENT_RENDER: return "RENDER";
+        case DC_LOG_EVENT_FILE:   return "FILE";
+        case DC_LOG_EVENT_BUILD:  return "BUILD";
+        case DC_LOG_EVENT_TOOL:   return "TOOL";
+        case DC_LOG_EVENT_LLM:    return "LLM";
         default:                  return "UNKNOWN";
     }
 }
@@ -100,22 +100,22 @@ json_escape_string(char *dst, size_t dst_size, const char *src)
  * ---------------------------------------------------------------------- */
 
 void
-ef_log_init(const char *log_file_path)
+dc_log_init(const char *log_file_path)
 {
-    g_log.min_level   = EF_LOG_DEBUG;
+    g_log.min_level   = DC_LOG_DEBUG;
     g_log.initialised = 1;
 
     if (log_file_path) {
         g_log.log_file = fopen(log_file_path, "a");
         if (!g_log.log_file) {
-            fprintf(stderr, "[EF_LOG] WARNING: could not open log file: %s\n",
+            fprintf(stderr, "[DC_LOG] WARNING: could not open log file: %s\n",
                     log_file_path);
         }
     }
 }
 
 void
-ef_log_shutdown(void)
+dc_log_shutdown(void)
 {
     if (g_log.log_file) {
         fflush(g_log.log_file);
@@ -126,13 +126,13 @@ ef_log_shutdown(void)
 }
 
 void
-ef_log_set_level(EF_LogLevel min_level)
+dc_log_set_level(DC_LogLevel min_level)
 {
     g_log.min_level = min_level;
 }
 
 void
-ef_log(EF_LogLevel level, EF_LogEventType event, const char *fmt, ...)
+dc_log(DC_LogLevel level, DC_LogEventType event, const char *fmt, ...)
 {
     if (!g_log.initialised) return;
     if (level < g_log.min_level) return;

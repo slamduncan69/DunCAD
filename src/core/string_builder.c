@@ -8,9 +8,9 @@
  * Internal structure definition
  * ---------------------------------------------------------------------- */
 
-#define EF_SB_INITIAL_CAPACITY 64
+#define DC_SB_INITIAL_CAPACITY 64
 
-struct EF_StringBuilder {
+struct DC_StringBuilder {
     char  *buf;      /* heap-allocated buffer, always NUL-terminated */
     size_t length;   /* number of bytes currently stored (not counting NUL) */
     size_t capacity; /* total bytes allocated (includes NUL slot) */
@@ -21,7 +21,7 @@ struct EF_StringBuilder {
  * Returns 0 on success, -1 on allocation failure.
  * ---------------------------------------------------------------------- */
 static int
-sb_ensure_capacity(EF_StringBuilder *sb, size_t additional)
+sb_ensure_capacity(DC_StringBuilder *sb, size_t additional)
 {
     size_t needed = sb->length + additional + 1; /* +1 for NUL */
     if (needed <= sb->capacity) return 0;
@@ -39,15 +39,15 @@ sb_ensure_capacity(EF_StringBuilder *sb, size_t additional)
 }
 
 /* -------------------------------------------------------------------------
- * ef_sb_new
+ * dc_sb_new
  * ---------------------------------------------------------------------- */
-EF_StringBuilder *
-ef_sb_new(void)
+DC_StringBuilder *
+dc_sb_new(void)
 {
-    EF_StringBuilder *sb = malloc(sizeof(EF_StringBuilder));
+    DC_StringBuilder *sb = malloc(sizeof(DC_StringBuilder));
     if (!sb) return NULL;
 
-    sb->buf = malloc(EF_SB_INITIAL_CAPACITY);
+    sb->buf = malloc(DC_SB_INITIAL_CAPACITY);
     if (!sb->buf) {
         free(sb);
         return NULL;
@@ -55,16 +55,16 @@ ef_sb_new(void)
 
     sb->buf[0]  = '\0';
     sb->length   = 0;
-    sb->capacity = EF_SB_INITIAL_CAPACITY;
+    sb->capacity = DC_SB_INITIAL_CAPACITY;
 
     return sb;
 }
 
 /* -------------------------------------------------------------------------
- * ef_sb_free
+ * dc_sb_free
  * ---------------------------------------------------------------------- */
 void
-ef_sb_free(EF_StringBuilder *sb)
+dc_sb_free(DC_StringBuilder *sb)
 {
     if (!sb) return;
     free(sb->buf);
@@ -72,10 +72,10 @@ ef_sb_free(EF_StringBuilder *sb)
 }
 
 /* -------------------------------------------------------------------------
- * ef_sb_append
+ * dc_sb_append
  * ---------------------------------------------------------------------- */
 int
-ef_sb_append(EF_StringBuilder *sb, const char *str)
+dc_sb_append(DC_StringBuilder *sb, const char *str)
 {
     if (!sb) return -1;
     if (!str || str[0] == '\0') return 0;
@@ -90,10 +90,10 @@ ef_sb_append(EF_StringBuilder *sb, const char *str)
 }
 
 /* -------------------------------------------------------------------------
- * ef_sb_appendf
+ * dc_sb_appendf
  * ---------------------------------------------------------------------- */
 int
-ef_sb_appendf(EF_StringBuilder *sb, const char *fmt, ...)
+dc_sb_appendf(DC_StringBuilder *sb, const char *fmt, ...)
 {
     if (!sb || !fmt) return -1;
 
@@ -118,10 +118,10 @@ ef_sb_appendf(EF_StringBuilder *sb, const char *fmt, ...)
 }
 
 /* -------------------------------------------------------------------------
- * ef_sb_append_char
+ * dc_sb_append_char
  * ---------------------------------------------------------------------- */
 int
-ef_sb_append_char(EF_StringBuilder *sb, char c)
+dc_sb_append_char(DC_StringBuilder *sb, char c)
 {
     if (!sb) return -1;
     if (sb_ensure_capacity(sb, 1) != 0) return -1;
@@ -134,30 +134,30 @@ ef_sb_append_char(EF_StringBuilder *sb, char c)
 }
 
 /* -------------------------------------------------------------------------
- * ef_sb_get
+ * dc_sb_get
  * ---------------------------------------------------------------------- */
 const char *
-ef_sb_get(EF_StringBuilder *sb)
+dc_sb_get(DC_StringBuilder *sb)
 {
     if (!sb || !sb->buf) return "";
     return sb->buf;
 }
 
 /* -------------------------------------------------------------------------
- * ef_sb_length
+ * dc_sb_length
  * ---------------------------------------------------------------------- */
 size_t
-ef_sb_length(EF_StringBuilder *sb)
+dc_sb_length(DC_StringBuilder *sb)
 {
     if (!sb) return 0;
     return sb->length;
 }
 
 /* -------------------------------------------------------------------------
- * ef_sb_clear
+ * dc_sb_clear
  * ---------------------------------------------------------------------- */
 void
-ef_sb_clear(EF_StringBuilder *sb)
+dc_sb_clear(DC_StringBuilder *sb)
 {
     if (!sb) return;
     sb->length  = 0;
@@ -165,21 +165,21 @@ ef_sb_clear(EF_StringBuilder *sb)
 }
 
 /* -------------------------------------------------------------------------
- * ef_sb_take
+ * dc_sb_take
  * ---------------------------------------------------------------------- */
 char *
-ef_sb_take(EF_StringBuilder *sb)
+dc_sb_take(DC_StringBuilder *sb)
 {
     if (!sb) return NULL;
 
     char *result = sb->buf;
 
     /* Reset the builder with a fresh small buffer */
-    sb->buf = malloc(EF_SB_INITIAL_CAPACITY);
+    sb->buf = malloc(DC_SB_INITIAL_CAPACITY);
     if (sb->buf) {
         sb->buf[0]  = '\0';
         sb->length   = 0;
-        sb->capacity = EF_SB_INITIAL_CAPACITY;
+        sb->capacity = DC_SB_INITIAL_CAPACITY;
     } else {
         /* Allocation failed: leave builder in a consistent (empty) state */
         sb->buf      = NULL;

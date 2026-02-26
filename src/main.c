@@ -13,10 +13,10 @@ on_activate(GtkApplication *app, gpointer user_data)
 {
     (void)user_data;
 
-    GtkWidget *window = ef_app_window_create(app);
+    GtkWidget *window = dc_app_window_create(app);
     gtk_window_present(GTK_WINDOW(window));
 
-    ef_log(EF_LOG_INFO, EF_LOG_EVENT_APP, "ElectroForge IDE activated");
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "DunCAD activated");
 }
 
 static void
@@ -25,8 +25,8 @@ on_shutdown(GtkApplication *app, gpointer user_data)
     (void)app;
     (void)user_data;
 
-    ef_log(EF_LOG_INFO, EF_LOG_EVENT_APP, "ElectroForge IDE shutting down");
-    ef_log_shutdown();
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "DunCAD shutting down");
+    dc_log_shutdown();
 }
 
 /* -------------------------------------------------------------------------
@@ -35,12 +35,12 @@ on_shutdown(GtkApplication *app, gpointer user_data)
 int
 main(int argc, char **argv)
 {
-    /* Initialise structured logger — writes to electroforge.log in CWD */
-    ef_log_init("electroforge.log");
-    ef_log(EF_LOG_INFO, EF_LOG_EVENT_APP, "ElectroForge IDE starting up");
+    /* Initialise structured logger — writes to duncad.log in CWD */
+    dc_log_init("duncad.log");
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "DunCAD starting up");
 
     GtkApplication *app = gtk_application_new(
-        "io.electroforge.ide",
+        "io.duncad.ide",
         G_APPLICATION_DEFAULT_FLAGS
     );
 

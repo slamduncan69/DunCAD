@@ -1,5 +1,5 @@
 /*
- * test_array.c — Tests for EF_Array.
+ * test_array.c — Tests for DC_Array.
  *
  * Uses a simple assertion framework: each test is a function that returns
  * 0 on pass or 1 on failure.  main() collects pass/fail counts and exits
@@ -45,17 +45,17 @@ static int g_fail = 0;
 static int
 test_new_and_free(void)
 {
-    EF_Array *arr = ef_array_new(sizeof(int));
+    DC_Array *arr = dc_array_new(sizeof(int));
     ASSERT(arr != NULL);
-    ASSERT(ef_array_length(arr) == 0);
-    ef_array_free(arr);
+    ASSERT(dc_array_length(arr) == 0);
+    dc_array_free(arr);
     return 0;
 }
 
 static int
 test_new_zero_element_size_returns_null(void)
 {
-    EF_Array *arr = ef_array_new(0);
+    DC_Array *arr = dc_array_new(0);
     ASSERT(arr == NULL);
     return 0;
 }
@@ -63,30 +63,30 @@ test_new_zero_element_size_returns_null(void)
 static int
 test_free_null_is_safe(void)
 {
-    ef_array_free(NULL);
+    dc_array_free(NULL);
     return 0;
 }
 
 static int
 test_push_and_get_ints(void)
 {
-    EF_Array *arr = ef_array_new(sizeof(int));
+    DC_Array *arr = dc_array_new(sizeof(int));
     ASSERT(arr != NULL);
 
     for (int i = 0; i < 10; i++) {
-        int rc = ef_array_push(arr, &i);
+        int rc = dc_array_push(arr, &i);
         ASSERT(rc == 0);
     }
 
-    ASSERT(ef_array_length(arr) == 10);
+    ASSERT(dc_array_length(arr) == 10);
 
     for (int i = 0; i < 10; i++) {
-        int *p = ef_array_get(arr, (size_t)i);
+        int *p = dc_array_get(arr, (size_t)i);
         ASSERT(p != NULL);
         ASSERT(*p == i);
     }
 
-    ef_array_free(arr);
+    dc_array_free(arr);
     return 0;
 }
 
@@ -94,132 +94,132 @@ static int
 test_push_triggers_realloc(void)
 {
     /* Push well past the initial capacity of 8 */
-    EF_Array *arr = ef_array_new(sizeof(int));
+    DC_Array *arr = dc_array_new(sizeof(int));
     ASSERT(arr != NULL);
 
     for (int i = 0; i < 100; i++) {
-        ASSERT(ef_array_push(arr, &i) == 0);
+        ASSERT(dc_array_push(arr, &i) == 0);
     }
 
-    ASSERT(ef_array_length(arr) == 100);
+    ASSERT(dc_array_length(arr) == 100);
     for (int i = 0; i < 100; i++) {
-        int *p = ef_array_get(arr, (size_t)i);
+        int *p = dc_array_get(arr, (size_t)i);
         ASSERT(p != NULL && *p == i);
     }
 
-    ef_array_free(arr);
+    dc_array_free(arr);
     return 0;
 }
 
 static int
 test_get_out_of_bounds_returns_null(void)
 {
-    EF_Array *arr = ef_array_new(sizeof(int));
+    DC_Array *arr = dc_array_new(sizeof(int));
     ASSERT(arr != NULL);
 
     int val = 42;
-    ef_array_push(arr, &val);
+    dc_array_push(arr, &val);
 
-    ASSERT(ef_array_get(arr, 1) == NULL);
-    ASSERT(ef_array_get(arr, 100) == NULL);
+    ASSERT(dc_array_get(arr, 1) == NULL);
+    ASSERT(dc_array_get(arr, 100) == NULL);
 
-    ef_array_free(arr);
+    dc_array_free(arr);
     return 0;
 }
 
 static int
 test_remove_middle(void)
 {
-    EF_Array *arr = ef_array_new(sizeof(int));
+    DC_Array *arr = dc_array_new(sizeof(int));
     ASSERT(arr != NULL);
 
-    for (int i = 0; i < 5; i++) ef_array_push(arr, &i);
+    for (int i = 0; i < 5; i++) dc_array_push(arr, &i);
     /* Array: [0, 1, 2, 3, 4] */
 
-    ASSERT(ef_array_remove(arr, 2) == 0);
+    ASSERT(dc_array_remove(arr, 2) == 0);
     /* Array: [0, 1, 3, 4] */
 
-    ASSERT(ef_array_length(arr) == 4);
-    ASSERT(*(int *)ef_array_get(arr, 0) == 0);
-    ASSERT(*(int *)ef_array_get(arr, 1) == 1);
-    ASSERT(*(int *)ef_array_get(arr, 2) == 3);
-    ASSERT(*(int *)ef_array_get(arr, 3) == 4);
+    ASSERT(dc_array_length(arr) == 4);
+    ASSERT(*(int *)dc_array_get(arr, 0) == 0);
+    ASSERT(*(int *)dc_array_get(arr, 1) == 1);
+    ASSERT(*(int *)dc_array_get(arr, 2) == 3);
+    ASSERT(*(int *)dc_array_get(arr, 3) == 4);
 
-    ef_array_free(arr);
+    dc_array_free(arr);
     return 0;
 }
 
 static int
 test_remove_first(void)
 {
-    EF_Array *arr = ef_array_new(sizeof(int));
+    DC_Array *arr = dc_array_new(sizeof(int));
     ASSERT(arr != NULL);
 
-    for (int i = 0; i < 3; i++) ef_array_push(arr, &i);
+    for (int i = 0; i < 3; i++) dc_array_push(arr, &i);
 
-    ASSERT(ef_array_remove(arr, 0) == 0);
+    ASSERT(dc_array_remove(arr, 0) == 0);
 
-    ASSERT(ef_array_length(arr) == 2);
-    ASSERT(*(int *)ef_array_get(arr, 0) == 1);
-    ASSERT(*(int *)ef_array_get(arr, 1) == 2);
+    ASSERT(dc_array_length(arr) == 2);
+    ASSERT(*(int *)dc_array_get(arr, 0) == 1);
+    ASSERT(*(int *)dc_array_get(arr, 1) == 2);
 
-    ef_array_free(arr);
+    dc_array_free(arr);
     return 0;
 }
 
 static int
 test_remove_last(void)
 {
-    EF_Array *arr = ef_array_new(sizeof(int));
+    DC_Array *arr = dc_array_new(sizeof(int));
     ASSERT(arr != NULL);
 
-    for (int i = 0; i < 3; i++) ef_array_push(arr, &i);
+    for (int i = 0; i < 3; i++) dc_array_push(arr, &i);
 
-    ASSERT(ef_array_remove(arr, 2) == 0);
+    ASSERT(dc_array_remove(arr, 2) == 0);
 
-    ASSERT(ef_array_length(arr) == 2);
-    ASSERT(*(int *)ef_array_get(arr, 0) == 0);
-    ASSERT(*(int *)ef_array_get(arr, 1) == 1);
+    ASSERT(dc_array_length(arr) == 2);
+    ASSERT(*(int *)dc_array_get(arr, 0) == 0);
+    ASSERT(*(int *)dc_array_get(arr, 1) == 1);
 
-    ef_array_free(arr);
+    dc_array_free(arr);
     return 0;
 }
 
 static int
 test_remove_out_of_bounds(void)
 {
-    EF_Array *arr = ef_array_new(sizeof(int));
+    DC_Array *arr = dc_array_new(sizeof(int));
     ASSERT(arr != NULL);
 
     int val = 1;
-    ef_array_push(arr, &val);
+    dc_array_push(arr, &val);
 
-    ASSERT(ef_array_remove(arr, 5) == -1);
-    ASSERT(ef_array_length(arr) == 1);
+    ASSERT(dc_array_remove(arr, 5) == -1);
+    ASSERT(dc_array_length(arr) == 1);
 
-    ef_array_free(arr);
+    dc_array_free(arr);
     return 0;
 }
 
 static int
 test_clear(void)
 {
-    EF_Array *arr = ef_array_new(sizeof(int));
+    DC_Array *arr = dc_array_new(sizeof(int));
     ASSERT(arr != NULL);
 
-    for (int i = 0; i < 5; i++) ef_array_push(arr, &i);
-    ASSERT(ef_array_length(arr) == 5);
+    for (int i = 0; i < 5; i++) dc_array_push(arr, &i);
+    ASSERT(dc_array_length(arr) == 5);
 
-    ef_array_clear(arr);
-    ASSERT(ef_array_length(arr) == 0);
+    dc_array_clear(arr);
+    ASSERT(dc_array_length(arr) == 0);
 
     /* Can push after clear */
     int x = 99;
-    ASSERT(ef_array_push(arr, &x) == 0);
-    ASSERT(ef_array_length(arr) == 1);
-    ASSERT(*(int *)ef_array_get(arr, 0) == 99);
+    ASSERT(dc_array_push(arr, &x) == 0);
+    ASSERT(dc_array_length(arr) == 1);
+    ASSERT(*(int *)dc_array_get(arr, 0) == 99);
 
-    ef_array_free(arr);
+    dc_array_free(arr);
     return 0;
 }
 
@@ -228,40 +228,40 @@ test_struct_elements(void)
 {
     typedef struct { int x; float y; char label[8]; } Point;
 
-    EF_Array *arr = ef_array_new(sizeof(Point));
+    DC_Array *arr = dc_array_new(sizeof(Point));
     ASSERT(arr != NULL);
 
     Point p1 = { 1, 2.5f, "alpha" };
     Point p2 = { 3, 4.5f, "beta"  };
 
-    ASSERT(ef_array_push(arr, &p1) == 0);
-    ASSERT(ef_array_push(arr, &p2) == 0);
+    ASSERT(dc_array_push(arr, &p1) == 0);
+    ASSERT(dc_array_push(arr, &p2) == 0);
 
-    Point *r1 = ef_array_get(arr, 0);
+    Point *r1 = dc_array_get(arr, 0);
     ASSERT(r1 != NULL);
     ASSERT(r1->x == 1);
     ASSERT(r1->y == 2.5f);
     ASSERT(strcmp(r1->label, "alpha") == 0);
 
-    Point *r2 = ef_array_get(arr, 1);
+    Point *r2 = dc_array_get(arr, 1);
     ASSERT(r2 != NULL);
     ASSERT(r2->x == 3);
     ASSERT(strcmp(r2->label, "beta") == 0);
 
-    ef_array_free(arr);
+    dc_array_free(arr);
     return 0;
 }
 
 static int
 test_push_null_element_returns_error(void)
 {
-    EF_Array *arr = ef_array_new(sizeof(int));
+    DC_Array *arr = dc_array_new(sizeof(int));
     ASSERT(arr != NULL);
 
-    ASSERT(ef_array_push(arr, NULL) == -1);
-    ASSERT(ef_array_length(arr) == 0);
+    ASSERT(dc_array_push(arr, NULL) == -1);
+    ASSERT(dc_array_length(arr) == 0);
 
-    ef_array_free(arr);
+    dc_array_free(arr);
     return 0;
 }
 

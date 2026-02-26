@@ -25,26 +25,26 @@ iso8601_now_manifest(char *buf, size_t buf_size)
  * Returns 0 on success, -1 on failure.
  */
 static int
-json_escape_into_sb(EF_StringBuilder *sb, const char *str)
+json_escape_into_sb(DC_StringBuilder *sb, const char *str)
 {
-    if (!str) return ef_sb_append(sb, "");
+    if (!str) return dc_sb_append(sb, "");
     const char *p = str;
     while (*p) {
         unsigned char c = (unsigned char)*p;
         if (c == '"') {
-            if (ef_sb_append(sb, "\\\"") != 0) return -1;
+            if (dc_sb_append(sb, "\\\"") != 0) return -1;
         } else if (c == '\\') {
-            if (ef_sb_append(sb, "\\\\") != 0) return -1;
+            if (dc_sb_append(sb, "\\\\") != 0) return -1;
         } else if (c == '\n') {
-            if (ef_sb_append(sb, "\\n") != 0) return -1;
+            if (dc_sb_append(sb, "\\n") != 0) return -1;
         } else if (c == '\r') {
-            if (ef_sb_append(sb, "\\r") != 0) return -1;
+            if (dc_sb_append(sb, "\\r") != 0) return -1;
         } else if (c == '\t') {
-            if (ef_sb_append(sb, "\\t") != 0) return -1;
+            if (dc_sb_append(sb, "\\t") != 0) return -1;
         } else if (c < 0x20) {
-            if (ef_sb_appendf(sb, "\\u%04x", c) != 0) return -1;
+            if (dc_sb_appendf(sb, "\\u%04x", c) != 0) return -1;
         } else {
-            if (ef_sb_append_char(sb, (char)c) != 0) return -1;
+            if (dc_sb_append_char(sb, (char)c) != 0) return -1;
         }
         p++;
     }
@@ -56,55 +56,55 @@ json_escape_into_sb(EF_StringBuilder *sb, const char *str)
  * ---------------------------------------------------------------------- */
 
 const char *
-ef_artifact_type_string(EF_ArtifactType type)
+dc_artifact_type_string(DC_ArtifactType type)
 {
     switch (type) {
-        case EF_ARTIFACT_SCAD:            return "SCAD";
-        case EF_ARTIFACT_SCAD_GENERATED:  return "SCAD_GENERATED";
-        case EF_ARTIFACT_KICAD_PCB:       return "KICAD_PCB";
-        case EF_ARTIFACT_KICAD_SCH:       return "KICAD_SCH";
-        case EF_ARTIFACT_STEP:            return "STEP";
-        case EF_ARTIFACT_STL:             return "STL";
-        case EF_ARTIFACT_UNKNOWN:         return "UNKNOWN";
+        case DC_ARTIFACT_SCAD:            return "SCAD";
+        case DC_ARTIFACT_SCAD_GENERATED:  return "SCAD_GENERATED";
+        case DC_ARTIFACT_KICAD_PCB:       return "KICAD_PCB";
+        case DC_ARTIFACT_KICAD_SCH:       return "KICAD_SCH";
+        case DC_ARTIFACT_STEP:            return "STEP";
+        case DC_ARTIFACT_STL:             return "STL";
+        case DC_ARTIFACT_UNKNOWN:         return "UNKNOWN";
         default:                          return "UNKNOWN";
     }
 }
 
 const char *
-ef_artifact_status_string(EF_ArtifactStatus status)
+dc_artifact_status_string(DC_ArtifactStatus status)
 {
     switch (status) {
-        case EF_STATUS_CLEAN:    return "CLEAN";
-        case EF_STATUS_MODIFIED: return "MODIFIED";
-        case EF_STATUS_ERROR:    return "ERROR";
-        case EF_STATUS_UNKNOWN:  return "UNKNOWN";
+        case DC_STATUS_CLEAN:    return "CLEAN";
+        case DC_STATUS_MODIFIED: return "MODIFIED";
+        case DC_STATUS_ERROR:    return "ERROR";
+        case DC_STATUS_UNKNOWN:  return "UNKNOWN";
         default:                 return "UNKNOWN";
     }
 }
 
 /* -------------------------------------------------------------------------
- * ef_manifest_new
+ * dc_manifest_new
  * ---------------------------------------------------------------------- */
-EF_Manifest *
-ef_manifest_new(const char *project_name, const char *root_path)
+DC_Manifest *
+dc_manifest_new(const char *project_name, const char *root_path)
 {
     if (!project_name || !root_path) return NULL;
 
-    EF_Manifest *m = calloc(1, sizeof(EF_Manifest));
+    DC_Manifest *m = calloc(1, sizeof(DC_Manifest));
     if (!m) return NULL;
 
     strncpy(m->project_name, project_name, sizeof(m->project_name) - 1);
     strncpy(m->project_root, root_path,    sizeof(m->project_root) - 1);
 
-    m->artifacts = ef_array_new(sizeof(EF_Artifact));
+    m->artifacts = dc_array_new(sizeof(DC_Artifact));
     if (!m->artifacts) {
         free(m);
         return NULL;
     }
 
-    m->active_errors = ef_array_new(sizeof(char[1024]));
+    m->active_errors = dc_array_new(sizeof(char[1024]));
     if (!m->active_errors) {
-        ef_array_free(m->artifacts);
+        dc_array_free(m->artifacts);
         free(m);
         return NULL;
     }
@@ -113,49 +113,49 @@ ef_manifest_new(const char *project_name, const char *root_path)
 }
 
 /* -------------------------------------------------------------------------
- * ef_manifest_free
+ * dc_manifest_free
  * ---------------------------------------------------------------------- */
 void
-ef_manifest_free(EF_Manifest *manifest)
+dc_manifest_free(DC_Manifest *manifest)
 {
     if (!manifest) return;
 
     /* Free each artifact's depends_on array */
-    size_t n = ef_array_length(manifest->artifacts);
+    size_t n = dc_array_length(manifest->artifacts);
     for (size_t i = 0; i < n; i++) {
-        EF_Artifact *a = ef_array_get(manifest->artifacts, i);
+        DC_Artifact *a = dc_array_get(manifest->artifacts, i);
         if (a && a->depends_on) {
-            ef_array_free(a->depends_on);
+            dc_array_free(a->depends_on);
             a->depends_on = NULL;
         }
     }
 
-    ef_array_free(manifest->artifacts);
-    ef_array_free(manifest->active_errors);
+    dc_array_free(manifest->artifacts);
+    dc_array_free(manifest->active_errors);
     free(manifest);
 }
 
 /* -------------------------------------------------------------------------
- * ef_manifest_add_artifact
+ * dc_manifest_add_artifact
  * ---------------------------------------------------------------------- */
 int
-ef_manifest_add_artifact(EF_Manifest *m, EF_Artifact *artifact)
+dc_manifest_add_artifact(DC_Manifest *m, DC_Artifact *artifact)
 {
     if (!m || !artifact) return -1;
-    return ef_array_push(m->artifacts, artifact);
+    return dc_array_push(m->artifacts, artifact);
 }
 
 /* -------------------------------------------------------------------------
- * ef_manifest_find_artifact
+ * dc_manifest_find_artifact
  * ---------------------------------------------------------------------- */
-EF_Artifact *
-ef_manifest_find_artifact(EF_Manifest *m, const char *path)
+DC_Artifact *
+dc_manifest_find_artifact(DC_Manifest *m, const char *path)
 {
     if (!m || !path) return NULL;
 
-    size_t n = ef_array_length(m->artifacts);
+    size_t n = dc_array_length(m->artifacts);
     for (size_t i = 0; i < n; i++) {
-        EF_Artifact *a = ef_array_get(m->artifacts, i);
+        DC_Artifact *a = dc_array_get(m->artifacts, i);
         if (a && strcmp(a->path, path) == 0) {
             return a;
         }
@@ -164,25 +164,25 @@ ef_manifest_find_artifact(EF_Manifest *m, const char *path)
 }
 
 /* -------------------------------------------------------------------------
- * ef_manifest_save — write manifest as JSON
+ * dc_manifest_save — write manifest as JSON
  * ---------------------------------------------------------------------- */
 int
-ef_manifest_save(EF_Manifest *m, const char *path, EF_Error *err)
+dc_manifest_save(DC_Manifest *m, const char *path, DC_Error *err)
 {
     if (!m || !path) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_INVALID_ARG, "NULL argument");
+        if (err) DC_SET_ERROR(err, DC_ERROR_INVALID_ARG, "NULL argument");
         return -1;
     }
 
-    char *json = ef_manifest_capture_context(m);
+    char *json = dc_manifest_capture_context(m);
     if (!json) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_MEMORY, "context capture OOM");
+        if (err) DC_SET_ERROR(err, DC_ERROR_MEMORY, "context capture OOM");
         return -1;
     }
 
     FILE *f = fopen(path, "w");
     if (!f) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_IO, "cannot open: %s", path);
+        if (err) DC_SET_ERROR(err, DC_ERROR_IO, "cannot open: %s", path);
         free(json);
         return -1;
     }
@@ -192,14 +192,14 @@ ef_manifest_save(EF_Manifest *m, const char *path, EF_Error *err)
     free(json);
 
     if (!ok) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_IO, "write failed: %s", path);
+        if (err) DC_SET_ERROR(err, DC_ERROR_IO, "write failed: %s", path);
         return -1;
     }
     return 0;
 }
 
 /* -------------------------------------------------------------------------
- * ef_manifest_load — minimal stub (Phase 1)
+ * dc_manifest_load — minimal stub (Phase 1)
  *
  * TODO: Full round-trip JSON deserialisation is deferred to Phase 2 once a
  * JSON parser dependency is chosen.  For now we open the file to verify it
@@ -207,17 +207,17 @@ ef_manifest_save(EF_Manifest *m, const char *path, EF_Error *err)
  * via a simple string scan.  This satisfies test coverage requirements while
  * flagging the incompleteness.
  * ---------------------------------------------------------------------- */
-EF_Manifest *
-ef_manifest_load(const char *path, EF_Error *err)
+DC_Manifest *
+dc_manifest_load(const char *path, DC_Error *err)
 {
     if (!path) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_INVALID_ARG, "NULL path");
+        if (err) DC_SET_ERROR(err, DC_ERROR_INVALID_ARG, "NULL path");
         return NULL;
     }
 
     FILE *f = fopen(path, "r");
     if (!f) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_IO, "cannot open: %s", path);
+        if (err) DC_SET_ERROR(err, DC_ERROR_IO, "cannot open: %s", path);
         return NULL;
     }
 
@@ -228,14 +228,14 @@ ef_manifest_load(const char *path, EF_Error *err)
 
     if (file_size <= 0) {
         fclose(f);
-        if (err) EF_SET_ERROR(err, EF_ERROR_PARSE, "empty file: %s", path);
+        if (err) DC_SET_ERROR(err, DC_ERROR_PARSE, "empty file: %s", path);
         return NULL;
     }
 
     char *buf = malloc((size_t)file_size + 1);
     if (!buf) {
         fclose(f);
-        if (err) EF_SET_ERROR(err, EF_ERROR_MEMORY, "OOM reading file");
+        if (err) DC_SET_ERROR(err, DC_ERROR_MEMORY, "OOM reading file");
         return NULL;
     }
 
@@ -276,48 +276,48 @@ ef_manifest_load(const char *path, EF_Error *err)
 
     free(buf);
 
-    EF_Manifest *loaded = ef_manifest_new(project_name, project_root);
+    DC_Manifest *loaded = dc_manifest_new(project_name, project_root);
     if (!loaded) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_MEMORY, "OOM creating manifest");
+        if (err) DC_SET_ERROR(err, DC_ERROR_MEMORY, "OOM creating manifest");
     }
     return loaded;
 }
 
 /* -------------------------------------------------------------------------
- * ef_manifest_capture_context — serialise workspace state to JSON
+ * dc_manifest_capture_context — serialise workspace state to JSON
  * ---------------------------------------------------------------------- */
 char *
-ef_manifest_capture_context(EF_Manifest *m)
+dc_manifest_capture_context(DC_Manifest *m)
 {
     if (!m) return NULL;
 
-    EF_StringBuilder *sb = ef_sb_new();
+    DC_StringBuilder *sb = dc_sb_new();
     if (!sb) return NULL;
 
     char ts[32];
     iso8601_now_manifest(ts, sizeof(ts));
 
     /* Compute summary statistics */
-    size_t total        = ef_array_length(m->artifacts);
+    size_t total        = dc_array_length(m->artifacts);
     size_t n_clean      = 0;
     size_t n_modified   = 0;
     size_t n_error      = 0;
     size_t n_unknown    = 0;
-    size_t n_errs       = ef_array_length(m->active_errors);
+    size_t n_errs       = dc_array_length(m->active_errors);
 
     for (size_t i = 0; i < total; i++) {
-        EF_Artifact *a = ef_array_get(m->artifacts, i);
+        DC_Artifact *a = dc_array_get(m->artifacts, i);
         if (!a) continue;
         switch (a->status) {
-            case EF_STATUS_CLEAN:    n_clean++;    break;
-            case EF_STATUS_MODIFIED: n_modified++; break;
-            case EF_STATUS_ERROR:    n_error++;    break;
+            case DC_STATUS_CLEAN:    n_clean++;    break;
+            case DC_STATUS_MODIFIED: n_modified++; break;
+            case DC_STATUS_ERROR:    n_error++;    break;
             default:                 n_unknown++;  break;
         }
     }
 
-#define SB_APPEND(str)        if (ef_sb_append(sb, (str))       != 0) goto oom
-#define SB_APPENDF(fmt, ...)  if (ef_sb_appendf(sb, (fmt), ##__VA_ARGS__) != 0) goto oom
+#define SB_APPEND(str)        if (dc_sb_append(sb, (str))       != 0) goto oom
+#define SB_APPENDF(fmt, ...)  if (dc_sb_appendf(sb, (fmt), ##__VA_ARGS__) != 0) goto oom
 #define SB_ESCAPE(str)        if (json_escape_into_sb(sb, (str)) != 0) goto oom
 
     SB_APPEND("{\n");
@@ -328,13 +328,13 @@ ef_manifest_capture_context(EF_Manifest *m)
     /* Artifacts array */
     SB_APPEND("  \"artifacts\": [\n");
     for (size_t i = 0; i < total; i++) {
-        EF_Artifact *a = ef_array_get(m->artifacts, i);
+        DC_Artifact *a = dc_array_get(m->artifacts, i);
         if (!a) continue;
 
         SB_APPEND("    {\n");
         SB_APPEND("      \"path\": \"");          SB_ESCAPE(a->path);                            SB_APPEND("\",\n");
-        SB_APPEND("      \"type\": \"");           SB_APPEND(ef_artifact_type_string(a->type));   SB_APPEND("\",\n");
-        SB_APPEND("      \"status\": \"");         SB_APPEND(ef_artifact_status_string(a->status)); SB_APPEND("\",\n");
+        SB_APPEND("      \"type\": \"");           SB_APPEND(dc_artifact_type_string(a->type));   SB_APPEND("\",\n");
+        SB_APPEND("      \"status\": \"");         SB_APPEND(dc_artifact_status_string(a->status)); SB_APPEND("\",\n");
         SB_APPEND("      \"last_error\": \"");     SB_ESCAPE(a->last_error);                      SB_APPEND("\",\n");
         SB_APPEND("      \"last_modified\": \"");  SB_ESCAPE(a->last_modified);                   SB_APPEND("\",\n");
         SB_APPEND("      \"generated_by\": \"");   SB_ESCAPE(a->generated_by);                    SB_APPEND("\",\n");
@@ -342,9 +342,9 @@ ef_manifest_capture_context(EF_Manifest *m)
         /* depends_on sub-array */
         SB_APPEND("      \"depends_on\": [");
         if (a->depends_on) {
-            size_t nd = ef_array_length(a->depends_on);
+            size_t nd = dc_array_length(a->depends_on);
             for (size_t j = 0; j < nd; j++) {
-                char *dep = ef_array_get(a->depends_on, j);
+                char *dep = dc_array_get(a->depends_on, j);
                 SB_APPEND("\"");
                 if (dep) { SB_ESCAPE(dep); }
                 SB_APPEND("\"");
@@ -362,7 +362,7 @@ ef_manifest_capture_context(EF_Manifest *m)
     /* Active errors array */
     SB_APPEND("  \"active_errors\": [\n");
     for (size_t i = 0; i < n_errs; i++) {
-        char *e = ef_array_get(m->active_errors, i);
+        char *e = dc_array_get(m->active_errors, i);
         SB_APPEND("    \"");
         if (e) { SB_ESCAPE(e); }
         SB_APPEND("\"");
@@ -386,37 +386,37 @@ ef_manifest_capture_context(EF_Manifest *m)
 #undef SB_APPENDF
 #undef SB_ESCAPE
 
-    /* ef_sb_take transfers the buffer; we must still free the empty builder struct */
-    char *result = ef_sb_take(sb);
-    ef_sb_free(sb);
+    /* dc_sb_take transfers the buffer; we must still free the empty builder struct */
+    char *result = dc_sb_take(sb);
+    dc_sb_free(sb);
     return result;
 
 oom:
-    ef_sb_free(sb);
+    dc_sb_free(sb);
     return NULL;
 }
 
 /* -------------------------------------------------------------------------
- * ef_manifest_export_context_to_file
+ * dc_manifest_export_context_to_file
  * ---------------------------------------------------------------------- */
 int
-ef_manifest_export_context_to_file(EF_Manifest *m, const char *path,
-                                    EF_Error *err)
+dc_manifest_export_context_to_file(DC_Manifest *m, const char *path,
+                                    DC_Error *err)
 {
     if (!m || !path) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_INVALID_ARG, "NULL argument");
+        if (err) DC_SET_ERROR(err, DC_ERROR_INVALID_ARG, "NULL argument");
         return -1;
     }
 
-    char *json = ef_manifest_capture_context(m);
+    char *json = dc_manifest_capture_context(m);
     if (!json) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_MEMORY, "context capture OOM");
+        if (err) DC_SET_ERROR(err, DC_ERROR_MEMORY, "context capture OOM");
         return -1;
     }
 
     FILE *f = fopen(path, "w");
     if (!f) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_IO, "cannot open: %s", path);
+        if (err) DC_SET_ERROR(err, DC_ERROR_IO, "cannot open: %s", path);
         free(json);
         return -1;
     }
@@ -426,10 +426,10 @@ ef_manifest_export_context_to_file(EF_Manifest *m, const char *path,
     free(json);
 
     if (!ok) {
-        if (err) EF_SET_ERROR(err, EF_ERROR_IO, "write failed: %s", path);
+        if (err) DC_SET_ERROR(err, DC_ERROR_IO, "write failed: %s", path);
         return -1;
     }
 
-    ef_log(EF_LOG_INFO, EF_LOG_EVENT_LLM, "context exported to: %s", path);
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_LLM, "context exported to: %s", path);
     return 0;
 }

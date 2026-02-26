@@ -1,4 +1,4 @@
-# ElectroForge IDE — Architecture
+# DunCAD — Architecture
 
 ## Layer Structure
 
@@ -50,16 +50,16 @@ has no knowledge of GTK, Cairo, or any domain module.
 
 | Prefix     | Scope                                   |
 |------------|-----------------------------------------|
-| `ef_`      | All public identifiers (functions, types, enums) |
-| `EF_`      | Macros and enum values                  |
+| `dc_`      | All public identifiers (functions, types, enums) |
+| `DC_`      | Macros and enum values                  |
 | `g_log`    | The single permitted global (the logger singleton) |
 
 ### Types
 
-- Structs are `typedef`-named: `EF_Array`, `EF_Manifest`, `EF_Error`.
-- Enums are `typedef`-named: `EF_ErrorCode`, `EF_LogLevel`.
+- Structs are `typedef`-named: `DC_Array`, `DC_Manifest`, `DC_Error`.
+- Enums are `typedef`-named: `DC_ErrorCode`, `DC_LogLevel`.
 - Opaque types declare the struct in the `.c` file and expose only a typedef
-  in the `.h` file (see `EF_Array`, `EF_StringBuilder`).
+  in the `.h` file (see `DC_Array`, `DC_StringBuilder`).
 
 ### Files
 
@@ -70,20 +70,20 @@ has no knowledge of GTK, Cairo, or any domain module.
 ### Functions
 
 ```
-ef_<module>_<verb>[_<noun>]
+dc_<module>_<verb>[_<noun>]
 
 Examples:
-  ef_array_push
-  ef_sb_appendf
-  ef_manifest_capture_context
-  ef_log_set_level
+  dc_array_push
+  dc_sb_appendf
+  dc_manifest_capture_context
+  dc_log_set_level
 ```
 
 ---
 
 ## Ownership Model
 
-ElectroForge uses a **single-owner model** with explicit transfer semantics.
+DunCAD uses a **single-owner model** with explicit transfer semantics.
 There is no reference counting or garbage collection.
 
 ### Rules
@@ -102,17 +102,17 @@ There is no reference counting or garbage collection.
 
 | Function | Caller's responsibility |
 |---|---|
-| `ef_array_new()` | Call `ef_array_free()` when done |
-| `ef_array_get()` | **Do not free**; borrowed pointer invalidated by mutations |
-| `ef_sb_take()` | Call `free()` on returned string; builder is reset |
-| `ef_manifest_add_artifact()` | If `artifact->depends_on != NULL`, the manifest takes ownership |
-| `ef_manifest_capture_context()` | Call `free()` on returned string |
-| `ef_manifest_load()` | Call `ef_manifest_free()` on returned manifest |
+| `dc_array_new()` | Call `dc_array_free()` when done |
+| `dc_array_get()` | **Do not free**; borrowed pointer invalidated by mutations |
+| `dc_sb_take()` | Call `free()` on returned string; builder is reset |
+| `dc_manifest_add_artifact()` | If `artifact->depends_on != NULL`, the manifest takes ownership |
+| `dc_manifest_capture_context()` | Call `free()` on returned string |
+| `dc_manifest_load()` | Call `dc_manifest_free()` on returned manifest |
 
 ### The logger singleton
 
 `g_log` in `log.c` is the one permitted global mutable variable.  It is
-initialised by `ef_log_init()` and torn down by `ef_log_shutdown()`.  These
+initialised by `dc_log_init()` and torn down by `dc_log_shutdown()`.  These
 must be the first and last calls in `main()`.  All other modules must be
 stateless singletons or operate on explicit struct instances.
 
@@ -120,20 +120,20 @@ stateless singletons or operate on explicit struct instances.
 
 ## Error Handling
 
-All fallible functions that cannot return a value accept an `EF_Error *err`
+All fallible functions that cannot return a value accept an `DC_Error *err`
 out-parameter (may be NULL for callers that don't need detail).
 
 ```c
 // Pattern A: functions that return int (0=ok, -1=err)
-int ef_manifest_save(EF_Manifest *m, const char *path, EF_Error *err);
+int dc_manifest_save(DC_Manifest *m, const char *path, DC_Error *err);
 
 // Pattern B: functions that return a pointer (NULL=err)
-EF_Manifest *ef_manifest_load(const char *path, EF_Error *err);
+DC_Manifest *dc_manifest_load(const char *path, DC_Error *err);
 ```
 
-Use `EF_SET_ERROR(err, code, fmt, ...)` to record source location
-automatically.  Use `EF_CHECK(err, call)` to propagate errors up the call
-stack when the enclosing function returns `EF_ErrorCode`.
+Use `DC_SET_ERROR(err, code, fmt, ...)` to record source location
+automatically.  Use `DC_CHECK(err, call)` to propagate errors up the call
+stack when the enclosing function returns `DC_ErrorCode`.
 
 ---
 
@@ -142,15 +142,15 @@ stack when the enclosing function returns `EF_ErrorCode`.
 Follow these steps when adding a new module (e.g., `src/bezier/`):
 
 1. **Create `src/<module>/<name>.h` and `src/<module>/<name>.c`.**
-   - All public symbols prefixed `ef_`.
+   - All public symbols prefixed `dc_`.
    - Document ownership and error semantics in every function comment.
    - No GTK or domain-layer includes in `src/core/` modules.
 
 2. **Add sources to `CMakeLists.txt`.**
-   - Pure logic with no GTK dependency → add to `ef_core` static library.
-   - UI code → add to the `electroforge` executable target.
+   - Pure logic with no GTK dependency → add to `dc_core` static library.
+   - UI code → add to the `duncad` executable target.
 
-3. **Add `tests/test_<name>.c`** and register it with the `ef_add_test`
+3. **Add `tests/test_<name>.c`** and register it with the `dc_add_test`
    macro in `CMakeLists.txt`.
 
 4. **Update `docs/ARCHITECTURE.md`** (this file) to describe the new
@@ -164,7 +164,7 @@ Follow these steps when adding a new module (e.g., `src/bezier/`):
 ## Future Deployment Note
 
 The Core layer is intentionally free of all UI and platform dependencies.
-`ef_manifest_capture_context()` in particular has no GTK dependency, which
+`dc_manifest_capture_context()` in particular has no GTK dependency, which
 allows it to be called from:
 
 - A `--dump-context` CLI flag for automated LLM workflows.
@@ -180,8 +180,8 @@ Preserve this property: never add UI includes to `src/core/`.
 
 | Target | Description |
 |---|---|
-| `electroforge` | Main GTK4 application binary |
-| `ef_core` | Static library of all core modules (no GTK) |
+| `duncad` | Main GTK4 application binary |
+| `dc_core` | Static library of all core modules (no GTK) |
 | `test_array` | Array unit tests |
 | `test_string_builder` | StringBuilder unit tests |
 | `test_manifest` | Manifest unit tests |
@@ -196,6 +196,6 @@ cmake --build build --target tests
 
 Build in release mode without ASan:
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DEF_ASAN=OFF
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DDC_ASAN=OFF
 cmake --build build
 ```

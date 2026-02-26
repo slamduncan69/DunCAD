@@ -11,8 +11,8 @@
  * TODO: Phase 2 — convert EFAppWindow to a GObject subclass with typed
  * instance data instead of g_object_set_data() string keys.
  * ---------------------------------------------------------------------- */
-#define EF_KEY_HEADER_BAR  "ef-header-bar"
-#define EF_KEY_STATUS_LABEL "ef-status-label"
+#define DC_KEY_HEADER_BAR  "dc-header-bar"
+#define DC_KEY_STATUS_LABEL "dc-status-label"
 
 /* -------------------------------------------------------------------------
  * Menu bar construction
@@ -86,14 +86,14 @@ make_placeholder_panel(const char *label_text)
 }
 
 /* -------------------------------------------------------------------------
- * ef_app_window_create
+ * dc_app_window_create
  * ---------------------------------------------------------------------- */
 GtkWidget *
-ef_app_window_create(GtkApplication *app)
+dc_app_window_create(GtkApplication *app)
 {
     /* --- Root window --- */
     GtkWidget *window = gtk_application_window_new(app);
-    gtk_window_set_title(GTK_WINDOW(window), "ElectroForge IDE");
+    gtk_window_set_title(GTK_WINDOW(window), "DunCAD");
     gtk_window_set_default_size(GTK_WINDOW(window), 1400, 900);
 
     /* Enable the application menu bar */
@@ -111,7 +111,7 @@ ef_app_window_create(GtkApplication *app)
     /* Title widget: show app name + project name */
     GtkWidget *title_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
-    GtkWidget *title_label = gtk_label_new("ElectroForge IDE");
+    GtkWidget *title_label = gtk_label_new("DunCAD");
     {
         /* Make the title label bold via markup */
         PangoAttrList *attrs = pango_attr_list_new();
@@ -136,7 +136,7 @@ ef_app_window_create(GtkApplication *app)
     gtk_window_set_titlebar(GTK_WINDOW(window), header);
 
     /* Store the project label so we can update it later */
-    g_object_set_data(G_OBJECT(window), EF_KEY_HEADER_BAR,
+    g_object_set_data(G_OBJECT(window), DC_KEY_HEADER_BAR,
                       (gpointer)project_label);
 
     /* --- Outer vertical box: content area + status bar --- */
@@ -221,23 +221,23 @@ ef_app_window_create(GtkApplication *app)
     gtk_box_append(GTK_BOX(outer_box), status_frame);
 
     /* Store the status label for later updates */
-    g_object_set_data(G_OBJECT(window), EF_KEY_STATUS_LABEL,
+    g_object_set_data(G_OBJECT(window), DC_KEY_STATUS_LABEL,
                       (gpointer)status_label);
 
-    ef_log(EF_LOG_INFO, EF_LOG_EVENT_APP, "application window created");
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "application window created");
 
     return window;
 }
 
 /* -------------------------------------------------------------------------
- * ef_app_window_set_project_name
+ * dc_app_window_set_project_name
  * ---------------------------------------------------------------------- */
 void
-ef_app_window_set_project_name(GtkWidget *window, const char *project_name)
+dc_app_window_set_project_name(GtkWidget *window, const char *project_name)
 {
     if (!window) return;
 
-    GtkWidget *label = g_object_get_data(G_OBJECT(window), EF_KEY_HEADER_BAR);
+    GtkWidget *label = g_object_get_data(G_OBJECT(window), DC_KEY_HEADER_BAR);
     if (!label) return;
 
     const char *display = (project_name && project_name[0] != '\0')
@@ -247,14 +247,14 @@ ef_app_window_set_project_name(GtkWidget *window, const char *project_name)
 }
 
 /* -------------------------------------------------------------------------
- * ef_app_window_set_status
+ * dc_app_window_set_status
  * ---------------------------------------------------------------------- */
 void
-ef_app_window_set_status(GtkWidget *window, const char *text)
+dc_app_window_set_status(GtkWidget *window, const char *text)
 {
     if (!window) return;
 
-    GtkWidget *label = g_object_get_data(G_OBJECT(window), EF_KEY_STATUS_LABEL);
+    GtkWidget *label = g_object_get_data(G_OBJECT(window), DC_KEY_STATUS_LABEL);
     if (!label) return;
 
     gtk_label_set_text(GTK_LABEL(label), text ? text : "");
