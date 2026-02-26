@@ -88,6 +88,13 @@ target_link_libraries(duncad
 )
 
 # ---------------------------------------------------------------------------
+# Documentation tool (standalone -- no GTK, no dc_core)
+# ---------------------------------------------------------------------------
+add_executable(duncad-docs tools/duncad_docs.c)
+target_link_libraries(duncad-docs PRIVATE dc_compiler_flags)
+target_compile_definitions(duncad-docs PRIVATE DC_BUILD_DIR="${CMAKE_BINARY_DIR}")
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 enable_testing()
