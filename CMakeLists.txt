@@ -78,6 +78,7 @@ target_link_libraries(dc_core
 add_executable(duncad
     src/main.c
     src/ui/app_window.c
+    src/bezier/bezier_canvas.c
 )
 target_include_directories(duncad PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(duncad
@@ -85,6 +86,7 @@ target_link_libraries(duncad
     PRIVATE PkgConfig::GTK4
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
+    PRIVATE m
 )
 
 # ---------------------------------------------------------------------------
@@ -118,11 +120,30 @@ dc_add_test(test_array       tests/test_array.c)
 dc_add_test(test_string_builder tests/test_string_builder.c)
 dc_add_test(test_manifest    tests/test_manifest.c)
 
+# Bezier canvas test — needs GTK4 + the canvas source
+add_executable(test_bezier_canvas
+    tests/test_bezier_canvas.c
+    src/bezier/bezier_canvas.c
+    src/ui/app_window.c
+)
+target_include_directories(test_bezier_canvas PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_bezier_canvas
+    PRIVATE dc_core
+    PRIVATE PkgConfig::GTK4
+    PRIVATE dc_compiler_flags
+    PRIVATE dc_asan_flags
+    PRIVATE m
+)
+add_test(NAME test_bezier_canvas COMMAND test_bezier_canvas)
+set_tests_properties(test_bezier_canvas PROPERTIES
+    ENVIRONMENT "ASAN_OPTIONS=detect_leaks=1"
+)
+
 # ---------------------------------------------------------------------------
 # Custom 'tests' target that builds + runs all tests
 # ---------------------------------------------------------------------------
 add_custom_target(tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_array test_string_builder test_manifest
+    DEPENDS test_array test_string_builder test_manifest test_bezier_canvas
     COMMENT "Building and running all DunCAD tests"
 )

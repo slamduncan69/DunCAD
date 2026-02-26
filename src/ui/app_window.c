@@ -1,4 +1,5 @@
 #include "app_window.h"
+#include "bezier/bezier_canvas.h"
 #include "core/log.h"
 
 #include <string.h>
@@ -156,18 +157,16 @@ dc_app_window_create(GtkApplication *app)
     GtkWidget *right_paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
     GtkWidget *left_panel   = make_placeholder_panel("Left Panel\n(Component Tree)");
-    GtkWidget *center_panel = make_placeholder_panel("Center Panel\n(Editor / Canvas)");
     GtkWidget *right_panel  = make_placeholder_panel("Right Panel\n(Inspector / Properties)");
 
-    /* Wrap panels in scrolled windows for future-proofing */
+    /* Bezier canvas replaces the center placeholder */
+    DC_BezierCanvas *canvas = dc_bezier_canvas_new();
+    GtkWidget *canvas_widget = dc_bezier_canvas_widget(canvas);
+
+    /* Wrap side panels in scrolled windows for future-proofing */
     GtkWidget *left_scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(left_scroll), left_panel);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(left_scroll),
-                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-
-    GtkWidget *center_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(center_scroll), center_panel);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(center_scroll),
                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
 
     GtkWidget *right_scroll = gtk_scrolled_window_new();
@@ -175,8 +174,8 @@ dc_app_window_create(GtkApplication *app)
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(right_scroll),
                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
 
-    /* Assemble panes */
-    gtk_paned_set_start_child(GTK_PANED(right_paned), center_scroll);
+    /* Assemble panes — canvas goes directly in (no ScrolledWindow) */
+    gtk_paned_set_start_child(GTK_PANED(right_paned), canvas_widget);
     gtk_paned_set_end_child(GTK_PANED(right_paned), right_scroll);
     gtk_paned_set_position(GTK_PANED(right_paned), 900);
     gtk_paned_set_resize_start_child(GTK_PANED(right_paned), TRUE);
@@ -223,6 +222,10 @@ dc_app_window_create(GtkApplication *app)
     /* Store the status label for later updates */
     g_object_set_data(G_OBJECT(window), DC_KEY_STATUS_LABEL,
                       (gpointer)status_label);
+
+    /* Wire the bezier canvas to the window for status updates and
+     * automatic cleanup via destroy-notify. */
+    dc_bezier_canvas_set_window(canvas, window);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "application window created");
 
