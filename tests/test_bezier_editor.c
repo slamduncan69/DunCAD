@@ -81,6 +81,17 @@ test_null_accessors(void)
     ASSERT(dc_bezier_editor_widget(NULL) == NULL);
     ASSERT(dc_bezier_editor_point_count(NULL) == 0);
     ASSERT(dc_bezier_editor_selected_point(NULL) == -1);
+    ASSERT(dc_bezier_editor_is_closed(NULL) == 0);
+    return 0;
+}
+
+static int
+test_initial_not_closed(void)
+{
+    DC_BezierEditor *ed = dc_bezier_editor_new();
+    ASSERT(ed != NULL);
+    ASSERT(dc_bezier_editor_is_closed(ed) == 0);
+    dc_bezier_editor_free(ed);
     return 0;
 }
 
@@ -100,6 +111,7 @@ main(int argc, char *argv[])
     RUN_TEST(test_widget_not_null);
     RUN_TEST(test_initial_state);
     RUN_TEST(test_null_accessors);
+    RUN_TEST(test_initial_not_closed);
 
     fprintf(stderr, "=== %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

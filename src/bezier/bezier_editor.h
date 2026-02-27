@@ -22,5 +22,6 @@ void             dc_bezier_editor_set_window(DC_BezierEditor *editor,
                                              GtkWidget *window);
 int              dc_bezier_editor_point_count(const DC_BezierEditor *editor);
 int              dc_bezier_editor_selected_point(const DC_BezierEditor *editor);
+int              dc_bezier_editor_is_closed(const DC_BezierEditor *editor);
 
 #endif /* DC_BEZIER_EDITOR_H */

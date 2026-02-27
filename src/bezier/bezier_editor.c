@@ -37,6 +37,9 @@ struct DC_BezierEditor {
     GtkWidget       *chain_btn;     /* GtkToggleButton: local juncture toggle */
     gulong           chain_handler_id;
     uint8_t          chain_mode;    /* 1 = new endpoints are junctures (default) */
+    int              closed;        /* 1 = shape is a closed loop */
+    double           orig_c1_x, orig_c1_y;  /* neighbor control originals for C1 drag */
+    double           orig_c2_x, orig_c2_y;
     DC_Array        *co_sel;        /* DC_Array of int: indices co-located with selected */
 };
 
@@ -45,11 +48,20 @@ struct DC_BezierEditor {
  * ---------------------------------------------------------------------- */
 
 /* Returns 1 if point at index is a juncture (on-curve boundary).
- * First and last points are always junctures regardless of flag. */
+ * Open shapes: first and last points are always junctures.
+ * Closed shapes: P0 uses its actual flag; last point is an off-curve control. */
 static int
 is_juncture(DC_BezierEditor *ed, int index)
 {
     int count = (int)dc_array_length(ed->pts);
+    if (ed->closed) {
+        /* Odd indices are off-curve controls, never junctures */
+        if (index % 2 != 0) return 0;
+        /* Even indices: check actual flag */
+        uint8_t *flag = dc_array_get(ed->junctures, (size_t)index);
+        return flag ? (*flag != 0) : 1;
+    }
+    /* Open: first and last are always junctures */
     if (index <= 0 || index >= count - 1) return 1;
     uint8_t *flag = dc_array_get(ed->junctures, (size_t)index);
     return flag ? (*flag != 0) : 1;
@@ -63,8 +75,10 @@ update_chain_button(DC_BezierEditor *ed)
     int count = (int)dc_array_length(ed->pts);
     int sel = ed->selected;
 
-    if (sel < 0 || sel == 0 || sel == count - 1) {
-        /* No selection, or first/last — grey out */
+    int is_endpoint = (sel == 0 || sel == count - 1);
+    int p0_closable = (sel == 0 && ed->closed);
+    if (sel < 0 || (is_endpoint && !p0_closable)) {
+        /* No selection, or immovable endpoint — grey out */
         g_signal_handler_block(ed->chain_btn, ed->chain_handler_id);
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ed->chain_btn), FALSE);
         g_signal_handler_unblock(ed->chain_btn, ed->chain_handler_id);
@@ -101,6 +115,33 @@ populate_co_selected(DC_BezierEditor *ed)
 }
 
 /* -------------------------------------------------------------------------
+ * C1 continuity at P0 (closed shapes only)
+ * When P0's juncture is OFF (smooth), enforce P0 = midpoint(C_first, C_last).
+ * Shifts C_first and C_last equally so the midpoint lands on P0.
+ * ---------------------------------------------------------------------- */
+static void
+enforce_c1_at_p0(DC_BezierEditor *ed)
+{
+    if (!ed->closed) return;
+    int count = (int)dc_array_length(ed->pts);
+    if (count < 3) return;
+
+    DC_Point2 *p0 = dc_array_get(ed->pts, 0);
+    DC_Point2 *c1 = dc_array_get(ed->pts, 1);
+    DC_Point2 *cn = dc_array_get(ed->pts, (size_t)(count - 1));
+
+    /* Current midpoint of the two controls */
+    double mx = (c1->x + cn->x) * 0.5;
+    double my = (c1->y + cn->y) * 0.5;
+
+    /* Shift both controls so their midpoint lands on P0 */
+    double dx = p0->x - mx;
+    double dy = p0->y - my;
+    c1->x += dx;  c1->y += dy;
+    cn->x += dx;  cn->y += dy;
+}
+
+/* -------------------------------------------------------------------------
  * Status bar helper
  * ---------------------------------------------------------------------- */
 static void
@@ -113,12 +154,21 @@ update_status(DC_BezierEditor *ed)
 
     /* Count segments by walking juncture boundaries */
     int num_segments = 0;
-    if (count >= 2) {
+    if (ed->closed && count >= 2) {
+        /* Closed shape: count juncture-delimited spans circularly */
+        int njunc = 0;
+        for (int i = 0; i < count; i += 2) {
+            if (is_juncture(ed, i)) njunc++;
+        }
+        num_segments = (njunc > 0) ? njunc : 1;
+    } else if (count >= 2) {
         for (int i = 1; i < count; i++) {
             if (i == count - 1 || is_juncture(ed, i))
                 num_segments++;
         }
     }
+
+    const char *shape = ed->closed ? " (closed)" : "";
 
     if (num_segments == 0) {
         snprintf(buf, sizeof(buf),
@@ -127,13 +177,14 @@ update_status(DC_BezierEditor *ed)
         const char *kind = is_juncture(ed, ed->selected)
                          ? "juncture" : "control";
         snprintf(buf, sizeof(buf),
-                 "%s  |  %d seg%s  |  P%d (%s)  |  [C] local  [Del] delete  [Shift+C] global",
+                 "%s  |  %d seg%s%s  |  P%d (%s)  |  [C] local  [Del] delete  [Shift+C] global",
                  mode, num_segments, num_segments == 1 ? "" : "s",
-                 ed->selected, kind);
+                 shape, ed->selected, kind);
     } else {
         snprintf(buf, sizeof(buf),
-                 "%s  |  %d seg%s  |  Click to add or drag  |  [Shift+C] global",
-                 mode, num_segments, num_segments == 1 ? "" : "s");
+                 "%s  |  %d seg%s%s  |  Click to %s  |  [Shift+C] global",
+                 mode, num_segments, num_segments == 1 ? "" : "s",
+                 shape, ed->closed ? "drag" : "add or drag");
     }
     dc_app_window_set_status(ed->window, buf);
 }
@@ -220,12 +271,93 @@ editor_overlay(DC_BezierCanvas *canvas, cairo_t *cr,
         cairo_move_to(cr, sx[0], sy[0]);
         for (int i = 1; i < count; i++)
             cairo_line_to(cr, sx[i], sy[i]);
+        if (ed->closed)
+            cairo_line_to(cr, sx[0], sy[0]);  /* close polygon back to P0 */
         cairo_stroke(cr);
         cairo_set_dash(cr, NULL, 0, 0);
     }
 
     /* Draw bezier spans between juncture boundaries */
-    if (count >= 2) {
+    if (ed->closed && count >= 2) {
+        /* Closed shape: segments wrap around. Last segment is
+         * (P_last_even, C_last, P0). Build wrapped coordinate arrays
+         * for de Casteljau spans that may cross the array boundary. */
+
+        /* Collect even-indexed (on-curve) juncture indices */
+        int njunc = 0;
+        int junc_indices[256];  /* more than enough for any practical shape */
+        for (int i = 0; i < count; i += 2) {
+            if (is_juncture(ed, i)) {
+                if (njunc < 256) junc_indices[njunc++] = i;
+            }
+        }
+
+        /* Allocate wrap buffer (count+1 is the max span size for wrap) */
+        int wrap_cap = count + 1;
+        double *wx = malloc((size_t)wrap_cap * sizeof(double));
+        double *wy = malloc((size_t)wrap_cap * sizeof(double));
+        double *tmp_x = malloc((size_t)wrap_cap * sizeof(double));
+        double *tmp_y = malloc((size_t)wrap_cap * sizeof(double));
+        if (wx && wy && tmp_x && tmp_y) {
+            cairo_set_source_rgba(cr, 0.0, 1.0, 0.8, 1.0);
+            cairo_set_line_width(cr, 3.0);
+
+            if (njunc == 0) {
+                /* No junctures: one big span wrapping the entire shape.
+                 * Copy all points + wrap back to P0. */
+                for (int i = 0; i < count; i++) {
+                    wx[i] = sx[i];
+                    wy[i] = sy[i];
+                }
+                wx[count] = sx[0];
+                wy[count] = sy[0];
+                int n = count + 1;
+                cairo_move_to(cr, wx[0], wy[0]);
+                for (int step = 1; step <= DC_CURVE_STEPS; step++) {
+                    double t = (double)step / DC_CURVE_STEPS;
+                    double bx, by;
+                    decasteljau(wx, wy, n, t, tmp_x, tmp_y, &bx, &by);
+                    cairo_line_to(cr, bx, by);
+                }
+            } else {
+                /* Multiple juncture-delimited spans, wrapping circularly */
+                for (int j = 0; j < njunc; j++) {
+                    int start = junc_indices[j];
+                    int end   = junc_indices[(j + 1) % njunc];
+
+                    /* Build wrap buffer from start to end (wrapping) */
+                    int n = 0;
+                    int idx = start;
+                    do {
+                        wx[n] = sx[idx];
+                        wy[n] = sy[idx];
+                        n++;
+                        idx = (idx + 1) % count;
+                    } while (idx != (end % count));
+                    /* Include the end juncture point */
+                    wx[n] = sx[end % count];
+                    wy[n] = sy[end % count];
+                    n++;
+
+                    if (n >= 2) {
+                        cairo_move_to(cr, wx[0], wy[0]);
+                        for (int step = 1; step <= DC_CURVE_STEPS; step++) {
+                            double t = (double)step / DC_CURVE_STEPS;
+                            double bx, by;
+                            decasteljau(wx, wy, n, t, tmp_x, tmp_y, &bx, &by);
+                            cairo_line_to(cr, bx, by);
+                        }
+                    }
+                }
+            }
+            cairo_stroke(cr);
+        }
+        free(wx);
+        free(wy);
+        free(tmp_x);
+        free(tmp_y);
+    } else if (count >= 2) {
+        /* Open shape: spans delimited by junctures, last point is terminal */
         double *tmp_x = malloc((size_t)count * sizeof(double));
         double *tmp_y = malloc((size_t)count * sizeof(double));
         if (tmp_x && tmp_y) {
@@ -293,44 +425,62 @@ on_press(GtkGestureClick *gesture, int n_press, double x, double y,
 
     int hit = hit_test(ed, wx, wy);
 
+    if (ed->closed) {
+        /* Shape is closed — no new points allowed. Select existing or deselect. */
+        if (hit >= 0) {
+            DC_Point2 *p = dc_array_get(ed->pts, (size_t)hit);
+            ed->selected = hit;
+            ed->mouse_down = 1;
+            ed->orig_x = p->x;
+            ed->orig_y = p->y;
+            ed->press_sx = x;
+            ed->press_sy = y;
+            /* Store neighbor originals for C1 drag constraints */
+            int count = (int)dc_array_length(ed->pts);
+            if (hit == 0 && count >= 2) {
+                DC_Point2 *c1 = dc_array_get(ed->pts, 1);
+                DC_Point2 *cn = dc_array_get(ed->pts, (size_t)(count - 1));
+                ed->orig_c1_x = c1->x;  ed->orig_c1_y = c1->y;
+                ed->orig_c2_x = cn->x;  ed->orig_c2_y = cn->y;
+            } else if (hit == 1 && count >= 2) {
+                DC_Point2 *cn = dc_array_get(ed->pts, (size_t)(count - 1));
+                ed->orig_c2_x = cn->x;  ed->orig_c2_y = cn->y;
+            } else if (hit == count - 1 && count >= 2) {
+                DC_Point2 *c1 = dc_array_get(ed->pts, 1);
+                ed->orig_c1_x = c1->x;  ed->orig_c1_y = c1->y;
+            }
+        } else {
+            ed->selected = -1;
+        }
+        populate_co_selected(ed);
+        update_chain_button(ed);
+        update_status(ed);
+        gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+        (void)gesture;
+        return;
+    }
+
     if (hit == 0 && (int)dc_array_length(ed->pts) >= 3) {
-        /* Check if already closed (last point at P0) — if so, select instead */
+        /* Snap-to-close: push only the closing control point */
         int count = (int)dc_array_length(ed->pts);
         DC_Point2 *prev = dc_array_get(ed->pts, (size_t)(count - 1));
         DC_Point2 *p0   = dc_array_get(ed->pts, 0);
-        double cdx = prev->x - p0->x;
-        double cdy = prev->y - p0->y;
-        int already_closed = (cdx * cdx + cdy * cdy < 1e-12);
-
-        if (already_closed) {
-            /* Shape already closed — select P0 (co-sel picks up the last pt) */
-            ed->selected = 0;
-            ed->mouse_down = 1;
-            ed->orig_x = p0->x;
-            ed->orig_y = p0->y;
-            ed->press_sx = x;
-            ed->press_sy = y;
-            populate_co_selected(ed);
-            update_chain_button(ed);
-            update_status(ed);
-            gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
-            (void)gesture;
-            return;
-        }
 
         DC_Point2 mid = { (prev->x + p0->x) * 0.5, (prev->y + p0->y) * 0.5 };
-        DC_Point2 end = { p0->x, p0->y };
 
         dc_array_push(ed->pts, &mid);
         uint8_t ctrl_flag = 0;
         dc_array_push(ed->junctures, &ctrl_flag);
 
-        dc_array_push(ed->pts, &end);
-        uint8_t end_flag = ed->chain_mode;
-        dc_array_push(ed->junctures, &end_flag);
+        /* Mark closed — P0's juncture reflects current chain mode */
+        ed->closed = 1;
+        uint8_t *p0_flag = dc_array_get(ed->junctures, 0);
+        if (p0_flag) *p0_flag = ed->chain_mode;
+        if (!ed->chain_mode)
+            enforce_c1_at_p0(ed);
 
         /* Select the control point so drag shapes the closing curve */
-        ed->selected = (int)dc_array_length(ed->pts) - 2;
+        ed->selected = (int)dc_array_length(ed->pts) - 1;
         ed->mouse_down = 1;
         DC_Point2 *ctrl = dc_array_get(ed->pts, (size_t)ed->selected);
         ed->orig_x = ctrl->x;
@@ -425,6 +575,31 @@ on_motion(GtkEventControllerMotion *ctrl, double x, double y, gpointer data)
     p->x = ed->orig_x + dwx;
     p->y = ed->orig_y + dwy;
 
+    /* C1 drag constraints for closed shapes when P0 is smooth */
+    if (ed->closed && !is_juncture(ed, 0)) {
+        int count = (int)dc_array_length(ed->pts);
+        int sel = ed->selected;
+        DC_Point2 *c1 = dc_array_get(ed->pts, 1);
+        DC_Point2 *cn = dc_array_get(ed->pts, (size_t)(count - 1));
+        DC_Point2 *p0 = dc_array_get(ed->pts, 0);
+
+        if (sel == 0) {
+            /* Dragging P0: move C_first and C_last by same delta */
+            c1->x = ed->orig_c1_x + dwx;
+            c1->y = ed->orig_c1_y + dwy;
+            cn->x = ed->orig_c2_x + dwx;
+            cn->y = ed->orig_c2_y + dwy;
+        } else if (sel == 1) {
+            /* Dragging C_first: mirror C_last across P0 */
+            cn->x = 2.0 * p0->x - c1->x;
+            cn->y = 2.0 * p0->y - c1->y;
+        } else if (sel == count - 1) {
+            /* Dragging C_last: mirror C_first across P0 */
+            c1->x = 2.0 * p0->x - cn->x;
+            c1->y = 2.0 * p0->y - cn->y;
+        }
+    }
+
     /* Move co-selected (overlapping) points by the same delta */
     int co_n = (int)dc_array_length(ed->co_sel);
     for (int i = 0; i < co_n; i++) {
@@ -455,6 +630,7 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
         if (sel >= 0 && sel < count) {
             dc_array_remove(ed->pts, (size_t)sel);
             dc_array_remove(ed->junctures, (size_t)sel);
+            ed->closed = 0;   /* deleting any point reopens the shape */
             count--;
             if (count == 0)
                 ed->selected = -1;
@@ -483,9 +659,16 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
             /* C: toggle selected point's local juncture flag */
             int count = (int)dc_array_length(ed->pts);
             int sel = ed->selected;
-            if (sel > 0 && sel < count - 1) {
+            int can_toggle = (sel > 0 && sel < count - 1)
+                           || (sel == 0 && ed->closed);
+            if (can_toggle) {
                 uint8_t *flag = dc_array_get(ed->junctures, (size_t)sel);
-                if (flag) *flag = (*flag) ? 0 : 1;
+                if (flag) {
+                    *flag = (*flag) ? 0 : 1;
+                    /* When toggling P0 to smooth, enforce C1 continuity */
+                    if (sel == 0 && ed->closed && *flag == 0)
+                        enforce_c1_at_p0(ed);
+                }
                 update_chain_button(ed);
             }
         }
@@ -517,10 +700,16 @@ on_chain_toggled(GtkToggleButton *btn, gpointer data)
     DC_BezierEditor *ed = data;
     int count = (int)dc_array_length(ed->pts);
     int sel = ed->selected;
-    if (sel <= 0 || sel >= count - 1) return;
+    int can_toggle = (sel > 0 && sel < count - 1)
+                   || (sel == 0 && ed->closed);
+    if (!can_toggle) return;
 
     uint8_t *flag = dc_array_get(ed->junctures, (size_t)sel);
-    if (flag) *flag = gtk_toggle_button_get_active(btn) ? 1 : 0;
+    if (flag) {
+        *flag = gtk_toggle_button_get_active(btn) ? 1 : 0;
+        if (sel == 0 && ed->closed && *flag == 0)
+            enforce_c1_at_p0(ed);
+    }
 
     update_status(ed);
     gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
@@ -570,7 +759,7 @@ dc_bezier_editor_new(void)
 
     ed->selected = -1;
     ed->mouse_down = 0;
-    ed->chain_mode = 1;
+    ed->chain_mode = 0;
 
     /* Register overlay for drawing points and curve */
     dc_bezier_canvas_set_overlay_cb(ed->canvas, editor_overlay, ed);
@@ -608,7 +797,7 @@ dc_bezier_editor_new(void)
 
     /* Global chain mode toggle (always active, default ON) */
     ed->global_chain_btn = gtk_toggle_button_new_with_label("Chain");
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ed->global_chain_btn), TRUE);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ed->global_chain_btn), FALSE);
     gtk_widget_set_focusable(ed->global_chain_btn, FALSE);
     gtk_widget_set_tooltip_text(ed->global_chain_btn,
                                 "Global chain mode (Shift+C)");
@@ -681,4 +870,11 @@ dc_bezier_editor_selected_point(const DC_BezierEditor *editor)
 {
     if (!editor) return -1;
     return editor->selected;
+}
+
+int
+dc_bezier_editor_is_closed(const DC_BezierEditor *editor)
+{
+    if (!editor) return 0;
+    return editor->closed;
 }
