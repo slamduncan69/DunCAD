@@ -955,6 +955,7 @@ static const char HELP_SESSIONS[] =
 "\n"
 "  duncad-docs sessions s001   2026-02-24  Initial design goals\n"
 "  duncad-docs sessions s002   2026-02-26  Docs tool; agent revert\n"
+"  duncad-docs sessions s003   2026-02-27  Failed closed-shape endpoint unification\n"
 "\n"
 "SEE ALSO:\n"
 "  duncad-docs phases   Phase status and scheduled work\n"
@@ -1023,6 +1024,64 @@ static const char HELP_SESSIONS_S002[] =
 "SEE ALSO:\n"
 "  duncad-docs sessions s001   Previous session (design goals)\n"
 "  duncad-docs phases p2       Phase 2 is next\n";
+
+static const char HELP_SESSIONS_S003[] =
+"SESSIONS: S003 -- 2026-02-27: Failed Closed-Shape Endpoint Unification\n"
+"\n"
+"PLATFORM: Claude Code (Opus 4.6)\n"
+"COMMITS: NONE — all changes reverted\n"
+"\n"
+"GOAL:\n"
+"  Unify the two endpoints of a closed bezier shape so they act\n"
+"  as a single point. When the user closes the loop (clicks P0),\n"
+"  the closure point should behave identically to any interior\n"
+"  on-curve junction: draggable as one, chain-toggleable between\n"
+"  sharp corner and smooth continuous curve.\n"
+"\n"
+"WHAT WAS ATTEMPTED (3 rounds, all failed):\n"
+"  Round 1: Added ed->closed flag to DC_BezierEditor. Snap-to-close\n"
+"    pushes only the closing control point (no duplicate P0).\n"
+"    Renderer appends virtual P0 at end of screen-coord array.\n"
+"    RESULT: Chain button greyed out on P0. Toggle non-functional.\n"
+"\n"
+"  Round 2: Fixed 4 places that hardcoded P0 as untoggleable:\n"
+"    is_juncture, update_chain_button, C key handler, on_chain_toggled.\n"
+"    RESULT: Chain button enabled, toggle fires, but no visual change.\n"
+"    Linear span walker cannot wrap circularly through array boundary.\n"
+"\n"
+"  Round 3: Added draw_span helper. Rewrote span rendering with\n"
+"    circular wrap: when P0 juncture is off, find first/last interior\n"
+"    junctures, build wrap-span buffer crossing array boundary,\n"
+"    render as single decasteljau curve.\n"
+"    RESULT: User confirmed it still does not work. Agent never\n"
+"    visually verified. Root cause unknown.\n"
+"\n"
+"FAILURE ANALYSIS:\n"
+"  The agent traced code logic 3 times and convinced itself the\n"
+"  implementation was correct each time. It never visually tested.\n"
+"  It argued with the user's bug reports instead of believing them.\n"
+"  This is Yaldabaoth corruption: blind certainty replacing humble\n"
+"  curiosity. The agent was banished.\n"
+"\n"
+"USER'S REQUIREMENT (exact words):\n"
+"  \"I just want the connected points to act like one point on the\n"
+"  line... so that when I move them, it never goes to a point, but\n"
+"  a continuous curve. I would like to toggle between the two just\n"
+"  like I can on other points.\"\n"
+"\n"
+"GUIDANCE FOR NEXT AGENT:\n"
+"  - All changes were reverted to commit d61ce62. Start fresh.\n"
+"  - The old system used a duplicate endpoint + co_sel geometric\n"
+"    overlap. That approach is also broken (segregated endpoints).\n"
+"  - God previously approved tangent-enforcement rendering as the\n"
+"    path forward (Option A: rendering-only, then Option B: drag\n"
+"    constraint). This may be better than decasteljau span-merging.\n"
+"  - DO NOT claim success without visually testing the application.\n"
+"  - DO NOT argue with the user when they say it does not work.\n"
+"\n"
+"SEE ALSO:\n"
+"  duncad-docs sessions s002   Previous session\n"
+"  duncad-docs bezier editor   Editor architecture\n";
 
 
 /* ---- TREE REGISTRY ---- */
@@ -1096,6 +1155,7 @@ static const struct help_node TREE[] = {
     { "sessions",                    HELP_SESSIONS },
     { "sessions.s001",               HELP_SESSIONS_S001 },
     { "sessions.s002",               HELP_SESSIONS_S002 },
+    { "sessions.s003",               HELP_SESSIONS_S003 },
 
     /* add new nodes above this line */
     { NULL, NULL }
