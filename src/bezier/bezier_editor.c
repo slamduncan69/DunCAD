@@ -1,5 +1,7 @@
 #include "bezier/bezier_editor.h"
 #include "bezier/bezier_canvas.h"
+#include "bezier/bezier_curve.h"   /* DC_Point2 */
+#include "core/array.h"
 #include "core/log.h"
 #include "ui/app_window.h"
 
@@ -19,9 +21,8 @@
  * ---------------------------------------------------------------------- */
 struct DC_BezierEditor {
     DC_BezierCanvas *canvas;        /* owned */
-    double           pts[3][2];     /* P0, P1, P2 in world coordinates */
-    int              count;         /* 0–3: how many placed */
-    int              selected;      /* -1 or 0/1/2 */
+    DC_Array        *pts;           /* DC_Array of DC_Point2 in world coords */
+    int              selected;      /* -1 or index into pts */
     int              mouse_down;    /* 1 while button 1 is held */
     double           orig_x;       /* world pos of selected point at drag start */
     double           orig_y;
@@ -37,16 +38,19 @@ static void
 update_status(DC_BezierEditor *ed)
 {
     if (!ed->window) return;
-    const char *names[] = {"P0 (endpoint)", "P1 (control)", "P2 (endpoint)"};
+    int count = (int)dc_array_length(ed->pts);
+    int num_segments = (count >= 3) ? (count - 1) / 2 : 0;
     char buf[128];
-    if (ed->count < 3) {
-        snprintf(buf, sizeof(buf), "Click to place %s  (%d/3 placed)",
-                 names[ed->count], ed->count);
+    if (num_segments == 0) {
+        snprintf(buf, sizeof(buf), "Click to place points  (%d placed)", count);
     } else if (ed->selected >= 0) {
-        snprintf(buf, sizeof(buf), "Dragging %s  |  All 3 points placed",
-                 names[ed->selected]);
+        const char *kind = (ed->selected % 2 == 1) ? "control" : "endpoint";
+        snprintf(buf, sizeof(buf), "%d segment%s  |  Dragging P%d (%s)",
+                 num_segments, num_segments == 1 ? "" : "s",
+                 ed->selected, kind);
     } else {
-        snprintf(buf, sizeof(buf), "Quadratic bezier ready  |  Click a point to drag it");
+        snprintf(buf, sizeof(buf), "%d segment%s  |  Click to add point or drag existing",
+                 num_segments, num_segments == 1 ? "" : "s");
     }
     dc_app_window_set_status(ed->window, buf);
 }
@@ -61,10 +65,12 @@ hit_test(DC_BezierEditor *ed, double wx, double wy)
     double radius = DC_HIT_RADIUS_PX / zoom;
     double best = radius;
     int hit = -1;
+    int count = (int)dc_array_length(ed->pts);
 
-    for (int i = 0; i < ed->count; i++) {
-        double dx = wx - ed->pts[i][0];
-        double dy = wy - ed->pts[i][1];
+    for (int i = 0; i < count; i++) {
+        DC_Point2 *p = dc_array_get(ed->pts, (size_t)i);
+        double dx = wx - p->x;
+        double dy = wy - p->y;
         double d = sqrt(dx * dx + dy * dy);
         if (d < best) {
             best = d;
@@ -83,60 +89,69 @@ editor_overlay(DC_BezierCanvas *canvas, cairo_t *cr,
 {
     (void)width; (void)height;
     DC_BezierEditor *ed = userdata;
-    if (ed->count == 0) return;
+    int count = (int)dc_array_length(ed->pts);
+    if (count == 0) return;
 
     /* Convert all placed points to screen coordinates */
-    double sx[3], sy[3];
-    for (int i = 0; i < ed->count; i++) {
-        dc_bezier_canvas_world_to_screen(canvas,
-                                         ed->pts[i][0], ed->pts[i][1],
-                                         &sx[i], &sy[i]);
+    double *sx = malloc((size_t)count * sizeof(double));
+    double *sy = malloc((size_t)count * sizeof(double));
+    if (!sx || !sy) { free(sx); free(sy); return; }
+
+    for (int i = 0; i < count; i++) {
+        DC_Point2 *p = dc_array_get(ed->pts, (size_t)i);
+        dc_bezier_canvas_world_to_screen(canvas, p->x, p->y, &sx[i], &sy[i]);
     }
 
-    /* Control polygon: thin gray lines P0—P1—P2 */
-    if (ed->count >= 2) {
+    /* Control polygon: thin gray dashed lines connecting all placed points */
+    if (count >= 2) {
         cairo_set_source_rgba(cr, 0.5, 0.5, 0.5, 0.6);
         cairo_set_line_width(cr, 1.0);
         double dashes[] = {4.0, 4.0};
         cairo_set_dash(cr, dashes, 2, 0);
         cairo_move_to(cr, sx[0], sy[0]);
-        for (int i = 1; i < ed->count; i++)
+        for (int i = 1; i < count; i++)
             cairo_line_to(cr, sx[i], sy[i]);
         cairo_stroke(cr);
         cairo_set_dash(cr, NULL, 0, 0);
     }
 
-    /* Quadratic bezier curve: B(t) = (1-t)^2 P0 + 2(1-t)t P1 + t^2 P2 */
-    if (ed->count == 3) {
+    /* Quadratic bezier segments: segment i uses points 2i, 2i+1, 2i+2 */
+    int num_segments = (count >= 3) ? (count - 1) / 2 : 0;
+    if (num_segments > 0) {
         cairo_set_source_rgba(cr, 0.0, 1.0, 0.8, 1.0);  /* bright cyan */
         cairo_set_line_width(cr, 3.0);
 
-        cairo_move_to(cr, sx[0], sy[0]);
-        for (int step = 1; step <= DC_CURVE_STEPS; step++) {
-            double t = (double)step / DC_CURVE_STEPS;
-            double u = 1.0 - t;
-            double bx = u * u * sx[0] + 2.0 * u * t * sx[1] + t * t * sx[2];
-            double by = u * u * sy[0] + 2.0 * u * t * sy[1] + t * t * sy[2];
-            cairo_line_to(cr, bx, by);
+        for (int seg = 0; seg < num_segments; seg++) {
+            int i0 = 2 * seg;
+            int i1 = 2 * seg + 1;
+            int i2 = 2 * seg + 2;
+            cairo_move_to(cr, sx[i0], sy[i0]);
+            for (int step = 1; step <= DC_CURVE_STEPS; step++) {
+                double t = (double)step / DC_CURVE_STEPS;
+                double u = 1.0 - t;
+                double bx = u*u*sx[i0] + 2.0*u*t*sx[i1] + t*t*sx[i2];
+                double by = u*u*sy[i0] + 2.0*u*t*sy[i1] + t*t*sy[i2];
+                cairo_line_to(cr, bx, by);
+            }
         }
         cairo_stroke(cr);
     }
 
     /* Control point dots */
-    for (int i = 0; i < ed->count; i++) {
+    for (int i = 0; i < count; i++) {
         if (i == ed->selected) {
-            /* Selected: orange */
-            cairo_set_source_rgba(cr, 1.0, 0.6, 0.1, 1.0);
-        } else if (i == 1) {
-            /* P1: off-curve control point — blue */
-            cairo_set_source_rgba(cr, 0.4, 0.7, 1.0, 1.0);
+            cairo_set_source_rgba(cr, 1.0, 0.6, 0.1, 1.0);   /* orange */
+        } else if (i % 2 == 1) {
+            cairo_set_source_rgba(cr, 0.4, 0.7, 1.0, 1.0);   /* blue: off-curve */
         } else {
-            /* P0, P2: on-curve endpoints — white */
-            cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
+            cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);   /* white: on-curve */
         }
         cairo_arc(cr, sx[i], sy[i], DC_POINT_RADIUS_PX, 0, 2 * G_PI);
         cairo_fill(cr);
     }
+
+    free(sx);
+    free(sy);
 }
 
 /* -------------------------------------------------------------------------
@@ -162,18 +177,18 @@ on_press(GtkGestureClick *gesture, int n_press, double x, double y,
 
     if (hit >= 0) {
         /* Select existing point, prepare for drag */
+        DC_Point2 *p = dc_array_get(ed->pts, (size_t)hit);
         ed->selected = hit;
         ed->mouse_down = 1;
-        ed->orig_x = ed->pts[hit][0];
-        ed->orig_y = ed->pts[hit][1];
+        ed->orig_x = p->x;
+        ed->orig_y = p->y;
         ed->press_sx = x;
         ed->press_sy = y;
-    } else if (ed->count < 3) {
+    } else {
         /* Place new control point */
-        ed->pts[ed->count][0] = wx;
-        ed->pts[ed->count][1] = wy;
-        ed->selected = ed->count;
-        ed->count++;
+        DC_Point2 pt = { wx, wy };
+        dc_array_push(ed->pts, &pt);
+        ed->selected = (int)dc_array_length(ed->pts) - 1;
         ed->mouse_down = 1;
         ed->orig_x = wx;
         ed->orig_y = wy;
@@ -213,8 +228,10 @@ on_motion(GtkEventControllerMotion *ctrl, double x, double y, gpointer data)
     double dwx =  dx_screen / zoom;
     double dwy = -dy_screen / zoom;   /* Y inverted: screen down = world down */
 
-    ed->pts[ed->selected][0] = ed->orig_x + dwx;
-    ed->pts[ed->selected][1] = ed->orig_y + dwy;
+    DC_Point2 *p = dc_array_get(ed->pts, (size_t)ed->selected);
+    if (!p) return;
+    p->x = ed->orig_x + dwx;
+    p->y = ed->orig_y + dwy;
 
     gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
 }
@@ -240,7 +257,9 @@ dc_bezier_editor_new(void)
     ed->canvas = dc_bezier_canvas_new();
     if (!ed->canvas) { free(ed); return NULL; }
 
-    ed->count = 0;
+    ed->pts = dc_array_new(sizeof(DC_Point2));
+    if (!ed->pts) { dc_bezier_canvas_free(ed->canvas); free(ed); return NULL; }
+
     ed->selected = -1;
     ed->mouse_down = 0;
 
@@ -269,6 +288,7 @@ void
 dc_bezier_editor_free(DC_BezierEditor *editor)
 {
     if (!editor) return;
+    dc_array_free(editor->pts);
     dc_bezier_canvas_free(editor->canvas);
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "bezier editor freed");
     free(editor);
@@ -298,7 +318,7 @@ int
 dc_bezier_editor_point_count(const DC_BezierEditor *editor)
 {
     if (!editor) return 0;
-    return editor->count;
+    return (int)dc_array_length(editor->pts);
 }
 
 int

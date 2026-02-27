@@ -2,12 +2,13 @@
 #define DC_BEZIER_EDITOR_H
 
 /*
- * bezier_editor.h — Single quadratic bezier curve editor.
+ * bezier_editor.h — Chained quadratic bezier curve editor.
  *
- * Place exactly 3 control points (P0, P1, P2). P0 and P2 are
- * on-curve endpoints. P1 is the off-curve control point.
- * The quadratic bezier B(t) = (1-t)^2 P0 + 2(1-t)t P1 + t^2 P2
- * is drawn and updates live as you drag any point.
+ * Click to place control points. Points are chained as quadratic
+ * bezier segments: segment i uses points 2i, 2i+1, 2i+2.
+ * Even-indexed points (0, 2, 4, ...) are on-curve endpoints.
+ * Odd-indexed points (1, 3, 5, ...) are off-curve control points.
+ * Adjacent segments share endpoints. All points are draggable.
  */
 
 #include <gtk/gtk.h>
