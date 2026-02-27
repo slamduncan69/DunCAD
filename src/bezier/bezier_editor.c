@@ -37,6 +37,7 @@ struct DC_BezierEditor {
     GtkWidget       *chain_btn;     /* GtkToggleButton: local juncture toggle */
     gulong           chain_handler_id;
     uint8_t          chain_mode;    /* 1 = new endpoints are junctures (default) */
+    DC_Array        *co_sel;        /* DC_Array of int: indices co-located with selected */
 };
 
 /* -------------------------------------------------------------------------
@@ -78,6 +79,28 @@ update_chain_button(DC_BezierEditor *ed)
 }
 
 /* -------------------------------------------------------------------------
+ * Co-selection — find all points overlapping the selected point
+ * ---------------------------------------------------------------------- */
+static void
+populate_co_selected(DC_BezierEditor *ed)
+{
+    dc_array_clear(ed->co_sel);
+    if (ed->selected < 0) return;
+    DC_Point2 *sel_pt = dc_array_get(ed->pts, (size_t)ed->selected);
+    if (!sel_pt) return;
+    int count = (int)dc_array_length(ed->pts);
+    for (int i = 0; i < count; i++) {
+        if (i == ed->selected) continue;
+        DC_Point2 *p = dc_array_get(ed->pts, (size_t)i);
+        double dx = p->x - sel_pt->x;
+        double dy = p->y - sel_pt->y;
+        if (dx * dx + dy * dy < 1e-12) {
+            dc_array_push(ed->co_sel, &i);
+        }
+    }
+}
+
+/* -------------------------------------------------------------------------
  * Status bar helper
  * ---------------------------------------------------------------------- */
 static void
@@ -104,7 +127,7 @@ update_status(DC_BezierEditor *ed)
         const char *kind = is_juncture(ed, ed->selected)
                          ? "juncture" : "control";
         snprintf(buf, sizeof(buf),
-                 "%s  |  %d seg%s  |  P%d (%s)  |  [C] local  [Shift+C] global",
+                 "%s  |  %d seg%s  |  P%d (%s)  |  [C] local  [Del] delete  [Shift+C] global",
                  mode, num_segments, num_segments == 1 ? "" : "s",
                  ed->selected, kind);
     } else {
@@ -270,7 +293,51 @@ on_press(GtkGestureClick *gesture, int n_press, double x, double y,
 
     int hit = hit_test(ed, wx, wy);
 
-    if (hit >= 0) {
+    if (hit == 0 && (int)dc_array_length(ed->pts) >= 3) {
+        /* Check if already closed (last point at P0) — if so, select instead */
+        int count = (int)dc_array_length(ed->pts);
+        DC_Point2 *prev = dc_array_get(ed->pts, (size_t)(count - 1));
+        DC_Point2 *p0   = dc_array_get(ed->pts, 0);
+        double cdx = prev->x - p0->x;
+        double cdy = prev->y - p0->y;
+        int already_closed = (cdx * cdx + cdy * cdy < 1e-12);
+
+        if (already_closed) {
+            /* Shape already closed — select P0 (co-sel picks up the last pt) */
+            ed->selected = 0;
+            ed->mouse_down = 1;
+            ed->orig_x = p0->x;
+            ed->orig_y = p0->y;
+            ed->press_sx = x;
+            ed->press_sy = y;
+            populate_co_selected(ed);
+            update_chain_button(ed);
+            update_status(ed);
+            gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+            (void)gesture;
+            return;
+        }
+
+        DC_Point2 mid = { (prev->x + p0->x) * 0.5, (prev->y + p0->y) * 0.5 };
+        DC_Point2 end = { p0->x, p0->y };
+
+        dc_array_push(ed->pts, &mid);
+        uint8_t ctrl_flag = 0;
+        dc_array_push(ed->junctures, &ctrl_flag);
+
+        dc_array_push(ed->pts, &end);
+        uint8_t end_flag = ed->chain_mode;
+        dc_array_push(ed->junctures, &end_flag);
+
+        /* Select the control point so drag shapes the closing curve */
+        ed->selected = (int)dc_array_length(ed->pts) - 2;
+        ed->mouse_down = 1;
+        DC_Point2 *ctrl = dc_array_get(ed->pts, (size_t)ed->selected);
+        ed->orig_x = ctrl->x;
+        ed->orig_y = ctrl->y;
+        ed->press_sx = x;
+        ed->press_sy = y;
+    } else if (hit >= 0) {
         /* Select existing point, prepare for drag */
         DC_Point2 *p = dc_array_get(ed->pts, (size_t)hit);
         ed->selected = hit;
@@ -319,6 +386,7 @@ on_press(GtkGestureClick *gesture, int n_press, double x, double y,
         ed->press_sy = y;
     }
 
+    populate_co_selected(ed);
     update_chain_button(ed);
     update_status(ed);
     gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
@@ -357,6 +425,17 @@ on_motion(GtkEventControllerMotion *ctrl, double x, double y, gpointer data)
     p->x = ed->orig_x + dwx;
     p->y = ed->orig_y + dwy;
 
+    /* Move co-selected (overlapping) points by the same delta */
+    int co_n = (int)dc_array_length(ed->co_sel);
+    for (int i = 0; i < co_n; i++) {
+        int *idx = dc_array_get(ed->co_sel, (size_t)i);
+        DC_Point2 *cp = dc_array_get(ed->pts, (size_t)*idx);
+        if (cp) {
+            cp->x = ed->orig_x + dwx;
+            cp->y = ed->orig_y + dwy;
+        }
+    }
+
     gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
 }
 
@@ -369,6 +448,25 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
 {
     (void)ctrl; (void)keycode;
     DC_BezierEditor *ed = data;
+
+    if (keyval == GDK_KEY_Delete || keyval == GDK_KEY_BackSpace) {
+        int count = (int)dc_array_length(ed->pts);
+        int sel = ed->selected;
+        if (sel >= 0 && sel < count) {
+            dc_array_remove(ed->pts, (size_t)sel);
+            dc_array_remove(ed->junctures, (size_t)sel);
+            count--;
+            if (count == 0)
+                ed->selected = -1;
+            else if (sel >= count)
+                ed->selected = count - 1;
+            populate_co_selected(ed);
+            update_chain_button(ed);
+            update_status(ed);
+            gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+        }
+        return TRUE;
+    }
 
     if (keyval == GDK_KEY_c || keyval == GDK_KEY_C) {
         if (state & GDK_SHIFT_MASK) {
@@ -461,6 +559,15 @@ dc_bezier_editor_new(void)
         return NULL;
     }
 
+    ed->co_sel = dc_array_new(sizeof(int));
+    if (!ed->co_sel) {
+        dc_array_free(ed->junctures);
+        dc_array_free(ed->pts);
+        dc_bezier_canvas_free(ed->canvas);
+        free(ed);
+        return NULL;
+    }
+
     ed->selected = -1;
     ed->mouse_down = 0;
     ed->chain_mode = 1;
@@ -534,6 +641,7 @@ void
 dc_bezier_editor_free(DC_BezierEditor *editor)
 {
     if (!editor) return;
+    dc_array_free(editor->co_sel);
     dc_array_free(editor->junctures);
     dc_array_free(editor->pts);
     dc_bezier_canvas_free(editor->canvas);
