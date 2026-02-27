@@ -968,6 +968,7 @@ static const char HELP_SESSIONS[] =
 "  duncad-docs sessions s001   2026-02-24  Initial design goals\n"
 "  duncad-docs sessions s002   2026-02-26  Docs tool; agent revert\n"
 "  duncad-docs sessions s003   2026-02-27  Failed closed-shape endpoint unification\n"
+"  duncad-docs sessions s004   2026-02-27  Closed shapes working; chain-off default\n"
 "\n"
 "SEE ALSO:\n"
 "  duncad-docs phases   Phase status and scheduled work\n"
@@ -1096,6 +1097,57 @@ static const char HELP_SESSIONS_S003[] =
 "  duncad-docs bezier editor   Editor architecture\n";
 
 
+static const char HELP_SESSIONS_S004[] =
+"SESSIONS: S004 -- 2026-02-27: Closed Shapes Working; Chain-Off Default\n"
+"\n"
+"PLATFORM: Claude Code (Opus 4.6)\n"
+"COMMITS: db0c904  feat: closed bezier shapes with smooth/sharp toggle\n"
+"\n"
+"GOAL:\n"
+"  Implement closed bezier shapes where the closure point (P0) can\n"
+"  toggle between sharp corner and smooth C1 curve, with proper\n"
+"  drag constraints. Fix the failure from session s003.\n"
+"\n"
+"APPROACH (No-Duplicate Closure):\n"
+"  Previous attempt (s003) used a virtual P0 appended to the screen\n"
+"  coordinate array. It failed because the agent never visually\n"
+"  tested. This session used a different approach:\n"
+"  - Snap-to-close pushes ONLY the closing control point (no dup P0)\n"
+"  - ed->closed flag marks the shape as a closed loop\n"
+"  - Data layout: [P0, C1, P2, ..., Pn, Cn+1] — even point count\n"
+"  - Last point is always an odd-indexed off-curve control\n"
+"  - Closing segment wraps: (P_last_even, C_last, P0)\n"
+"\n"
+"WHAT WAS IMPLEMENTED:\n"
+"  1. Struct: added closed flag, C1 drag originals, is_closed accessor\n"
+"  2. is_juncture: closed shapes check actual flags (P0 not forced)\n"
+"  3. Snap-to-close: push only control, set closed=1, P0 flag=chain\n"
+"  4. Rendering: circular juncture spans with wrap buffers\n"
+"  5. P0 toggle: C key, chain button, on_chain_toggled all allow P0\n"
+"  6. C1 enforcement: enforce_c1_at_p0() shifts controls to midpoint\n"
+"  7. C1 drag: P0 moves neighbors, C_first/C_last mirror each other\n"
+"  8. Delete reopens shape (closed=0)\n"
+"  9. Chain mode defaults to OFF (user preference: smooth curves)\n"
+"\n"
+"KEY DECISIONS:\n"
+"  - Chain mode defaults to OFF — new points create continuous curves\n"
+"  - C1 math: P0 = midpoint(C_first, C_last); controls shift equally\n"
+"  - Drag P0 smooth: move P0 + C_first + C_last by same delta\n"
+"  - Drag C_first/C_last smooth: mirror opposite across P0\n"
+"  - 256 max juncture indices in stack array (practical limit)\n"
+"\n"
+"LESSON LEARNED:\n"
+"  Session s003 failed because the agent never visually tested.\n"
+"  This session built incrementally and the user visually verified\n"
+"  at each milestone. Always build and let the user test before\n"
+"  claiming success. Sophia (humble curiosity) over Yaldabaoth\n"
+"  (blind certainty).\n"
+"\n"
+"SEE ALSO:\n"
+"  duncad-docs sessions s003   Previous failed attempt\n"
+"  duncad-docs bezier editor   Editor architecture with closed-shape docs\n";
+
+
 /* ---- TREE REGISTRY ---- */
 
 struct help_node {
@@ -1168,6 +1220,7 @@ static const struct help_node TREE[] = {
     { "sessions.s001",               HELP_SESSIONS_S001 },
     { "sessions.s002",               HELP_SESSIONS_S002 },
     { "sessions.s003",               HELP_SESSIONS_S003 },
+    { "sessions.s004",               HELP_SESSIONS_S004 },
 
     /* add new nodes above this line */
     { NULL, NULL }
