@@ -69,4 +69,47 @@ void dc_bezier_canvas_world_to_screen(DC_BezierCanvas *canvas,
                                       double wx, double wy,
                                       double *sx, double *sy);
 
+/* -------------------------------------------------------------------------
+ * Curve binding
+ * ---------------------------------------------------------------------- */
+
+struct DC_BezierCurve;
+
+/* Set a borrowed curve pointer for the canvas to render.
+ * The canvas does NOT own the curve. Pass NULL to clear. */
+void dc_bezier_canvas_set_curve(DC_BezierCanvas *canvas,
+                                struct DC_BezierCurve *curve);
+
+/* -------------------------------------------------------------------------
+ * Status-bar window (no destroy-notify variant)
+ * ---------------------------------------------------------------------- */
+
+/* Like set_window() but does NOT register destroy-notify.
+ * Used by the editor which manages its own lifecycle. */
+void dc_bezier_canvas_set_status_window(DC_BezierCanvas *canvas,
+                                        GtkWidget *window);
+
+/* -------------------------------------------------------------------------
+ * Overlay callback
+ * ---------------------------------------------------------------------- */
+
+typedef void (*DC_CanvasOverlayCb)(DC_BezierCanvas *canvas, cairo_t *cr,
+                                   int width, int height, void *userdata);
+
+/* Register a callback invoked after the grid+curve are drawn but in
+ * screen (pixel) coordinates.  Used by the editor to draw knot/handle
+ * dots at fixed pixel sizes. */
+void dc_bezier_canvas_set_overlay_cb(DC_BezierCanvas *canvas,
+                                     DC_CanvasOverlayCb cb, void *userdata);
+
+/* -------------------------------------------------------------------------
+ * Zoom read-back
+ * ---------------------------------------------------------------------- */
+
+/* Return the current zoom level (pixels per mm). */
+double dc_bezier_canvas_get_zoom(const DC_BezierCanvas *canvas);
+
+/* Return 1 if space bar is currently held (pan mode), 0 otherwise. */
+int dc_bezier_canvas_space_held(const DC_BezierCanvas *canvas);
+
 #endif /* DC_BEZIER_CANVAS_H */

@@ -1,4 +1,6 @@
 #include "bezier/bezier_canvas.h"
+#include "bezier/bezier_curve.h"
+#include "core/array.h"
 #include "core/log.h"
 #include "ui/app_window.h"
 
@@ -37,6 +39,11 @@ struct DC_BezierCanvas {
     int         panning;      /* 1 while a pan drag is in progress */
     double      drag_start_pan_x;
     double      drag_start_pan_y;
+
+    /* Curve rendering (Phase 2.3) */
+    DC_BezierCurve     *curve;          /* borrowed, not owned */
+    DC_CanvasOverlayCb  overlay_cb;
+    void               *overlay_data;
 };
 
 /* -------------------------------------------------------------------------
@@ -78,8 +85,6 @@ static void on_key_released(GtkEventControllerKey *ctrl,
                             guint keyval, guint keycode,
                             GdkModifierType state, gpointer data);
 
-static void on_click_pressed(GtkGestureClick *gesture, int n_press,
-                             double x, double y, gpointer data);
 
 /* -------------------------------------------------------------------------
  * Drawing helpers
@@ -189,6 +194,32 @@ on_draw(GtkDrawingArea *area, cairo_t *cr,
     /* Draw in world coords from here */
     draw_grid(cr, c->zoom, c->pan_x, c->pan_y, width, height);
     draw_origin_crosshair(cr, c->zoom, c->pan_x, c->pan_y, width, height);
+
+    /* Draw curve polyline in world coordinates */
+    if (c->curve && dc_bezier_curve_knot_count(c->curve) >= 2) {
+        DC_Array *pts = dc_array_new(sizeof(DC_Point2));
+        if (pts && dc_bezier_curve_polyline(c->curve, 0.5, pts) == 0) {
+            size_t n = dc_array_length(pts);
+            if (n > 0) {
+                DC_Point2 *p0 = dc_array_get(pts, 0);
+                cairo_move_to(cr, p0->x, p0->y);
+                for (size_t i = 1; i < n; i++) {
+                    DC_Point2 *p = dc_array_get(pts, i);
+                    cairo_line_to(cr, p->x, p->y);
+                }
+                cairo_set_source_rgba(cr, 0.93, 0.93, 0.95, 1.0);
+                cairo_set_line_width(cr, 2.0 / c->zoom);
+                cairo_stroke(cr);
+            }
+        }
+        dc_array_free(pts);
+    }
+
+    /* Reset transform for overlay (screen coordinates) */
+    if (c->overlay_cb) {
+        cairo_identity_matrix(cr);
+        c->overlay_cb(c, cr, width, height, c->overlay_data);
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -392,18 +423,6 @@ on_key_released(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
 }
 
 /* -------------------------------------------------------------------------
- * Click handler (grab focus)
- * ---------------------------------------------------------------------- */
-static void
-on_click_pressed(GtkGestureClick *gesture, int n_press,
-                 double x, double y, gpointer data)
-{
-    (void)gesture; (void)n_press; (void)x; (void)y;
-    DC_BezierCanvas *c = data;
-    gtk_widget_grab_focus(c->drawing_area);
-}
-
-/* -------------------------------------------------------------------------
  * Destroy notify for g_object_set_data_full
  * ---------------------------------------------------------------------- */
 static void
@@ -473,12 +492,6 @@ dc_bezier_canvas_new(void)
     g_signal_connect(key, "key-pressed", G_CALLBACK(on_key_pressed), c);
     g_signal_connect(key, "key-released", G_CALLBACK(on_key_released), c);
     gtk_widget_add_controller(c->drawing_area, key);
-
-    /* Click (grab focus) */
-    GtkGesture *click = gtk_gesture_click_new();
-    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 1);
-    g_signal_connect(click, "pressed", G_CALLBACK(on_click_pressed), c);
-    gtk_widget_add_controller(c->drawing_area, GTK_EVENT_CONTROLLER(click));
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
            "bezier canvas created (zoom=%.1f px/mm)", c->zoom);
@@ -554,4 +567,43 @@ dc_bezier_canvas_world_to_screen(DC_BezierCanvas *canvas,
     /* screen = center + (world - pan) * (zoom, -zoom) */
     if (sx) *sx = w / 2.0 + (wx - canvas->pan_x) * canvas->zoom;
     if (sy) *sy = h / 2.0 - (wy - canvas->pan_y) * canvas->zoom;
+}
+
+void
+dc_bezier_canvas_set_curve(DC_BezierCanvas *canvas, DC_BezierCurve *curve)
+{
+    if (!canvas) return;
+    canvas->curve = curve;
+    gtk_widget_queue_draw(canvas->drawing_area);
+}
+
+void
+dc_bezier_canvas_set_status_window(DC_BezierCanvas *canvas, GtkWidget *window)
+{
+    if (!canvas) return;
+    canvas->window = window;
+    /* No destroy-notify — the editor manages the lifecycle. */
+}
+
+void
+dc_bezier_canvas_set_overlay_cb(DC_BezierCanvas *canvas,
+                                DC_CanvasOverlayCb cb, void *userdata)
+{
+    if (!canvas) return;
+    canvas->overlay_cb = cb;
+    canvas->overlay_data = userdata;
+}
+
+double
+dc_bezier_canvas_get_zoom(const DC_BezierCanvas *canvas)
+{
+    if (!canvas) return 1.0;
+    return canvas->zoom;
+}
+
+int
+dc_bezier_canvas_space_held(const DC_BezierCanvas *canvas)
+{
+    if (!canvas) return 0;
+    return canvas->space_held;
 }

@@ -427,6 +427,121 @@ test_continuity_corner(void)
     return 0;
 }
 
+static int
+test_clone_basic(void)
+{
+    DC_BezierCurve *curve = dc_bezier_curve_new();
+    dc_bezier_curve_add_knot(curve, 1.0, 2.0);
+    dc_bezier_curve_add_knot(curve, 3.0, 4.0);
+    dc_bezier_curve_add_knot(curve, 5.0, 6.0);
+
+    DC_BezierKnot *k1 = dc_bezier_curve_get_knot(curve, 1);
+    k1->hnx = 10.0;
+    k1->hny = 20.0;
+    dc_bezier_curve_set_continuity(curve, 1, DC_CONTINUITY_CORNER);
+
+    DC_BezierCurve *clone = dc_bezier_curve_clone(curve);
+    ASSERT(clone != NULL);
+    ASSERT(dc_bezier_curve_knot_count(clone) == 3);
+
+    DC_BezierKnot *ck0 = dc_bezier_curve_get_knot(clone, 0);
+    ASSERT_NEAR(ck0->x, 1.0, EPS);
+    ASSERT_NEAR(ck0->y, 2.0, EPS);
+
+    DC_BezierKnot *ck1 = dc_bezier_curve_get_knot(clone, 1);
+    ASSERT_NEAR(ck1->hnx, 10.0, EPS);
+    ASSERT_NEAR(ck1->hny, 20.0, EPS);
+    ASSERT(ck1->cont == DC_CONTINUITY_CORNER);
+
+    DC_BezierKnot *ck2 = dc_bezier_curve_get_knot(clone, 2);
+    ASSERT_NEAR(ck2->x, 5.0, EPS);
+    ASSERT_NEAR(ck2->y, 6.0, EPS);
+
+    dc_bezier_curve_free(clone);
+    dc_bezier_curve_free(curve);
+    return 0;
+}
+
+static int
+test_clone_empty(void)
+{
+    DC_BezierCurve *curve = dc_bezier_curve_new();
+    DC_BezierCurve *clone = dc_bezier_curve_clone(curve);
+    ASSERT(clone != NULL);
+    ASSERT(dc_bezier_curve_knot_count(clone) == 0);
+    dc_bezier_curve_free(clone);
+    dc_bezier_curve_free(curve);
+    return 0;
+}
+
+static int
+test_clone_null(void)
+{
+    ASSERT(dc_bezier_curve_clone(NULL) == NULL);
+    return 0;
+}
+
+static int
+test_clone_independent(void)
+{
+    DC_BezierCurve *curve = dc_bezier_curve_new();
+    dc_bezier_curve_add_knot(curve, 1.0, 2.0);
+    dc_bezier_curve_add_knot(curve, 3.0, 4.0);
+
+    DC_BezierCurve *clone = dc_bezier_curve_clone(curve);
+
+    /* Modify original */
+    DC_BezierKnot *k = dc_bezier_curve_get_knot(curve, 0);
+    k->x = 99.0;
+    k->y = 99.0;
+
+    /* Clone should be unaffected */
+    DC_BezierKnot *ck = dc_bezier_curve_get_knot(clone, 0);
+    ASSERT_NEAR(ck->x, 1.0, EPS);
+    ASSERT_NEAR(ck->y, 2.0, EPS);
+
+    dc_bezier_curve_free(clone);
+    dc_bezier_curve_free(curve);
+    return 0;
+}
+
+static int
+test_remove_knot(void)
+{
+    DC_BezierCurve *curve = dc_bezier_curve_new();
+    dc_bezier_curve_add_knot(curve, 1.0, 2.0);
+    dc_bezier_curve_add_knot(curve, 3.0, 4.0);
+    dc_bezier_curve_add_knot(curve, 5.0, 6.0);
+
+    ASSERT(dc_bezier_curve_remove_knot(curve, 1) == 0);
+    ASSERT(dc_bezier_curve_knot_count(curve) == 2);
+
+    DC_BezierKnot *k0 = dc_bezier_curve_get_knot(curve, 0);
+    ASSERT_NEAR(k0->x, 1.0, EPS);
+    DC_BezierKnot *k1 = dc_bezier_curve_get_knot(curve, 1);
+    ASSERT_NEAR(k1->x, 5.0, EPS);
+
+    dc_bezier_curve_free(curve);
+    return 0;
+}
+
+static int
+test_remove_knot_out_of_bounds(void)
+{
+    DC_BezierCurve *curve = dc_bezier_curve_new();
+    dc_bezier_curve_add_knot(curve, 1.0, 2.0);
+
+    ASSERT(dc_bezier_curve_remove_knot(curve, -1) == -1);
+    ASSERT(dc_bezier_curve_remove_knot(curve, 1) == -1);
+    ASSERT(dc_bezier_curve_remove_knot(curve, 100) == -1);
+    ASSERT(dc_bezier_curve_remove_knot(NULL, 0) == -1);
+
+    ASSERT(dc_bezier_curve_knot_count(curve) == 1);
+
+    dc_bezier_curve_free(curve);
+    return 0;
+}
+
 /* -------------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
@@ -448,6 +563,12 @@ main(void)
     RUN_TEST(test_continuity_smooth);
     RUN_TEST(test_continuity_symmetric);
     RUN_TEST(test_continuity_corner);
+    RUN_TEST(test_clone_basic);
+    RUN_TEST(test_clone_empty);
+    RUN_TEST(test_clone_null);
+    RUN_TEST(test_clone_independent);
+    RUN_TEST(test_remove_knot);
+    RUN_TEST(test_remove_knot_out_of_bounds);
 
     fprintf(stderr, "=== %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

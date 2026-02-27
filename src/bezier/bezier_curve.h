@@ -85,6 +85,12 @@ DC_BezierKnot *dc_bezier_curve_get_knot(DC_BezierCurve *curve, int index);
 int dc_bezier_curve_set_continuity(DC_BezierCurve *curve, int index,
                                    DC_Continuity c);
 
+/* Deep-copy a curve. Returns NULL if src is NULL or on allocation failure. */
+DC_BezierCurve *dc_bezier_curve_clone(const DC_BezierCurve *src);
+
+/* Remove the knot at index, shifting later knots left. Returns 0/-1. */
+int dc_bezier_curve_remove_knot(DC_BezierCurve *curve, int index);
+
 /* -------------------------------------------------------------------------
  * Evaluation
  * ---------------------------------------------------------------------- */

@@ -1,5 +1,5 @@
 #include "app_window.h"
-#include "bezier/bezier_canvas.h"
+#include "bezier/bezier_editor.h"
 #include "core/log.h"
 
 #include <string.h>
@@ -159,9 +159,9 @@ dc_app_window_create(GtkApplication *app)
     GtkWidget *left_panel   = make_placeholder_panel("Left Panel\n(Component Tree)");
     GtkWidget *right_panel  = make_placeholder_panel("Right Panel\n(Inspector / Properties)");
 
-    /* Bezier canvas replaces the center placeholder */
-    DC_BezierCanvas *canvas = dc_bezier_canvas_new();
-    GtkWidget *canvas_widget = dc_bezier_canvas_widget(canvas);
+    /* Bezier editor (owns canvas + curve) replaces the center placeholder */
+    DC_BezierEditor *editor = dc_bezier_editor_new();
+    GtkWidget *canvas_widget = dc_bezier_editor_widget(editor);
 
     /* Wrap side panels in scrolled windows for future-proofing */
     GtkWidget *left_scroll = gtk_scrolled_window_new();
@@ -223,9 +223,9 @@ dc_app_window_create(GtkApplication *app)
     g_object_set_data(G_OBJECT(window), DC_KEY_STATUS_LABEL,
                       (gpointer)status_label);
 
-    /* Wire the bezier canvas to the window for status updates and
+    /* Wire the editor to the window for status updates and
      * automatic cleanup via destroy-notify. */
-    dc_bezier_canvas_set_window(canvas, window);
+    dc_bezier_editor_set_window(editor, window);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "application window created");
 

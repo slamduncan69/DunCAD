@@ -76,6 +76,33 @@ dc_bezier_curve_get_knot(DC_BezierCurve *curve, int index)
     return dc_array_get(curve->knots, (size_t)index);
 }
 
+DC_BezierCurve *
+dc_bezier_curve_clone(const DC_BezierCurve *src)
+{
+    if (!src) return NULL;
+
+    DC_BezierCurve *dst = dc_bezier_curve_new();
+    if (!dst) return NULL;
+
+    int n = dc_bezier_curve_knot_count(src);
+    for (int i = 0; i < n; i++) {
+        DC_BezierKnot *k = dc_array_get((DC_Array *)src->knots, (size_t)i);
+        if (dc_array_push(dst->knots, k) != 0) {
+            dc_bezier_curve_free(dst);
+            return NULL;
+        }
+    }
+
+    return dst;
+}
+
+int
+dc_bezier_curve_remove_knot(DC_BezierCurve *curve, int index)
+{
+    if (!curve || index < 0) return -1;
+    return dc_array_remove(curve->knots, (size_t)index);
+}
+
 int
 dc_bezier_curve_set_continuity(DC_BezierCurve *curve, int index,
                                DC_Continuity c)
