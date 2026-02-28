@@ -23,5 +23,14 @@ void             dc_bezier_editor_set_window(DC_BezierEditor *editor,
 int              dc_bezier_editor_point_count(const DC_BezierEditor *editor);
 int              dc_bezier_editor_selected_point(const DC_BezierEditor *editor);
 int              dc_bezier_editor_is_closed(const DC_BezierEditor *editor);
+int              dc_bezier_editor_get_point(const DC_BezierEditor *editor,
+                                            int index,
+                                            double *x, double *y);
+void             dc_bezier_editor_set_point(DC_BezierEditor *editor,
+                                            int index,
+                                            double x, double y);
+int              dc_bezier_editor_is_juncture(const DC_BezierEditor *editor,
+                                              int index);
+int              dc_bezier_editor_get_chain_mode(const DC_BezierEditor *editor);
 
 #endif /* DC_BEZIER_EDITOR_H */

@@ -95,6 +95,59 @@ test_initial_not_closed(void)
     return 0;
 }
 
+static int
+test_get_point_empty(void)
+{
+    DC_BezierEditor *ed = dc_bezier_editor_new();
+    ASSERT(ed != NULL);
+    double x = 999.0, y = 999.0;
+    ASSERT(dc_bezier_editor_get_point(ed, 0, &x, &y) == 0);
+    /* x, y should be untouched on failure */
+    ASSERT(x == 999.0);
+    ASSERT(y == 999.0);
+    dc_bezier_editor_free(ed);
+    return 0;
+}
+
+static int
+test_get_point_null(void)
+{
+    ASSERT(dc_bezier_editor_get_point(NULL, 0, NULL, NULL) == 0);
+    return 0;
+}
+
+static int
+test_set_point_null(void)
+{
+    /* Should not crash */
+    dc_bezier_editor_set_point(NULL, 0, 1.0, 2.0);
+    return 0;
+}
+
+static int
+test_is_juncture_null(void)
+{
+    ASSERT(dc_bezier_editor_is_juncture(NULL, 0) == 0);
+    return 0;
+}
+
+static int
+test_get_chain_mode_null(void)
+{
+    ASSERT(dc_bezier_editor_get_chain_mode(NULL) == 0);
+    return 0;
+}
+
+static int
+test_get_chain_mode_default(void)
+{
+    DC_BezierEditor *ed = dc_bezier_editor_new();
+    ASSERT(ed != NULL);
+    ASSERT(dc_bezier_editor_get_chain_mode(ed) == 0);
+    dc_bezier_editor_free(ed);
+    return 0;
+}
+
 /* -------------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
@@ -112,6 +165,12 @@ main(int argc, char *argv[])
     RUN_TEST(test_initial_state);
     RUN_TEST(test_null_accessors);
     RUN_TEST(test_initial_not_closed);
+    RUN_TEST(test_get_point_empty);
+    RUN_TEST(test_get_point_null);
+    RUN_TEST(test_set_point_null);
+    RUN_TEST(test_is_juncture_null);
+    RUN_TEST(test_get_chain_mode_null);
+    RUN_TEST(test_get_chain_mode_default);
 
     fprintf(stderr, "=== %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

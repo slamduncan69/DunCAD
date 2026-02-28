@@ -41,6 +41,14 @@ struct DC_BezierEditor {
     double           orig_c1_x, orig_c1_y;  /* neighbor control originals for C1 drag */
     double           orig_c2_x, orig_c2_y;
     DC_Array        *co_sel;        /* DC_Array of int: indices co-located with selected */
+    /* Numeric input panel */
+    GtkWidget       *panel_box;     /* horizontal container below canvas */
+    GtkWidget       *point_label;   /* "P3 (control)" or "No selection" */
+    GtkWidget       *entry_x;      /* X coordinate entry */
+    GtkWidget       *entry_y;      /* Y coordinate entry */
+    GtkWidget       *stats_label;  /* "4 pts  2 segs  Open  Chain: OFF" */
+    gulong           entry_x_hid;  /* "activate" signal handler ID */
+    gulong           entry_y_hid;
 };
 
 /* -------------------------------------------------------------------------
@@ -139,6 +147,109 @@ enforce_c1_at_p0(DC_BezierEditor *ed)
     double dy = p0->y - my;
     c1->x += dx;  c1->y += dy;
     cn->x += dx;  cn->y += dy;
+}
+
+/* Forward declaration — update_status is defined after refresh_panel */
+static void update_status(DC_BezierEditor *ed);
+
+/* -------------------------------------------------------------------------
+ * Numeric input panel — refresh from editor state
+ * ---------------------------------------------------------------------- */
+static void
+refresh_panel(DC_BezierEditor *ed)
+{
+    if (!ed->panel_box) return;
+    int count = (int)dc_array_length(ed->pts);
+    int sel = ed->selected;
+
+    if (sel >= 0 && sel < count) {
+        DC_Point2 *p = dc_array_get(ed->pts, (size_t)sel);
+        const char *kind = is_juncture(ed, sel) ? "juncture" : "control";
+        char lbl[64];
+        snprintf(lbl, sizeof(lbl), "P%d (%s)", sel, kind);
+        gtk_label_set_text(GTK_LABEL(ed->point_label), lbl);
+
+        /* Update entries — block signals to avoid feedback */
+        char buf[32];
+        g_signal_handler_block(ed->entry_x, ed->entry_x_hid);
+        g_signal_handler_block(ed->entry_y, ed->entry_y_hid);
+        snprintf(buf, sizeof(buf), "%.2f", p->x);
+        gtk_editable_set_text(GTK_EDITABLE(ed->entry_x), buf);
+        snprintf(buf, sizeof(buf), "%.2f", p->y);
+        gtk_editable_set_text(GTK_EDITABLE(ed->entry_y), buf);
+        g_signal_handler_unblock(ed->entry_x, ed->entry_x_hid);
+        g_signal_handler_unblock(ed->entry_y, ed->entry_y_hid);
+
+        gtk_widget_set_sensitive(ed->entry_x, TRUE);
+        gtk_widget_set_sensitive(ed->entry_y, TRUE);
+    } else {
+        gtk_label_set_text(GTK_LABEL(ed->point_label), "No selection");
+        g_signal_handler_block(ed->entry_x, ed->entry_x_hid);
+        g_signal_handler_block(ed->entry_y, ed->entry_y_hid);
+        gtk_editable_set_text(GTK_EDITABLE(ed->entry_x), "--");
+        gtk_editable_set_text(GTK_EDITABLE(ed->entry_y), "--");
+        g_signal_handler_unblock(ed->entry_x, ed->entry_x_hid);
+        g_signal_handler_unblock(ed->entry_y, ed->entry_y_hid);
+        gtk_widget_set_sensitive(ed->entry_x, FALSE);
+        gtk_widget_set_sensitive(ed->entry_y, FALSE);
+    }
+
+    /* Stats label */
+    int num_segments = 0;
+    if (ed->closed && count >= 2) {
+        int njunc = 0;
+        for (int i = 0; i < count; i += 2) {
+            if (is_juncture(ed, i)) njunc++;
+        }
+        num_segments = (njunc > 0) ? njunc : 1;
+    } else if (count >= 2) {
+        for (int i = 1; i < count; i++) {
+            if (i == count - 1 || is_juncture(ed, i))
+                num_segments++;
+        }
+    }
+
+    char stats[128];
+    snprintf(stats, sizeof(stats), "%d pt%s  %d seg%s  %s  Chain: %s",
+             count, count == 1 ? "" : "s",
+             num_segments, num_segments == 1 ? "" : "s",
+             ed->closed ? "Closed" : "Open",
+             ed->chain_mode ? "ON" : "OFF");
+    gtk_label_set_text(GTK_LABEL(ed->stats_label), stats);
+}
+
+/* -------------------------------------------------------------------------
+ * Entry commit handler — user typed a coordinate value
+ * ---------------------------------------------------------------------- */
+static void
+on_entry_activate(GtkEntry *entry, gpointer data)
+{
+    DC_BezierEditor *ed = data;
+    int sel = ed->selected;
+    int count = (int)dc_array_length(ed->pts);
+    if (sel < 0 || sel >= count) return;
+
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(entry));
+    char *end = NULL;
+    double val = strtod(text, &end);
+    if (end == text) return;  /* invalid parse */
+
+    DC_Point2 *p = dc_array_get(ed->pts, (size_t)sel);
+    if (!p) return;
+
+    if (GTK_WIDGET(entry) == ed->entry_x)
+        p->x = val;
+    else
+        p->y = val;
+
+    /* Enforce C1 at P0 if closed + smooth */
+    if (ed->closed && !is_juncture(ed, 0))
+        enforce_c1_at_p0(ed);
+
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+    refresh_panel(ed);
+    update_status(ed);
+    gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
 }
 
 /* -------------------------------------------------------------------------
@@ -455,6 +566,7 @@ on_press(GtkGestureClick *gesture, int n_press, double x, double y,
         populate_co_selected(ed);
         update_chain_button(ed);
         update_status(ed);
+        refresh_panel(ed);
         gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
         (void)gesture;
         return;
@@ -539,6 +651,7 @@ on_press(GtkGestureClick *gesture, int n_press, double x, double y,
     populate_co_selected(ed);
     update_chain_button(ed);
     update_status(ed);
+    refresh_panel(ed);
     gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
     (void)gesture;
 }
@@ -639,6 +752,7 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
             populate_co_selected(ed);
             update_chain_button(ed);
             update_status(ed);
+            refresh_panel(ed);
             gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
         }
         return TRUE;
@@ -673,6 +787,7 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
             }
         }
         update_status(ed);
+        refresh_panel(ed);
         gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
         return TRUE;
     }
@@ -688,6 +803,7 @@ on_global_chain_toggled(GtkToggleButton *btn, gpointer data)
     DC_BezierEditor *ed = data;
     ed->chain_mode = gtk_toggle_button_get_active(btn) ? 1 : 0;
     update_status(ed);
+    refresh_panel(ed);
     gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
 }
 
@@ -712,6 +828,7 @@ on_chain_toggled(GtkToggleButton *btn, gpointer data)
     }
 
     update_status(ed);
+    refresh_panel(ed);
     gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
     gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
 }
@@ -822,6 +939,55 @@ dc_bezier_editor_new(void)
     gtk_widget_set_vexpand(canvas_widget, TRUE);
     gtk_box_append(GTK_BOX(ed->container), canvas_widget);
 
+    /* --- Numeric input panel below canvas --- */
+    ed->panel_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_margin_start(ed->panel_box, 6);
+    gtk_widget_set_margin_end(ed->panel_box, 6);
+    gtk_widget_set_margin_top(ed->panel_box, 2);
+    gtk_widget_set_margin_bottom(ed->panel_box, 4);
+
+    /* Point label */
+    ed->point_label = gtk_label_new("No selection");
+    gtk_label_set_width_chars(GTK_LABEL(ed->point_label), 16);
+    gtk_label_set_xalign(GTK_LABEL(ed->point_label), 0.0f);
+    gtk_box_append(GTK_BOX(ed->panel_box), ed->point_label);
+
+    /* X entry */
+    GtkWidget *x_label = gtk_label_new("X:");
+    gtk_box_append(GTK_BOX(ed->panel_box), x_label);
+    ed->entry_x = gtk_entry_new();
+    gtk_editable_set_text(GTK_EDITABLE(ed->entry_x), "--");
+    gtk_editable_set_width_chars(GTK_EDITABLE(ed->entry_x), 8);
+    gtk_widget_set_sensitive(ed->entry_x, FALSE);
+    gtk_widget_set_focusable(ed->entry_x, TRUE);
+    ed->entry_x_hid = g_signal_connect(ed->entry_x, "activate",
+                                        G_CALLBACK(on_entry_activate), ed);
+    gtk_box_append(GTK_BOX(ed->panel_box), ed->entry_x);
+
+    /* Y entry */
+    GtkWidget *y_label = gtk_label_new("Y:");
+    gtk_box_append(GTK_BOX(ed->panel_box), y_label);
+    ed->entry_y = gtk_entry_new();
+    gtk_editable_set_text(GTK_EDITABLE(ed->entry_y), "--");
+    gtk_editable_set_width_chars(GTK_EDITABLE(ed->entry_y), 8);
+    gtk_widget_set_sensitive(ed->entry_y, FALSE);
+    gtk_widget_set_focusable(ed->entry_y, TRUE);
+    ed->entry_y_hid = g_signal_connect(ed->entry_y, "activate",
+                                        G_CALLBACK(on_entry_activate), ed);
+    gtk_box_append(GTK_BOX(ed->panel_box), ed->entry_y);
+
+    /* Separator */
+    GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+    gtk_box_append(GTK_BOX(ed->panel_box), sep);
+
+    /* Stats label */
+    ed->stats_label = gtk_label_new("0 pts  0 segs  Open  Chain: OFF");
+    gtk_label_set_xalign(GTK_LABEL(ed->stats_label), 0.0f);
+    gtk_widget_set_hexpand(ed->stats_label, TRUE);
+    gtk_box_append(GTK_BOX(ed->panel_box), ed->stats_label);
+
+    gtk_box_append(GTK_BOX(ed->container), ed->panel_box);
+
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "bezier editor created");
     return ed;
 }
@@ -855,6 +1021,7 @@ dc_bezier_editor_set_window(DC_BezierEditor *editor, GtkWidget *window)
         g_object_set_data_full(G_OBJECT(window), "dc-bezier-editor",
                                editor, editor_destroy_notify);
         update_status(editor);
+        refresh_panel(editor);
     }
 }
 
@@ -877,4 +1044,52 @@ dc_bezier_editor_is_closed(const DC_BezierEditor *editor)
 {
     if (!editor) return 0;
     return editor->closed;
+}
+
+int
+dc_bezier_editor_get_point(const DC_BezierEditor *editor, int index,
+                           double *x, double *y)
+{
+    if (!editor) return 0;
+    int count = (int)dc_array_length(editor->pts);
+    if (index < 0 || index >= count) return 0;
+    DC_Point2 *p = dc_array_get(editor->pts, (size_t)index);
+    if (!p) return 0;
+    if (x) *x = p->x;
+    if (y) *y = p->y;
+    return 1;
+}
+
+void
+dc_bezier_editor_set_point(DC_BezierEditor *editor, int index,
+                           double x, double y)
+{
+    if (!editor) return;
+    int count = (int)dc_array_length(editor->pts);
+    if (index < 0 || index >= count) return;
+    DC_Point2 *p = dc_array_get(editor->pts, (size_t)index);
+    if (!p) return;
+    p->x = x;
+    p->y = y;
+    if (editor->closed && !is_juncture(editor, 0))
+        enforce_c1_at_p0(editor);
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(editor->canvas));
+    refresh_panel(editor);
+}
+
+int
+dc_bezier_editor_is_juncture(const DC_BezierEditor *editor, int index)
+{
+    if (!editor) return 0;
+    int count = (int)dc_array_length(editor->pts);
+    if (index < 0 || index >= count) return 0;
+    /* Cast away const — is_juncture doesn't modify editor */
+    return is_juncture((DC_BezierEditor *)editor, index);
+}
+
+int
+dc_bezier_editor_get_chain_mode(const DC_BezierEditor *editor)
+{
+    if (!editor) return 0;
+    return editor->chain_mode;
 }
