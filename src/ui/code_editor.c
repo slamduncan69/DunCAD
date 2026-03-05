@@ -25,23 +25,21 @@ struct DC_CodeEditor {
 static GtkSourceLanguage *
 find_openscad_language(void)
 {
-    GtkSourceLanguageManager *lm = gtk_source_language_manager_get_default();
+    /* Create a fresh manager — the default one may have already cached
+     * its language IDs, which makes set_search_path() assert-fail. */
+    GtkSourceLanguageManager *lm = gtk_source_language_manager_new();
 
-    /* Try built-in first */
-    GtkSourceLanguage *lang = gtk_source_language_manager_get_language(lm, "openscad");
-    if (lang) return lang;
+    /* Build search path: default dirs + our custom lang dir */
+    const char * const *defaults =
+        gtk_source_language_manager_get_search_path(
+            gtk_source_language_manager_get_default());
 
-    /* Add our data/language-specs directory */
-    const char * const *old_dirs = gtk_source_language_manager_get_search_path(lm);
     GPtrArray *dirs = g_ptr_array_new();
-    if (old_dirs) {
-        for (int i = 0; old_dirs[i]; i++)
-            g_ptr_array_add(dirs, (gpointer)old_dirs[i]);
+    if (defaults) {
+        for (int i = 0; defaults[i]; i++)
+            g_ptr_array_add(dirs, (gpointer)defaults[i]);
     }
 
-    /* Find our data dir relative to the executable.
-     * In development: <build>/bin/duncad → <source>/data/language-specs
-     * We use a compile-time definition for the source dir. */
 #ifdef DC_SOURCE_DIR
     char custom_dir[1024];
     snprintf(custom_dir, sizeof(custom_dir), "%s/data/language-specs", DC_SOURCE_DIR);
@@ -53,11 +51,16 @@ find_openscad_language(void)
         lm, (const char * const *)dirs->pdata);
     g_ptr_array_free(dirs, TRUE);
 
-    lang = gtk_source_language_manager_get_language(lm, "openscad");
+    GtkSourceLanguage *lang = gtk_source_language_manager_get_language(lm, "openscad");
     if (lang)
         dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "code_editor: loaded openscad.lang");
     else
         dc_log(DC_LOG_WARN, DC_LOG_EVENT_APP, "code_editor: openscad.lang not found");
+
+    /* Store as static — manager must outlive the language object */
+    static GtkSourceLanguageManager *s_lm = NULL;
+    if (s_lm) g_object_unref(s_lm);
+    s_lm = lm;
 
     return lang;
 }
