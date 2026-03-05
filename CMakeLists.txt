@@ -84,6 +84,7 @@ add_executable(duncad
     src/main.c
     src/ui/app_window.c
     src/ui/code_editor.c
+    src/ui/scad_preview.c
     src/bezier/bezier_canvas.c
     src/bezier/bezier_editor.c
     src/inspect/inspect.c
@@ -146,6 +147,8 @@ add_executable(test_bezier_canvas
     src/bezier/bezier_editor.c
     src/ui/app_window.c
     src/ui/code_editor.c
+    src/ui/scad_preview.c
+    src/scad/scad_runner.c
 )
 target_include_directories(test_bezier_canvas PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_compile_definitions(test_bezier_canvas PRIVATE DC_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -153,6 +156,7 @@ target_link_libraries(test_bezier_canvas
     PRIVATE dc_core
     PRIVATE PkgConfig::GTK4
     PRIVATE PkgConfig::GTKSV
+    PRIVATE PkgConfig::GIO
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
     PRIVATE m
@@ -169,6 +173,8 @@ add_executable(test_bezier_editor
     src/bezier/bezier_editor.c
     src/ui/app_window.c
     src/ui/code_editor.c
+    src/ui/scad_preview.c
+    src/scad/scad_runner.c
 )
 target_include_directories(test_bezier_editor PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_compile_definitions(test_bezier_editor PRIVATE DC_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -176,6 +182,7 @@ target_link_libraries(test_bezier_editor
     PRIVATE dc_core
     PRIVATE PkgConfig::GTK4
     PRIVATE PkgConfig::GTKSV
+    PRIVATE PkgConfig::GIO
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
     PRIVATE m

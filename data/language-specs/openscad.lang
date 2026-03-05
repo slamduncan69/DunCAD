@@ -4,11 +4,11 @@
   Based on the OpenSCAD language reference.
 -->
 <language id="openscad" name="OpenSCAD" version="2.0"
-          _section="Script"
-          mimetypes="text/x-openscad"
-          globs="*.scad">
+          _section="Script">
 
   <metadata>
+    <property name="mimetypes">text/x-openscad</property>
+    <property name="globs">*.scad</property>
     <property name="line-comment-start">//</property>
     <property name="block-comment-start">/*</property>
     <property name="block-comment-end">*/</property>

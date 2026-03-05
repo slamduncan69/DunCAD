@@ -1,5 +1,6 @@
 #include "app_window.h"
 #include "ui/code_editor.h"
+#include "ui/scad_preview.h"
 #include "bezier/bezier_editor.h"
 #include "core/log.h"
 
@@ -149,41 +150,53 @@ dc_app_window_create(GtkApplication *app)
     /*
      * Structure:
      *   outer_paned (horizontal)
-     *     ├─ left panel  (placeholder — future: file/component tree)
-     *     └─ right_paned (horizontal)
-     *         ├─ center panel (placeholder — future: main editor/canvas)
-     *         └─ right panel  (placeholder — future: properties/inspector)
+     *     ├─ left: code editor (~400px)
+     *     └─ inner_paned (horizontal)
+     *         ├─ center: OpenSCAD 3D preview (flexible)
+     *         └─ right_paned (vertical, ~400px)
+     *             ├─ top: bezier curve editor (square-ish)
+     *             └─ bottom: placeholder (future properties)
      */
-    GtkWidget *outer_paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
-    GtkWidget *right_paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
-    GtkWidget *left_panel   = make_placeholder_panel("Left Panel\n(Component Tree)");
-    /* Code editor replaces the right panel placeholder */
+    /* Create the panels */
     DC_CodeEditor *code_ed = dc_code_editor_new();
-    GtkWidget *right_panel = dc_code_editor_widget(code_ed);
+    GtkWidget *left_panel = dc_code_editor_widget(code_ed);
 
-    /* Bezier editor (owns canvas + curve) replaces the center placeholder */
+    DC_ScadPreview *preview = dc_scad_preview_new();
+    dc_scad_preview_set_code_editor(preview, code_ed);
+    GtkWidget *center_panel = dc_scad_preview_widget(preview);
+
     DC_BezierEditor *editor = dc_bezier_editor_new();
-    GtkWidget *canvas_widget = dc_bezier_editor_widget(editor);
+    GtkWidget *bezier_widget = dc_bezier_editor_widget(editor);
 
-    /* Wrap side panels in scrolled windows for future-proofing */
-    GtkWidget *left_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(left_scroll), left_panel);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(left_scroll),
-                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    GtkWidget *bottom_placeholder = make_placeholder_panel(
+        "Properties\n(Future)");
 
-    /* Assemble panes — canvas goes directly in (no ScrolledWindow) */
-    gtk_paned_set_start_child(GTK_PANED(right_paned), canvas_widget);
-    gtk_paned_set_end_child(GTK_PANED(right_paned), right_panel);
-    gtk_paned_set_position(GTK_PANED(right_paned), 900);
+    /* Right pane: vertical split — bezier (top) + placeholder (bottom) */
+    GtkWidget *right_paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
+    gtk_paned_set_start_child(GTK_PANED(right_paned), bezier_widget);
+    gtk_paned_set_end_child(GTK_PANED(right_paned), bottom_placeholder);
+    gtk_paned_set_position(GTK_PANED(right_paned), 400);
     gtk_paned_set_resize_start_child(GTK_PANED(right_paned), TRUE);
-    gtk_paned_set_resize_end_child(GTK_PANED(right_paned), FALSE);
+    gtk_paned_set_resize_end_child(GTK_PANED(right_paned), TRUE);
     gtk_paned_set_shrink_start_child(GTK_PANED(right_paned), FALSE);
     gtk_paned_set_shrink_end_child(GTK_PANED(right_paned), FALSE);
 
-    gtk_paned_set_start_child(GTK_PANED(outer_paned), left_scroll);
-    gtk_paned_set_end_child(GTK_PANED(outer_paned), right_paned);
-    gtk_paned_set_position(GTK_PANED(outer_paned), 240);
+    /* Inner pane: center preview + right panel */
+    GtkWidget *inner_paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_start_child(GTK_PANED(inner_paned), center_panel);
+    gtk_paned_set_end_child(GTK_PANED(inner_paned), right_paned);
+    gtk_paned_set_position(GTK_PANED(inner_paned), 600);
+    gtk_paned_set_resize_start_child(GTK_PANED(inner_paned), TRUE);
+    gtk_paned_set_resize_end_child(GTK_PANED(inner_paned), FALSE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(inner_paned), FALSE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(inner_paned), FALSE);
+
+    /* Outer pane: left code editor + inner */
+    GtkWidget *outer_paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_start_child(GTK_PANED(outer_paned), left_panel);
+    gtk_paned_set_end_child(GTK_PANED(outer_paned), inner_paned);
+    gtk_paned_set_position(GTK_PANED(outer_paned), 400);
     gtk_paned_set_resize_start_child(GTK_PANED(outer_paned), FALSE);
     gtk_paned_set_resize_end_child(GTK_PANED(outer_paned), TRUE);
     gtk_paned_set_shrink_start_child(GTK_PANED(outer_paned), FALSE);
@@ -229,6 +242,10 @@ dc_app_window_create(GtkApplication *app)
     dc_code_editor_set_window(code_ed, window);
     g_object_set_data_full(G_OBJECT(window), "dc-code-editor", code_ed,
                            (GDestroyNotify)dc_code_editor_free);
+
+    /* Wire the SCAD preview to the window */
+    g_object_set_data_full(G_OBJECT(window), "dc-scad-preview", preview,
+                           (GDestroyNotify)dc_scad_preview_free);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "application window created");
 
