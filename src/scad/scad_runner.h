@@ -64,6 +64,22 @@ DC_ScadJob *dc_scad_render_png(const char *scad_path,
                                 int width, int height,
                                 DC_ScadJobCb cb, void *userdata);
 
+/* Camera parameters for OpenSCAD --camera flag.
+ * translate: world-space translation. rotate: Euler angles (degrees).
+ * distance: camera distance. If distance <= 0, uses --viewall instead. */
+typedef struct {
+    double tx, ty, tz;      /* translation */
+    double rx, ry, rz;      /* rotation (degrees) */
+    double dist;            /* camera distance (0 = auto/viewall) */
+} DC_ScadCamera;
+
+/* Render with explicit camera. cam may be NULL for auto (viewall). */
+DC_ScadJob *dc_scad_render_png_camera(const char *scad_path,
+                                       const char *png_path,
+                                       int width, int height,
+                                       const DC_ScadCamera *cam,
+                                       DC_ScadJobCb cb, void *userdata);
+
 /* Export a .scad file to STL/OFF/AMF/3MF (determined by output extension). */
 DC_ScadJob *dc_scad_run_export(const char *scad_path,
                                 const char *output_path,

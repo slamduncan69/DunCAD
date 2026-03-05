@@ -213,6 +213,50 @@ dc_scad_render_png(const char *scad_path, const char *png_path,
 }
 
 DC_ScadJob *
+dc_scad_render_png_camera(const char *scad_path, const char *png_path,
+                           int width, int height,
+                           const DC_ScadCamera *cam,
+                           DC_ScadJobCb cb, void *userdata)
+{
+    if (!cam || cam->dist <= 0)
+        return dc_scad_render_png(scad_path, png_path, width, height, cb, userdata);
+
+    if (!scad_path || !png_path) return NULL;
+
+    char imgsize[64];
+    if (width > 0 && height > 0)
+        snprintf(imgsize, sizeof(imgsize), "%d,%d", width, height);
+    else
+        snprintf(imgsize, sizeof(imgsize), "400,300");
+
+    char camera[256];
+    snprintf(camera, sizeof(camera), "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f",
+             cam->tx, cam->ty, cam->tz,
+             cam->rx, cam->ry, cam->rz, cam->dist);
+
+    char out_arg[560];
+    snprintf(out_arg, sizeof(out_arg), "%s", png_path);
+
+    const char *argv[] = {
+        dc_scad_get_binary(),
+        "-o", out_arg,
+        "--preview",
+        "--camera", camera,
+        "--autocenter",
+        "--imgsize", imgsize,
+        "-q",
+        scad_path,
+        NULL
+    };
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "scad_runner: render_png_camera %s -> %s (cam=%s)",
+           scad_path, png_path, camera);
+
+    return launch_async(argv, png_path, cb, userdata);
+}
+
+DC_ScadJob *
 dc_scad_run_export(const char *scad_path, const char *output_path,
                      DC_ScadJobCb cb, void *userdata)
 {
