@@ -348,7 +348,8 @@ static const char HELP_SCAD[] =
 "A companion library implements De Casteljau evaluation in OpenSCAD.\n"
 "\n"
 "TOPICS:\n"
-"  duncad-docs scad export   Export API and output format\n";
+"  duncad-docs scad export   Export API and output format\n"
+"  duncad-docs scad runner   OpenSCAD CLI subprocess wrapper\n";
 
 static const char HELP_SCAD_EXPORT[] =
 "SCAD: EXPORT -- OpenSCAD Export\n"
@@ -392,6 +393,46 @@ static const char HELP_SCAD_EXPORT[] =
 "\n"
 "SEE ALSO:\n"
 "  duncad-docs bezier editor   Source editor producing the spans\n";
+
+static const char HELP_SCAD_RUNNER[] =
+"SCAD: RUNNER -- OpenSCAD CLI Subprocess Wrapper\n"
+"\n"
+"src/scad/scad_runner.h wraps the external openscad binary for\n"
+"rendering, exporting, and GUI launch. Async operations use\n"
+"GSubprocess so the GTK main loop is not blocked.\n"
+"\n"
+"ASYNC API (callback fires on GLib main loop):\n"
+"  dc_scad_render_png(scad, png, w, h, cb, ud)   Preview to PNG\n"
+"  dc_scad_run_export(scad, out, cb, ud)          Export STL/OFF/etc\n"
+"  dc_scad_job_cancel(job)                        Cancel running job\n"
+"\n"
+"SYNC API (blocks — for tests/CLI only):\n"
+"  DC_ScadResult *dc_scad_run_sync(scad, out, args, nargs)\n"
+"    Run openscad and wait. Caller owns result.\n"
+"\n"
+"GUI:\n"
+"  dc_scad_open_gui(path)   Launch OpenSCAD GUI (detached)\n"
+"\n"
+"CONFIGURATION:\n"
+"  dc_scad_set_binary(path)   Override openscad binary path\n"
+"  dc_scad_get_binary()       Current binary (default: 'openscad')\n"
+"\n"
+"RESULT (DC_ScadResult):\n"
+"  exit_code, stdout_text, stderr_text, output_path, elapsed_secs\n"
+"  Free with dc_scad_result_free()\n"
+"\n"
+"CLI NOTES (OpenSCAD 2021.01):\n"
+"  PNG preview: --preview --viewall --autocenter --imgsize=W,H\n"
+"  STL export:  -o output.stl (auto-detects from extension)\n"
+"  Errors:      stderr with line numbers, exit code 1\n"
+"\n"
+"INSPECT COMMANDS:\n"
+"  render_scad <scad> [png]   Sync render SCAD to PNG\n"
+"  open_scad <path>           Launch OpenSCAD GUI\n"
+"\n"
+"SEE ALSO:\n"
+"  duncad-docs scad export    Code generation module\n"
+"  duncad-docs inspect commands   Full inspect command list\n";
 
 static const char HELP_UI[] =
 "UI -- GTK4 Application Window\n"
@@ -1302,6 +1343,7 @@ static const struct help_node TREE[] = {
     /* scad */
     { "scad",                  HELP_SCAD },
     { "scad.export",           HELP_SCAD_EXPORT },
+    { "scad.runner",           HELP_SCAD_RUNNER },
 
     /* ui */
     { "ui",                    HELP_UI },

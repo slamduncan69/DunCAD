@@ -55,6 +55,7 @@ endif()
 # ---------------------------------------------------------------------------
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
+pkg_check_modules(GIO  REQUIRED IMPORTED_TARGET gio-2.0)
 
 # ---------------------------------------------------------------------------
 # Core library (no GTK dependency — usable from tests and CLI)
@@ -84,6 +85,7 @@ add_executable(duncad
     src/bezier/bezier_canvas.c
     src/bezier/bezier_editor.c
     src/inspect/inspect.c
+    src/scad/scad_runner.c
 )
 target_include_directories(duncad PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(duncad
@@ -173,11 +175,28 @@ set_tests_properties(test_bezier_editor PROPERTIES
     ENVIRONMENT "ASAN_OPTIONS=detect_leaks=1"
 )
 
+# SCAD runner test — needs GIO for GSubprocess (no GTK)
+add_executable(test_scad_runner
+    tests/test_scad_runner.c
+    src/scad/scad_runner.c
+)
+target_include_directories(test_scad_runner PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_scad_runner
+    PRIVATE dc_core
+    PRIVATE PkgConfig::GIO
+    PRIVATE dc_compiler_flags
+    PRIVATE dc_asan_flags
+)
+add_test(NAME test_scad_runner COMMAND test_scad_runner)
+set_tests_properties(test_scad_runner PROPERTIES
+    ENVIRONMENT "ASAN_OPTIONS=detect_leaks=1"
+)
+
 # ---------------------------------------------------------------------------
 # Custom 'tests' target that builds + runs all tests
 # ---------------------------------------------------------------------------
 add_custom_target(tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_scad_export test_bezier_canvas test_bezier_editor
+    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_scad_export test_bezier_canvas test_bezier_editor test_scad_runner
     COMMENT "Building and running all DunCAD tests"
 )

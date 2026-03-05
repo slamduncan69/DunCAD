@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "inspect/inspect.h"
 #include "bezier/bezier_canvas.h"
+#include "scad/scad_runner.h"
 #include "core/string_builder.h"
 #include "core/log.h"
 
@@ -204,12 +205,74 @@ cmd_export(const char *args)
 }
 
 static char *
+cmd_render_scad(const char *args)
+{
+    char scad_path[512];
+    char png_path[512] = "/tmp/duncad-scad-preview.png";
+    int parsed = sscanf(args, "%511s %511s", scad_path, png_path);
+    if (parsed < 1 || !*scad_path)
+        return strdup("{\"error\":\"usage: render_scad <scad_path> [png_path]\"}\n");
+
+    /* Synchronous render for simplicity in the inspect protocol */
+    const char *extra[] = {
+        "--preview", "--viewall", "--autocenter",
+        "--imgsize", "800,600"
+    };
+    DC_ScadResult *r = dc_scad_run_sync(scad_path, png_path, extra, 5);
+    if (!r)
+        return strdup("{\"ok\":false,\"error\":\"failed to launch openscad\"}\n");
+
+    char *resp = malloc(1024);
+    if (!resp) { dc_scad_result_free(r); return NULL; }
+
+    if (r->exit_code == 0) {
+        snprintf(resp, 1024,
+            "{\"ok\":true,\"path\":\"%s\",\"time\":%.2f}\n",
+            png_path, r->elapsed_secs);
+    } else {
+        /* Escape stderr for JSON (simple: replace quotes/newlines) */
+        char safe_err[512];
+        size_t j = 0;
+        for (size_t i = 0; r->stderr_text[i] && j < sizeof(safe_err) - 2; i++) {
+            char c = r->stderr_text[i];
+            if (c == '"') { safe_err[j++] = '\\'; safe_err[j++] = '"'; }
+            else if (c == '\n') { safe_err[j++] = '\\'; safe_err[j++] = 'n'; }
+            else if (c == '\\') { safe_err[j++] = '\\'; safe_err[j++] = '\\'; }
+            else safe_err[j++] = c;
+        }
+        safe_err[j] = '\0';
+        snprintf(resp, 1024,
+            "{\"ok\":false,\"exit\":%d,\"error\":\"%s\"}\n",
+            r->exit_code, safe_err);
+    }
+
+    dc_scad_result_free(r);
+    return resp;
+}
+
+static char *
+cmd_open_scad(const char *args)
+{
+    char path[512];
+    if (!args || sscanf(args, "%511s", path) != 1)
+        return strdup("{\"error\":\"usage: open_scad <path>\"}\n");
+
+    int rc = dc_scad_open_gui(path);
+    char *resp = malloc(128);
+    if (!resp) return NULL;
+    snprintf(resp, 128, "{\"ok\":%s}\n", rc == 0 ? "true" : "false");
+    return resp;
+}
+
+static char *
 cmd_help(void)
 {
     return strdup(
         "{\"commands\":["
         "\"state\","
         "\"render [path]\","
+        "\"render_scad <scad_path> [png_path]\","
+        "\"open_scad <path>\","
         "\"select <index>\","
         "\"set_point <index> <x> <y>\","
         "\"add_point <x> <y>\","
@@ -251,8 +314,10 @@ dispatch(const char *cmd)
     if (strcmp(name, "pan")       == 0) return cmd_pan(args);
     if (strcmp(name, "chain")     == 0) return cmd_chain(args);
     if (strcmp(name, "juncture")  == 0) return cmd_juncture(args);
-    if (strcmp(name, "export")    == 0) return cmd_export(args);
-    if (strcmp(name, "help")      == 0) return cmd_help();
+    if (strcmp(name, "export")      == 0) return cmd_export(args);
+    if (strcmp(name, "render_scad") == 0) return cmd_render_scad(args);
+    if (strcmp(name, "open_scad")   == 0) return cmd_open_scad(args);
+    if (strcmp(name, "help")        == 0) return cmd_help();
 
     char *err = malloc(256);
     if (!err) return NULL;
