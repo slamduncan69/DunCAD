@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "inspect/inspect.h"
+#include "ui/code_editor.h"
 #include "bezier/bezier_canvas.h"
 #include "scad/scad_runner.h"
 #include "core/string_builder.h"
@@ -15,8 +16,9 @@
 /* -------------------------------------------------------------------------
  * Module state (singleton — only one DunCAD instance per machine)
  * ---------------------------------------------------------------------- */
-static GSocketService  *s_service = NULL;
-static DC_BezierEditor *s_editor  = NULL;
+static GSocketService  *s_service   = NULL;
+static DC_BezierEditor *s_editor    = NULL;
+static DC_CodeEditor   *s_code_ed   = NULL;
 
 /* -------------------------------------------------------------------------
  * Command handlers — each returns a malloc'd JSON string (caller frees)
@@ -265,6 +267,88 @@ cmd_open_scad(const char *args)
 }
 
 static char *
+cmd_get_code(void)
+{
+    if (!s_code_ed)
+        return strdup("{\"error\":\"no code editor\"}\n");
+
+    char *text = dc_code_editor_get_text(s_code_ed);
+    const char *path = dc_code_editor_get_path(s_code_ed);
+
+    DC_StringBuilder *sb = dc_sb_new();
+    if (!sb) { free(text); return strdup("{\"error\":\"alloc\"}\n"); }
+
+    dc_sb_append(sb, "{\"ok\":true,\"path\":");
+    if (path) {
+        dc_sb_appendf(sb, "\"%s\"", path);
+    } else {
+        dc_sb_append(sb, "null");
+    }
+    dc_sb_appendf(sb, ",\"length\":%d}\n", text ? (int)strlen(text) : 0);
+    free(text);
+
+    char *result = dc_sb_take(sb);
+    dc_sb_free(sb);
+    return result;
+}
+
+static char *
+cmd_set_code(const char *args)
+{
+    if (!s_code_ed)
+        return strdup("{\"error\":\"no code editor\"}\n");
+    if (!args || !*args)
+        return strdup("{\"error\":\"usage: set_code <text>\"}\n");
+
+    dc_code_editor_set_text(s_code_ed, args);
+    return strdup("{\"ok\":true}\n");
+}
+
+static char *
+cmd_open_file(const char *args)
+{
+    if (!s_code_ed)
+        return strdup("{\"error\":\"no code editor\"}\n");
+
+    char path[512];
+    if (!args || sscanf(args, "%511s", path) != 1)
+        return strdup("{\"error\":\"usage: open_file <path>\"}\n");
+
+    int rc = dc_code_editor_open_file(s_code_ed, path);
+    char *resp = malloc(640);
+    if (!resp) return NULL;
+    if (rc == 0)
+        snprintf(resp, 640, "{\"ok\":true,\"path\":\"%s\"}\n", path);
+    else
+        snprintf(resp, 640, "{\"ok\":false,\"error\":\"cannot open %s\"}\n", path);
+    return resp;
+}
+
+static char *
+cmd_save_file(const char *args)
+{
+    if (!s_code_ed)
+        return strdup("{\"error\":\"no code editor\"}\n");
+
+    if (args && *args) {
+        char path[512];
+        if (sscanf(args, "%511s", path) == 1) {
+            int rc = dc_code_editor_save_as(s_code_ed, path);
+            char *resp = malloc(640);
+            if (!resp) return NULL;
+            snprintf(resp, 640, "{\"ok\":%s}\n", rc == 0 ? "true" : "false");
+            return resp;
+        }
+    }
+
+    int rc = dc_code_editor_save(s_code_ed);
+    char *resp = malloc(128);
+    if (!resp) return NULL;
+    snprintf(resp, 128, "{\"ok\":%s}\n", rc == 0 ? "true" : "false");
+    return resp;
+}
+
+static char *
 cmd_help(void)
 {
     return strdup(
@@ -282,6 +366,10 @@ cmd_help(void)
         "\"chain <0|1>\","
         "\"juncture <index> <0|1>\","
         "\"export <path>\","
+        "\"get_code\","
+        "\"set_code <text>\","
+        "\"open_file <path>\","
+        "\"save_file [path]\","
         "\"help\""
         "]}\n"
     );
@@ -317,6 +405,10 @@ dispatch(const char *cmd)
     if (strcmp(name, "export")      == 0) return cmd_export(args);
     if (strcmp(name, "render_scad") == 0) return cmd_render_scad(args);
     if (strcmp(name, "open_scad")   == 0) return cmd_open_scad(args);
+    if (strcmp(name, "get_code")    == 0) return cmd_get_code();
+    if (strcmp(name, "set_code")    == 0) return cmd_set_code(args);
+    if (strcmp(name, "open_file")   == 0) return cmd_open_file(args);
+    if (strcmp(name, "save_file")   == 0) return cmd_save_file(args);
     if (strcmp(name, "help")        == 0) return cmd_help();
 
     char *err = malloc(256);
@@ -364,12 +456,13 @@ on_incoming(GSocketService *service, GSocketConnection *conn,
  * Public API
  * ---------------------------------------------------------------------- */
 int
-dc_inspect_start(DC_BezierEditor *editor)
+dc_inspect_start(DC_BezierEditor *editor, DC_CodeEditor *code_ed)
 {
     if (!editor) return -1;
     if (s_service) return -1;  /* already running */
 
-    s_editor = editor;
+    s_editor  = editor;
+    s_code_ed = code_ed;
 
     /* Remove stale socket from previous crash */
     unlink(DC_INSPECT_SOCK_PATH);
@@ -410,6 +503,7 @@ dc_inspect_stop(void)
     g_object_unref(s_service);
     s_service = NULL;
     s_editor  = NULL;
+    s_code_ed = NULL;
     unlink(DC_INSPECT_SOCK_PATH);
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "inspect: stopped");
 }

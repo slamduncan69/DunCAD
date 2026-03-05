@@ -56,6 +56,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
 pkg_check_modules(GIO  REQUIRED IMPORTED_TARGET gio-2.0)
+pkg_check_modules(GTKSV REQUIRED IMPORTED_TARGET gtksourceview-5)
 
 # ---------------------------------------------------------------------------
 # Core library (no GTK dependency — usable from tests and CLI)
@@ -82,15 +83,18 @@ target_link_libraries(dc_core
 add_executable(duncad
     src/main.c
     src/ui/app_window.c
+    src/ui/code_editor.c
     src/bezier/bezier_canvas.c
     src/bezier/bezier_editor.c
     src/inspect/inspect.c
     src/scad/scad_runner.c
 )
 target_include_directories(duncad PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_definitions(duncad PRIVATE DC_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(duncad
     PRIVATE dc_core
     PRIVATE PkgConfig::GTK4
+    PRIVATE PkgConfig::GTKSV
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
     PRIVATE m
@@ -141,11 +145,14 @@ add_executable(test_bezier_canvas
     src/bezier/bezier_canvas.c
     src/bezier/bezier_editor.c
     src/ui/app_window.c
+    src/ui/code_editor.c
 )
 target_include_directories(test_bezier_canvas PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_definitions(test_bezier_canvas PRIVATE DC_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_bezier_canvas
     PRIVATE dc_core
     PRIVATE PkgConfig::GTK4
+    PRIVATE PkgConfig::GTKSV
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
     PRIVATE m
@@ -161,11 +168,14 @@ add_executable(test_bezier_editor
     src/bezier/bezier_canvas.c
     src/bezier/bezier_editor.c
     src/ui/app_window.c
+    src/ui/code_editor.c
 )
 target_include_directories(test_bezier_editor PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_definitions(test_bezier_editor PRIVATE DC_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_bezier_editor
     PRIVATE dc_core
     PRIVATE PkgConfig::GTK4
+    PRIVATE PkgConfig::GTKSV
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
     PRIVATE m

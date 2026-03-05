@@ -442,7 +442,8 @@ static const char HELP_UI[] =
 "and the bezier UI components in src/bezier/.\n"
 "\n"
 "TOPICS:\n"
-"  duncad-docs ui window   DC_AppWindow main window\n";
+"  duncad-docs ui window        DC_AppWindow main window\n"
+"  duncad-docs ui code_editor   GtkSourceView code editor panel\n";
 
 static const char HELP_UI_WINDOW[] =
 "UI: WINDOW -- DC_AppWindow Main Window\n"
@@ -454,7 +455,7 @@ static const char HELP_UI_WINDOW[] =
 "  Header bar    App name + current project name\n"
 "  Left panel    240px -- component tree placeholder\n"
 "  Center panel  flexible -- main editor/canvas\n"
-"  Right panel   300px -- properties/inspector\n"
+"  Right panel   300px -- GtkSourceView code editor\n"
 "  Status bar    bottom -- live coordinate display\n"
 "\n"
 "PANE STRUCTURE:\n"
@@ -476,7 +477,57 @@ static const char HELP_UI_WINDOW[] =
 "  g_object_set_data() to avoid a custom GObject subclass.\n"
 "\n"
 "SEE ALSO:\n"
-"  duncad-docs bezier editor   The widget that fills the center panel\n";
+"  duncad-docs bezier editor   The widget that fills the center panel\n"
+"  duncad-docs ui code_editor  The code editor in the right panel\n";
+
+static const char HELP_UI_CODE_EDITOR[] =
+"UI: CODE_EDITOR -- GtkSourceView Code Editor Panel\n"
+"\n"
+"src/ui/code_editor.c provides a GtkSourceView 5 based text editor\n"
+"with OpenSCAD syntax highlighting, dark theme, and file I/O.\n"
+"Replaces the right panel placeholder in the main window.\n"
+"\n"
+"FEATURES:\n"
+"  - OpenSCAD syntax highlighting (custom .lang in data/language-specs/)\n"
+"  - Dark color scheme (Adwaita-dark, classic-dark, cobalt, solarized-dark)\n"
+"  - Line numbers, auto-indent, current line highlight\n"
+"  - Monospace 11pt font, 4-space tabs (spaces, not tabs)\n"
+"  - Toolbar: Open, Save, Save As buttons + filename label\n"
+"  - File dialogs use GtkFileDialog (GTK4 async pattern)\n"
+"\n"
+"API (src/ui/code_editor.h):\n"
+"  DC_CodeEditor *dc_code_editor_new(void)\n"
+"  void  dc_code_editor_free(DC_CodeEditor *ed)\n"
+"  GtkWidget *dc_code_editor_widget(DC_CodeEditor *ed)\n"
+"  char *dc_code_editor_get_text(DC_CodeEditor *ed)      -- caller frees\n"
+"  void  dc_code_editor_set_text(DC_CodeEditor *ed, text)\n"
+"  int   dc_code_editor_open_file(DC_CodeEditor *ed, path)\n"
+"  int   dc_code_editor_save(DC_CodeEditor *ed)\n"
+"  int   dc_code_editor_save_as(DC_CodeEditor *ed, path)\n"
+"  const char *dc_code_editor_get_path(const DC_CodeEditor *ed)\n"
+"  void  dc_code_editor_set_window(DC_CodeEditor *ed, window)\n"
+"\n"
+"LANGUAGE SPEC:\n"
+"  data/language-specs/openscad.lang -- GtkSourceView 5 language def\n"
+"  Found via DC_SOURCE_DIR compile definition (set in CMakeLists.txt)\n"
+"  Covers: comments, strings, numbers, booleans, special vars ($fn),\n"
+"  keywords, 2D/3D primitives, transforms, boolean ops, extrusion,\n"
+"  math functions, list functions, operators, modifier chars\n"
+"\n"
+"INSPECT COMMANDS:\n"
+"  get_code                  Get code editor state (path, length)\n"
+"  set_code <text>           Set code editor content\n"
+"  open_file <path>          Open a file in the code editor\n"
+"  save_file [path]          Save (to path, or current file)\n"
+"\n"
+"OWNERSHIP:\n"
+"  DC_CodeEditor is opaque, created by dc_code_editor_new().\n"
+"  Stored on window via g_object_set_data_full() with destroy-notify\n"
+"  (dc_code_editor_free). Window ref is borrowed (not ref-counted).\n"
+"\n"
+"SEE ALSO:\n"
+"  duncad-docs ui window   The main window that hosts this editor\n"
+"  duncad-docs inspect     Socket commands for code editor control\n";
 
 static const char HELP_INSPECT[] =
 "INSPECT -- Unix Socket Inspect/Control Server\n"
@@ -560,6 +611,12 @@ static const char HELP_INSPECT_COMMANDS[] =
 "  chain <0|1>             Set global chain mode\n"
 "  juncture <i> <0|1>      Set point juncture flag\n"
 "  export <path>            Export to .scad file\n"
+"\n"
+"CODE EDITOR COMMANDS:\n"
+"  get_code                 Get code editor state (path, length)\n"
+"  set_code <text>          Set code editor content\n"
+"  open_file <path>         Open a file in the code editor\n"
+"  save_file [path]         Save (to path, or current file)\n"
 "\n"
 "RESPONSE FORMAT:\n"
 "  All responses are JSON terminated by newline.\n"
@@ -1348,6 +1405,7 @@ static const struct help_node TREE[] = {
     /* ui */
     { "ui",                    HELP_UI },
     { "ui.window",             HELP_UI_WINDOW },
+    { "ui.code_editor",        HELP_UI_CODE_EDITOR },
 
     /* inspect */
     { "inspect",               HELP_INSPECT },

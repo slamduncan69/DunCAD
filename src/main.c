@@ -1,4 +1,5 @@
 #include "ui/app_window.h"
+#include "ui/code_editor.h"
 #include "inspect/inspect.h"
 #include "core/log.h"
 
@@ -19,8 +20,9 @@ on_activate(GtkApplication *app, gpointer user_data)
 
     /* Start the inspect socket server */
     DC_BezierEditor *editor = dc_app_window_get_editor(window);
+    DC_CodeEditor *code_ed = dc_app_window_get_code_editor(window);
     if (editor) {
-        dc_inspect_start(editor);
+        dc_inspect_start(editor, code_ed);
     }
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "DunCAD activated");

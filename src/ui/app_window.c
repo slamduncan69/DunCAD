@@ -1,4 +1,5 @@
 #include "app_window.h"
+#include "ui/code_editor.h"
 #include "bezier/bezier_editor.h"
 #include "core/log.h"
 
@@ -157,7 +158,9 @@ dc_app_window_create(GtkApplication *app)
     GtkWidget *right_paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
     GtkWidget *left_panel   = make_placeholder_panel("Left Panel\n(Component Tree)");
-    GtkWidget *right_panel  = make_placeholder_panel("Right Panel\n(Inspector / Properties)");
+    /* Code editor replaces the right panel placeholder */
+    DC_CodeEditor *code_ed = dc_code_editor_new();
+    GtkWidget *right_panel = dc_code_editor_widget(code_ed);
 
     /* Bezier editor (owns canvas + curve) replaces the center placeholder */
     DC_BezierEditor *editor = dc_bezier_editor_new();
@@ -169,14 +172,9 @@ dc_app_window_create(GtkApplication *app)
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(left_scroll),
                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
 
-    GtkWidget *right_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(right_scroll), right_panel);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(right_scroll),
-                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-
     /* Assemble panes — canvas goes directly in (no ScrolledWindow) */
     gtk_paned_set_start_child(GTK_PANED(right_paned), canvas_widget);
-    gtk_paned_set_end_child(GTK_PANED(right_paned), right_scroll);
+    gtk_paned_set_end_child(GTK_PANED(right_paned), right_panel);
     gtk_paned_set_position(GTK_PANED(right_paned), 900);
     gtk_paned_set_resize_start_child(GTK_PANED(right_paned), TRUE);
     gtk_paned_set_resize_end_child(GTK_PANED(right_paned), FALSE);
@@ -227,6 +225,11 @@ dc_app_window_create(GtkApplication *app)
      * automatic cleanup via destroy-notify. */
     dc_bezier_editor_set_window(editor, window);
 
+    /* Wire the code editor to the window */
+    dc_code_editor_set_window(code_ed, window);
+    g_object_set_data_full(G_OBJECT(window), "dc-code-editor", code_ed,
+                           (GDestroyNotify)dc_code_editor_free);
+
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "application window created");
 
     return window;
@@ -268,4 +271,11 @@ dc_app_window_get_editor(GtkWidget *window)
 {
     if (!window) return NULL;
     return g_object_get_data(G_OBJECT(window), "dc-bezier-editor");
+}
+
+struct DC_CodeEditor *
+dc_app_window_get_code_editor(GtkWidget *window)
+{
+    if (!window) return NULL;
+    return g_object_get_data(G_OBJECT(window), "dc-code-editor");
 }

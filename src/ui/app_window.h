@@ -56,4 +56,11 @@ void dc_app_window_set_status(GtkWidget *window, const char *text);
  * ---------------------------------------------------------------------- */
 struct DC_BezierEditor *dc_app_window_get_editor(GtkWidget *window);
 
+/* -------------------------------------------------------------------------
+ * dc_app_window_get_code_editor — retrieve the code editor attached to window.
+ *
+ * Returns: borrowed DC_CodeEditor*, or NULL if not found.
+ * ---------------------------------------------------------------------- */
+struct DC_CodeEditor *dc_app_window_get_code_editor(GtkWidget *window);
+
 #endif /* DC_APP_WINDOW_H */
