@@ -57,6 +57,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
 pkg_check_modules(GIO  REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(GTKSV REQUIRED IMPORTED_TARGET gtksourceview-5)
+pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
 
 # ---------------------------------------------------------------------------
 # Core library (no GTK dependency — usable from tests and CLI)
@@ -85,6 +86,8 @@ add_executable(duncad
     src/ui/app_window.c
     src/ui/code_editor.c
     src/ui/scad_preview.c
+    src/gl/gl_viewport.c
+    src/gl/stl_loader.c
     src/bezier/bezier_canvas.c
     src/bezier/bezier_editor.c
     src/inspect/inspect.c
@@ -96,6 +99,7 @@ target_link_libraries(duncad
     PRIVATE dc_core
     PRIVATE PkgConfig::GTK4
     PRIVATE PkgConfig::GTKSV
+    PRIVATE PkgConfig::EPOXY
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
     PRIVATE m
@@ -148,6 +152,8 @@ add_executable(test_bezier_canvas
     src/ui/app_window.c
     src/ui/code_editor.c
     src/ui/scad_preview.c
+    src/gl/gl_viewport.c
+    src/gl/stl_loader.c
     src/scad/scad_runner.c
 )
 target_include_directories(test_bezier_canvas PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -157,6 +163,7 @@ target_link_libraries(test_bezier_canvas
     PRIVATE PkgConfig::GTK4
     PRIVATE PkgConfig::GTKSV
     PRIVATE PkgConfig::GIO
+    PRIVATE PkgConfig::EPOXY
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
     PRIVATE m
@@ -174,6 +181,8 @@ add_executable(test_bezier_editor
     src/ui/app_window.c
     src/ui/code_editor.c
     src/ui/scad_preview.c
+    src/gl/gl_viewport.c
+    src/gl/stl_loader.c
     src/scad/scad_runner.c
 )
 target_include_directories(test_bezier_editor PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -183,6 +192,7 @@ target_link_libraries(test_bezier_editor
     PRIVATE PkgConfig::GTK4
     PRIVATE PkgConfig::GTKSV
     PRIVATE PkgConfig::GIO
+    PRIVATE PkgConfig::EPOXY
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
     PRIVATE m

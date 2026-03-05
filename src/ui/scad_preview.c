@@ -1,10 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "ui/scad_preview.h"
 #include "ui/code_editor.h"
+#include "gl/gl_viewport.h"
 #include "scad/scad_runner.h"
 #include "core/log.h"
 
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,50 +14,22 @@
  * Internal structure
  * ---------------------------------------------------------------------- */
 struct DC_ScadPreview {
-    GtkWidget      *container;      /* GtkBox(V): toolbar + image area */
-    GtkWidget      *picture;        /* GtkPicture showing the rendered PNG */
-    GtkWidget      *status_label;   /* status text in toolbar */
+    GtkWidget      *container;      /* GtkBox(V): toolbar + GL viewport */
+    DC_GlViewport  *viewport;       /* real-time 3D viewport */
+    GtkWidget      *status_label;
     GtkWidget      *render_btn;
-    GtkWidget      *reset_btn;      /* reset camera to viewall */
-    DC_CodeEditor  *code_ed;        /* borrowed — source of SCAD text */
+    GtkWidget      *reset_btn;
+    GtkWidget      *ortho_btn;
+    GtkWidget      *grid_btn;
+    GtkWidget      *axes_btn;
+    DC_CodeEditor  *code_ed;        /* borrowed */
     char           *tmp_scad;       /* temp .scad path (owned) */
-    char           *tmp_png;        /* temp .png path (owned) */
-
-    /* Camera state (OpenSCAD convention) */
-    DC_ScadCamera   cam;
-    int             cam_active;     /* 0 = use viewall, 1 = explicit camera */
-
-    /* Drag state */
-    double          drag_start_x;
-    double          drag_start_y;
-    double          drag_start_rx, drag_start_ry;   /* orbit drag */
-    double          drag_start_tx, drag_start_ty;   /* pan drag */
-    int             dragging;       /* 1 = orbit, 2 = pan */
-
-    /* Debounce timer for auto-render after interaction */
-    guint           render_timer;
-    int             rendering;      /* guard against overlapping renders */
+    char           *tmp_stl;        /* temp .stl path (owned) */
+    int             rendering;
 };
 
 /* -------------------------------------------------------------------------
- * Status update helper
- * ---------------------------------------------------------------------- */
-static void
-update_camera_status(DC_ScadPreview *pv)
-{
-    char buf[256];
-    if (!pv->cam_active) {
-        snprintf(buf, sizeof(buf), "Camera: auto (viewall)");
-    } else {
-        snprintf(buf, sizeof(buf),
-                 "rot(%.0f,%.0f,%.0f) dist=%.0f",
-                 pv->cam.rx, pv->cam.ry, pv->cam.rz, pv->cam.dist);
-    }
-    gtk_label_set_text(GTK_LABEL(pv->status_label), buf);
-}
-
-/* -------------------------------------------------------------------------
- * Render logic
+ * Render callback — OpenSCAD STL export completed
  * ---------------------------------------------------------------------- */
 static void
 on_render_done(DC_ScadResult *result, void *userdata)
@@ -72,20 +44,20 @@ on_render_done(DC_ScadResult *result, void *userdata)
     }
 
     if (result->exit_code == 0) {
-        GdkTexture *tex = gdk_texture_new_from_filename(pv->tmp_png, NULL);
-        if (tex) {
-            gtk_picture_set_paintable(GTK_PICTURE(pv->picture),
-                                       GDK_PAINTABLE(tex));
-            g_object_unref(tex);
+        /* Load the STL into the GL viewport */
+        int rc = dc_gl_viewport_load_stl(pv->viewport, pv->tmp_stl);
+        if (rc == 0) {
+            char status[128];
+            snprintf(status, sizeof(status), "Rendered in %.1fs — drag to orbit, scroll to zoom",
+                     result->elapsed_secs);
+            gtk_label_set_text(GTK_LABEL(pv->status_label), status);
+        } else {
+            gtk_label_set_text(GTK_LABEL(pv->status_label), "Render OK but STL load failed");
         }
-        char status[128];
-        snprintf(status, sizeof(status), "Rendered in %.1fs", result->elapsed_secs);
-        gtk_label_set_text(GTK_LABEL(pv->status_label), status);
     } else {
         const char *err = result->stderr_text ? result->stderr_text : "unknown error";
         char msg[256];
-        snprintf(msg, sizeof(msg), "Error (exit %d): %.200s",
-                 result->exit_code, err);
+        snprintf(msg, sizeof(msg), "Error (exit %d): %.200s", result->exit_code, err);
         char *nl = strchr(msg, '\n');
         if (nl) *nl = '\0';
         gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
@@ -122,165 +94,28 @@ do_render(DC_ScadPreview *pv)
 
     pv->rendering = 1;
     gtk_widget_set_sensitive(pv->render_btn, FALSE);
-    gtk_label_set_text(GTK_LABEL(pv->status_label), "Rendering...");
+    gtk_label_set_text(GTK_LABEL(pv->status_label), "Rendering STL...");
 
-    int w = gtk_widget_get_width(pv->picture);
-    int h = gtk_widget_get_height(pv->picture);
-    if (w < 200) w = 800;
-    if (h < 200) h = 600;
-
-    if (pv->cam_active) {
-        dc_scad_render_png_camera(pv->tmp_scad, pv->tmp_png, w, h,
-                                   &pv->cam, on_render_done, pv);
-    } else {
-        dc_scad_render_png(pv->tmp_scad, pv->tmp_png, w, h,
-                           on_render_done, pv);
-    }
-}
-
-/* Debounced render — fires after camera interaction settles */
-static gboolean
-on_render_timeout(gpointer data)
-{
-    DC_ScadPreview *pv = data;
-    pv->render_timer = 0;
-    do_render(pv);
-    return G_SOURCE_REMOVE;
-}
-
-static void
-schedule_render(DC_ScadPreview *pv)
-{
-    if (pv->render_timer)
-        g_source_remove(pv->render_timer);
-    pv->render_timer = g_timeout_add(300, on_render_timeout, pv);
-}
-
-/* -------------------------------------------------------------------------
- * Mouse gesture handlers
- *
- * OpenSCAD viewport convention:
- *   Left drag:         orbit (rotate rx/ry)
- *   Right drag:        pan (translate tx/ty)
- *   Scroll:            zoom (distance)
- *   Middle drag:       pan (alternative)
- * ---------------------------------------------------------------------- */
-
-/* Ensure camera has sensible defaults when first activated */
-static void
-activate_camera(DC_ScadPreview *pv)
-{
-    if (!pv->cam_active) {
-        pv->cam_active = 1;
-        /* OpenSCAD default-ish view */
-        pv->cam.rx = 55.0;
-        pv->cam.ry = 0.0;
-        pv->cam.rz = 25.0;
-        pv->cam.tx = 0.0;
-        pv->cam.ty = 0.0;
-        pv->cam.tz = 0.0;
-        pv->cam.dist = 140.0;
-    }
-}
-
-static void
-on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data)
-{
-    DC_ScadPreview *pv = data;
-    activate_camera(pv);
-
-    GdkEvent *event = gtk_event_controller_get_current_event(
-        GTK_EVENT_CONTROLLER(gesture));
-    GdkModifierType mods = gdk_event_get_modifier_state(event);
-    guint button = gtk_gesture_single_get_current_button(
-        GTK_GESTURE_SINGLE(gesture));
-
-    pv->drag_start_x = x;
-    pv->drag_start_y = y;
-
-    if (button == 3 || button == 2 || (mods & GDK_SHIFT_MASK)) {
-        /* Right/middle drag or shift+drag = pan */
-        pv->dragging = 2;
-        pv->drag_start_tx = pv->cam.tx;
-        pv->drag_start_ty = pv->cam.ty;
-    } else {
-        /* Left drag = orbit */
-        pv->dragging = 1;
-        pv->drag_start_rx = pv->cam.rx;
-        pv->drag_start_ry = pv->cam.ry;
-    }
-}
-
-static void
-on_drag_update(GtkGestureDrag *gesture, double dx, double dy, gpointer data)
-{
-    (void)gesture;
-    DC_ScadPreview *pv = data;
-
-    if (pv->dragging == 1) {
-        /* Orbit: dx → rotate around Z, dy → rotate around X */
-        pv->cam.rz = pv->drag_start_ry + dx * 0.5;
-        pv->cam.rx = pv->drag_start_rx - dy * 0.5;
-        /* Clamp rx to avoid gimbal weirdness */
-        if (pv->cam.rx > 180.0) pv->cam.rx = 180.0;
-        if (pv->cam.rx < 0.0) pv->cam.rx = 0.0;
-    } else if (pv->dragging == 2) {
-        /* Pan: scale by distance for reasonable speed */
-        double scale = pv->cam.dist * 0.005;
-        pv->cam.tx = pv->drag_start_tx - dx * scale;
-        pv->cam.ty = pv->drag_start_ty + dy * scale;
-    }
-
-    update_camera_status(pv);
-}
-
-static void
-on_drag_end(GtkGestureDrag *gesture, double dx, double dy, gpointer data)
-{
-    (void)gesture; (void)dx; (void)dy;
-    DC_ScadPreview *pv = data;
-    pv->dragging = 0;
-    schedule_render(pv);
-}
-
-static gboolean
-on_scroll(GtkEventControllerScroll *ctrl, double dx, double dy, gpointer data)
-{
-    (void)ctrl; (void)dx;
-    DC_ScadPreview *pv = data;
-    activate_camera(pv);
-
-    /* Zoom: scroll up = closer (smaller dist), scroll down = farther */
-    double factor = pow(1.1, dy);
-    pv->cam.dist *= factor;
-    if (pv->cam.dist < 1.0) pv->cam.dist = 1.0;
-    if (pv->cam.dist > 100000.0) pv->cam.dist = 100000.0;
-
-    update_camera_status(pv);
-    schedule_render(pv);
-    return TRUE;
+    /* Export to STL via OpenSCAD */
+    dc_scad_run_export(pv->tmp_scad, pv->tmp_stl, on_render_done, pv);
 }
 
 /* -------------------------------------------------------------------------
  * Button callbacks
  * ---------------------------------------------------------------------- */
-static void
-on_render_clicked(GtkButton *btn, gpointer data)
-{
-    (void)btn;
-    do_render(data);
-}
+static void on_render_clicked(GtkButton *b, gpointer d) { (void)b; do_render(d); }
 
-static void
-on_reset_clicked(GtkButton *btn, gpointer data)
-{
-    (void)btn;
-    DC_ScadPreview *pv = data;
-    pv->cam_active = 0;
-    memset(&pv->cam, 0, sizeof(pv->cam));
-    update_camera_status(pv);
-    do_render(pv);
-}
+static void on_reset_clicked(GtkButton *b, gpointer d)
+{ (void)b; dc_gl_viewport_reset_camera(((DC_ScadPreview*)d)->viewport); }
+
+static void on_ortho_clicked(GtkButton *b, gpointer d)
+{ (void)b; dc_gl_viewport_toggle_ortho(((DC_ScadPreview*)d)->viewport); }
+
+static void on_grid_clicked(GtkButton *b, gpointer d)
+{ (void)b; dc_gl_viewport_toggle_grid(((DC_ScadPreview*)d)->viewport); }
+
+static void on_axes_clicked(GtkButton *b, gpointer d)
+{ (void)b; dc_gl_viewport_toggle_axes(((DC_ScadPreview*)d)->viewport); }
 
 /* -------------------------------------------------------------------------
  * Public API
@@ -293,7 +128,16 @@ dc_scad_preview_new(void)
     if (!pv) return NULL;
 
     pv->tmp_scad = strdup("/tmp/duncad-preview.scad");
-    pv->tmp_png  = strdup("/tmp/duncad-preview.png");
+    pv->tmp_stl  = strdup("/tmp/duncad-preview.stl");
+
+    /* GL viewport */
+    pv->viewport = dc_gl_viewport_new();
+    if (!pv->viewport) {
+        free(pv->tmp_scad);
+        free(pv->tmp_stl);
+        free(pv);
+        return NULL;
+    }
 
     /* Toolbar */
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
@@ -304,54 +148,42 @@ dc_scad_preview_new(void)
 
     pv->render_btn = gtk_button_new_with_label("Render");
     gtk_widget_set_focusable(pv->render_btn, FALSE);
-    g_signal_connect(pv->render_btn, "clicked",
-                     G_CALLBACK(on_render_clicked), pv);
+    g_signal_connect(pv->render_btn, "clicked", G_CALLBACK(on_render_clicked), pv);
     gtk_box_append(GTK_BOX(toolbar), pv->render_btn);
 
-    pv->reset_btn = gtk_button_new_with_label("Reset View");
+    pv->reset_btn = gtk_button_new_with_label("Reset");
     gtk_widget_set_focusable(pv->reset_btn, FALSE);
-    g_signal_connect(pv->reset_btn, "clicked",
-                     G_CALLBACK(on_reset_clicked), pv);
+    g_signal_connect(pv->reset_btn, "clicked", G_CALLBACK(on_reset_clicked), pv);
     gtk_box_append(GTK_BOX(toolbar), pv->reset_btn);
+
+    pv->ortho_btn = gtk_button_new_with_label("Ortho");
+    gtk_widget_set_focusable(pv->ortho_btn, FALSE);
+    g_signal_connect(pv->ortho_btn, "clicked", G_CALLBACK(on_ortho_clicked), pv);
+    gtk_box_append(GTK_BOX(toolbar), pv->ortho_btn);
+
+    pv->grid_btn = gtk_button_new_with_label("Grid");
+    gtk_widget_set_focusable(pv->grid_btn, FALSE);
+    g_signal_connect(pv->grid_btn, "clicked", G_CALLBACK(on_grid_clicked), pv);
+    gtk_box_append(GTK_BOX(toolbar), pv->grid_btn);
+
+    pv->axes_btn = gtk_button_new_with_label("Axes");
+    gtk_widget_set_focusable(pv->axes_btn, FALSE);
+    g_signal_connect(pv->axes_btn, "clicked", G_CALLBACK(on_axes_clicked), pv);
+    gtk_box_append(GTK_BOX(toolbar), pv->axes_btn);
 
     GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
     gtk_box_append(GTK_BOX(toolbar), sep);
 
-    pv->status_label = gtk_label_new("Camera: auto (viewall)");
+    pv->status_label = gtk_label_new("Ready — click Render");
     gtk_label_set_xalign(GTK_LABEL(pv->status_label), 0.0f);
     gtk_widget_set_hexpand(pv->status_label, TRUE);
     gtk_widget_set_opacity(pv->status_label, 0.7);
     gtk_box_append(GTK_BOX(toolbar), pv->status_label);
 
-    /* Image area */
-    pv->picture = gtk_picture_new();
-    gtk_picture_set_content_fit(GTK_PICTURE(pv->picture), GTK_CONTENT_FIT_CONTAIN);
-    gtk_widget_set_vexpand(pv->picture, TRUE);
-    gtk_widget_set_hexpand(pv->picture, TRUE);
-
-    /* Dark background frame */
-    GtkWidget *frame = gtk_frame_new(NULL);
-    gtk_frame_set_child(GTK_FRAME(frame), pv->picture);
-    gtk_widget_add_css_class(frame, "view");
-    gtk_widget_set_vexpand(frame, TRUE);
-
-    /* Mouse gestures on the frame (not picture, so we capture the full area) */
-    GtkGesture *drag = gtk_gesture_drag_new();
-    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), 0); /* any button */
-    g_signal_connect(drag, "drag-begin",  G_CALLBACK(on_drag_begin),  pv);
-    g_signal_connect(drag, "drag-update", G_CALLBACK(on_drag_update), pv);
-    g_signal_connect(drag, "drag-end",    G_CALLBACK(on_drag_end),    pv);
-    gtk_widget_add_controller(frame, GTK_EVENT_CONTROLLER(drag));
-
-    GtkEventController *scroll = gtk_event_controller_scroll_new(
-        GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
-    g_signal_connect(scroll, "scroll", G_CALLBACK(on_scroll), pv);
-    gtk_widget_add_controller(frame, scroll);
-
     /* Container */
     pv->container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_append(GTK_BOX(pv->container), toolbar);
-    gtk_box_append(GTK_BOX(pv->container), frame);
+    gtk_box_append(GTK_BOX(pv->container), dc_gl_viewport_widget(pv->viewport));
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "scad preview created");
     return pv;
@@ -361,10 +193,9 @@ void
 dc_scad_preview_free(DC_ScadPreview *pv)
 {
     if (!pv) return;
-    if (pv->render_timer)
-        g_source_remove(pv->render_timer);
+    dc_gl_viewport_free(pv->viewport);
     free(pv->tmp_scad);
-    free(pv->tmp_png);
+    free(pv->tmp_stl);
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "scad preview freed");
     free(pv);
 }

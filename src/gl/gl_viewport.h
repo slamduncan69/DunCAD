@@ -1,0 +1,50 @@
+#ifndef DC_GL_VIEWPORT_H
+#define DC_GL_VIEWPORT_H
+
+/*
+ * gl_viewport.h — Real-time OpenGL 3D viewport for mesh display.
+ *
+ * GtkGLArea-based widget with:
+ *   - Orbit/pan/zoom camera (OpenSCAD-style controls)
+ *   - Grid floor and axis indicator
+ *   - Directional + ambient Phong lighting
+ *   - STL mesh rendering
+ *
+ * Ownership:
+ *   - DC_GlViewport is opaque; created with dc_gl_viewport_new(),
+ *     freed with dc_gl_viewport_free().
+ *   - dc_gl_viewport_widget() returns a borrowed GtkWidget*.
+ */
+
+#include <gtk/gtk.h>
+
+typedef struct DC_GlViewport DC_GlViewport;
+
+/* Create a new GL viewport. Returns NULL on failure. */
+DC_GlViewport *dc_gl_viewport_new(void);
+
+/* Free the viewport. Safe with NULL. */
+void dc_gl_viewport_free(DC_GlViewport *vp);
+
+/* Get the top-level widget (GtkGLArea). */
+GtkWidget *dc_gl_viewport_widget(DC_GlViewport *vp);
+
+/* Load an STL mesh file for display. Returns 0 on success. */
+int dc_gl_viewport_load_stl(DC_GlViewport *vp, const char *stl_path);
+
+/* Clear the current mesh. */
+void dc_gl_viewport_clear_mesh(DC_GlViewport *vp);
+
+/* Reset camera to fit the loaded mesh. */
+void dc_gl_viewport_reset_camera(DC_GlViewport *vp);
+
+/* Toggle perspective / orthographic projection. */
+void dc_gl_viewport_toggle_ortho(DC_GlViewport *vp);
+
+/* Toggle grid visibility. */
+void dc_gl_viewport_toggle_grid(DC_GlViewport *vp);
+
+/* Toggle axis indicator visibility. */
+void dc_gl_viewport_toggle_axes(DC_GlViewport *vp);
+
+#endif /* DC_GL_VIEWPORT_H */
