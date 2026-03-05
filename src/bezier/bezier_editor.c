@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* -------------------------------------------------------------------------
  * Constants
@@ -149,8 +150,9 @@ enforce_c1_at_p0(DC_BezierEditor *ed)
     cn->x += dx;  cn->y += dy;
 }
 
-/* Forward declaration — update_status is defined after refresh_panel */
+/* Forward declarations */
 static void update_status(DC_BezierEditor *ed);
+static void trigger_export(DC_BezierEditor *ed);
 
 /* -------------------------------------------------------------------------
  * Numeric input panel — refresh from editor state
@@ -737,6 +739,13 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
     (void)ctrl; (void)keycode;
     DC_BezierEditor *ed = data;
 
+    /* Ctrl+E: export SCAD */
+    if ((keyval == GDK_KEY_e || keyval == GDK_KEY_E) &&
+        (state & GDK_CONTROL_MASK)) {
+        trigger_export(ed);
+        return TRUE;
+    }
+
     if (keyval == GDK_KEY_Delete || keyval == GDK_KEY_BackSpace) {
         int count = (int)dc_array_length(ed->pts);
         int sel = ed->selected;
@@ -831,6 +840,80 @@ on_chain_toggled(GtkToggleButton *btn, gpointer data)
     refresh_panel(ed);
     gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
     gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
+}
+
+/* -------------------------------------------------------------------------
+ * Export — GtkFileDialog async save callback
+ * ---------------------------------------------------------------------- */
+static void
+on_export_save_cb(GObject *source, GAsyncResult *result, gpointer data)
+{
+    DC_BezierEditor *ed = data;
+    GtkFileDialog *dialog = GTK_FILE_DIALOG(source);
+
+    GError *gerr = NULL;
+    GFile *file = gtk_file_dialog_save_finish(dialog, result, &gerr);
+    if (!file) {
+        /* User cancelled or error */
+        if (gerr) g_error_free(gerr);
+        return;
+    }
+
+    char *path = g_file_get_path(file);
+    g_object_unref(file);
+    if (!path) return;
+
+    DC_Error err = {0};
+    int rc = dc_bezier_editor_export_scad(ed, path, &err);
+
+    if (rc == 0) {
+        dc_app_window_set_status(ed->window,
+                                  "Exported to SCAD successfully");
+    } else {
+        char msg[544];
+        snprintf(msg, sizeof(msg), "Export failed: %s", err.message);
+        dc_app_window_set_status(ed->window, msg);
+    }
+
+    g_free(path);
+}
+
+static void
+trigger_export(DC_BezierEditor *ed)
+{
+    int count = (int)dc_array_length(ed->pts);
+    if (count < 2) {
+        dc_app_window_set_status(ed->window,
+                                  "Need at least 2 points to export");
+        return;
+    }
+
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(dialog, "Export SCAD");
+
+    /* Default filename */
+    gtk_file_dialog_set_initial_name(dialog, "shape.scad");
+
+    /* File filter for .scad */
+    GListStore *filters = g_list_store_new(GTK_TYPE_FILE_FILTER);
+    GtkFileFilter *filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "OpenSCAD files (*.scad)");
+    gtk_file_filter_add_pattern(filter, "*.scad");
+    g_list_store_append(filters, filter);
+    g_object_unref(filter);
+    gtk_file_dialog_set_filters(dialog, G_LIST_MODEL(filters));
+    g_object_unref(filters);
+
+    GtkWindow *win = ed->window ? GTK_WINDOW(ed->window) : NULL;
+    gtk_file_dialog_save(dialog, win, NULL, on_export_save_cb, ed);
+    g_object_unref(dialog);
+}
+
+static void
+on_export_clicked(GtkButton *btn, gpointer data)
+{
+    (void)btn;
+    trigger_export(data);
 }
 
 /* -------------------------------------------------------------------------
@@ -933,6 +1016,15 @@ dc_bezier_editor_new(void)
                                             G_CALLBACK(on_chain_toggled), ed);
 
     gtk_box_append(GTK_BOX(toolbar), ed->chain_btn);
+
+    /* Export button */
+    GtkWidget *export_btn = gtk_button_new_with_label("Export");
+    gtk_widget_set_focusable(export_btn, FALSE);
+    gtk_widget_set_tooltip_text(export_btn, "Export to OpenSCAD (Ctrl+E)");
+    g_signal_connect(export_btn, "clicked",
+                     G_CALLBACK(on_export_clicked), ed);
+    gtk_box_append(GTK_BOX(toolbar), export_btn);
+
     gtk_box_append(GTK_BOX(ed->container), toolbar);
 
     /* Canvas fills remaining space */
@@ -1092,4 +1184,297 @@ dc_bezier_editor_get_chain_mode(const DC_BezierEditor *editor)
 {
     if (!editor) return 0;
     return editor->chain_mode;
+}
+
+/* -------------------------------------------------------------------------
+ * Span extraction — juncture-delimited spans for SCAD export
+ * ---------------------------------------------------------------------- */
+DC_ScadSpan *
+dc_bezier_editor_get_spans(const DC_BezierEditor *editor, int *num_spans)
+{
+    if (!editor || !num_spans) return NULL;
+    /* Cast away const — is_juncture doesn't modify editor */
+    DC_BezierEditor *ed = (DC_BezierEditor *)editor;
+    int count = (int)dc_array_length(ed->pts);
+    if (count < 2) { *num_spans = 0; return NULL; }
+
+    /* Over-allocate: at most count/2 + 1 spans */
+    int max_spans = count / 2 + 2;
+    DC_ScadSpan *spans = calloc((size_t)max_spans, sizeof(DC_ScadSpan));
+    if (!spans) { *num_spans = 0; return NULL; }
+    int ns = 0;
+
+    if (ed->closed) {
+        /* Collect even-indexed juncture indices */
+        int junc_indices[256];
+        int njunc = 0;
+        for (int i = 0; i < count; i += 2) {
+            if (is_juncture(ed, i) && njunc < 256)
+                junc_indices[njunc++] = i;
+        }
+
+        if (njunc == 0) {
+            /* No junctures: one big span wrapping all points + P0 */
+            int n = count + 1;
+            DC_Point2 *pts = malloc((size_t)n * sizeof(DC_Point2));
+            if (pts) {
+                for (int i = 0; i < count; i++) {
+                    DC_Point2 *p = dc_array_get(ed->pts, (size_t)i);
+                    pts[i] = *p;
+                }
+                DC_Point2 *p0 = dc_array_get(ed->pts, 0);
+                pts[count] = *p0;
+                spans[ns].points = pts;
+                spans[ns].count = n;
+                ns++;
+            }
+        } else {
+            /* Juncture-delimited spans wrapping circularly */
+            for (int j = 0; j < njunc; j++) {
+                int start = junc_indices[j];
+                int end   = junc_indices[(j + 1) % njunc];
+
+                /* Count points in this span (wrapping) */
+                int n = 0;
+                int idx = start;
+                do {
+                    n++;
+                    idx = (idx + 1) % count;
+                } while (idx != (end % count));
+                n++;  /* include end point */
+
+                DC_Point2 *pts = malloc((size_t)n * sizeof(DC_Point2));
+                if (pts) {
+                    int pi = 0;
+                    idx = start;
+                    do {
+                        DC_Point2 *p = dc_array_get(ed->pts, (size_t)idx);
+                        pts[pi++] = *p;
+                        idx = (idx + 1) % count;
+                    } while (idx != (end % count));
+                    DC_Point2 *pend = dc_array_get(ed->pts,
+                                                   (size_t)(end % count));
+                    pts[pi] = *pend;
+                    spans[ns].points = pts;
+                    spans[ns].count = n;
+                    ns++;
+                }
+            }
+        }
+    } else {
+        /* Open shape: split at junctures and terminal point */
+        int seg_start = 0;
+        for (int i = 1; i < count; i++) {
+            if (i == count - 1 || is_juncture(ed, i)) {
+                int n = i - seg_start + 1;
+                if (n >= 2) {
+                    DC_Point2 *pts = malloc((size_t)n * sizeof(DC_Point2));
+                    if (pts) {
+                        for (int k = 0; k < n; k++) {
+                            DC_Point2 *p = dc_array_get(ed->pts,
+                                                (size_t)(seg_start + k));
+                            pts[k] = *p;
+                        }
+                        spans[ns].points = pts;
+                        spans[ns].count = n;
+                        ns++;
+                    }
+                }
+                seg_start = i;
+            }
+        }
+    }
+
+    *num_spans = ns;
+    if (ns == 0) {
+        free(spans);
+        return NULL;
+    }
+    return spans;
+}
+
+/* -------------------------------------------------------------------------
+ * SCAD export — extract spans, derive name, write files
+ * ---------------------------------------------------------------------- */
+int
+dc_bezier_editor_export_scad(DC_BezierEditor *editor,
+                              const char *path, DC_Error *err)
+{
+    if (!editor || !path) {
+        if (err)
+            DC_SET_ERROR(err, DC_ERROR_INVALID_ARG,
+                         "export_scad: editor and path required");
+        return -1;
+    }
+
+    int num_spans = 0;
+    DC_ScadSpan *spans = dc_bezier_editor_get_spans(editor, &num_spans);
+    if (!spans || num_spans <= 0) {
+        if (err)
+            DC_SET_ERROR(err, DC_ERROR_INVALID_ARG,
+                         "export_scad: need at least 2 points");
+        return -1;
+    }
+
+    /* Derive shape name from filename: strip directory and .scad extension,
+     * replace non-alnum with underscore */
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+
+    size_t blen = strlen(base);
+    char *name = malloc(blen + 1);
+    if (!name) {
+        dc_scad_spans_free(spans, num_spans);
+        if (err)
+            DC_SET_ERROR(err, DC_ERROR_MEMORY, "export_scad: alloc failed");
+        return -1;
+    }
+
+    /* Copy base, strip .scad, sanitize */
+    size_t nlen = 0;
+    for (size_t i = 0; i < blen; i++) {
+        if (base[i] == '.' && i + 5 == blen &&
+            strcmp(base + i, ".scad") == 0)
+            break;
+        char c = base[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9'))
+            name[nlen++] = c;
+        else
+            name[nlen++] = '_';
+    }
+    if (nlen == 0) { name[nlen++] = 's'; name[nlen++] = 'h'; name[nlen++] = 'a';
+                     name[nlen++] = 'p'; name[nlen++] = 'e'; }
+    name[nlen] = '\0';
+
+    int rc = dc_scad_export(path, name, spans, num_spans, editor->closed, err);
+
+    free(name);
+    dc_scad_spans_free(spans, num_spans);
+    return rc;
+}
+
+/* -------------------------------------------------------------------------
+ * Programmatic control API (used by inspect server)
+ * ---------------------------------------------------------------------- */
+
+void
+dc_bezier_editor_select(DC_BezierEditor *editor, int index)
+{
+    if (!editor) return;
+    int count = (int)dc_array_length(editor->pts);
+    if (index < -1 || index >= count) index = -1;
+    editor->selected = index;
+    populate_co_selected(editor);
+    update_chain_button(editor);
+    update_status(editor);
+    refresh_panel(editor);
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(editor->canvas));
+}
+
+int
+dc_bezier_editor_add_point_at(DC_BezierEditor *editor, double x, double y)
+{
+    if (!editor) return -1;
+    if (editor->closed) return -1;  /* can't add to closed shape */
+
+    int count = (int)dc_array_length(editor->pts);
+    DC_Point2 pt = { x, y };
+
+    if (count == 0) {
+        dc_array_push(editor->pts, &pt);
+        uint8_t jflag = 1;
+        dc_array_push(editor->junctures, &jflag);
+        editor->selected = 0;
+    } else {
+        /* Control at midpoint, endpoint at click */
+        DC_Point2 *prev = dc_array_get(editor->pts, (size_t)(count - 1));
+        DC_Point2 mid = { (prev->x + x) * 0.5, (prev->y + y) * 0.5 };
+
+        dc_array_push(editor->pts, &mid);
+        uint8_t ctrl_flag = 0;
+        dc_array_push(editor->junctures, &ctrl_flag);
+
+        dc_array_push(editor->pts, &pt);
+        uint8_t end_flag = editor->chain_mode;
+        dc_array_push(editor->junctures, &end_flag);
+
+        editor->selected = (int)dc_array_length(editor->pts) - 1;
+    }
+
+    populate_co_selected(editor);
+    update_chain_button(editor);
+    update_status(editor);
+    refresh_panel(editor);
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(editor->canvas));
+    return 0;
+}
+
+void
+dc_bezier_editor_delete_selected(DC_BezierEditor *editor)
+{
+    if (!editor) return;
+    int count = (int)dc_array_length(editor->pts);
+    int sel = editor->selected;
+    if (sel < 0 || sel >= count) return;
+
+    dc_array_remove(editor->pts, (size_t)sel);
+    dc_array_remove(editor->junctures, (size_t)sel);
+    editor->closed = 0;
+    count--;
+    if (count == 0)
+        editor->selected = -1;
+    else if (sel >= count)
+        editor->selected = count - 1;
+
+    populate_co_selected(editor);
+    update_chain_button(editor);
+    update_status(editor);
+    refresh_panel(editor);
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(editor->canvas));
+}
+
+void
+dc_bezier_editor_set_chain_mode(DC_BezierEditor *editor, int on)
+{
+    if (!editor) return;
+    editor->chain_mode = on ? 1 : 0;
+    g_signal_handler_block(editor->global_chain_btn, editor->global_chain_hid);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(editor->global_chain_btn),
+                                 editor->chain_mode ? TRUE : FALSE);
+    g_signal_handler_unblock(editor->global_chain_btn, editor->global_chain_hid);
+    update_status(editor);
+    refresh_panel(editor);
+}
+
+void
+dc_bezier_editor_set_juncture(DC_BezierEditor *editor, int index, int on)
+{
+    if (!editor) return;
+    int count = (int)dc_array_length(editor->pts);
+    if (index < 0 || index >= count) return;
+
+    /* Same toggle rules as the C key handler */
+    int can_toggle = (index > 0 && index < count - 1)
+                   || (index == 0 && editor->closed);
+    if (!can_toggle) return;
+
+    uint8_t *flag = dc_array_get(editor->junctures, (size_t)index);
+    if (flag) {
+        *flag = on ? 1 : 0;
+        if (index == 0 && editor->closed && *flag == 0)
+            enforce_c1_at_p0(editor);
+    }
+
+    update_chain_button(editor);
+    update_status(editor);
+    refresh_panel(editor);
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(editor->canvas));
+}
+
+DC_BezierCanvas *
+dc_bezier_editor_get_canvas(DC_BezierEditor *editor)
+{
+    if (!editor) return NULL;
+    return editor->canvas;
 }

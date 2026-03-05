@@ -66,6 +66,7 @@ add_library(dc_core STATIC
     src/core/log.c
     src/core/manifest.c
     src/bezier/bezier_curve.c
+    src/scad/scad_export.c
 )
 target_include_directories(dc_core PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(dc_core
@@ -82,6 +83,7 @@ add_executable(duncad
     src/ui/app_window.c
     src/bezier/bezier_canvas.c
     src/bezier/bezier_editor.c
+    src/inspect/inspect.c
 )
 target_include_directories(duncad PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(duncad
@@ -98,6 +100,12 @@ target_link_libraries(duncad
 add_executable(duncad-docs tools/duncad_docs.c)
 target_link_libraries(duncad-docs PRIVATE dc_compiler_flags)
 target_compile_definitions(duncad-docs PRIVATE DC_BUILD_DIR="${CMAKE_BINARY_DIR}")
+
+# ---------------------------------------------------------------------------
+# Inspect CLI tool (standalone -- POSIX sockets, no GTK, no dc_core)
+# ---------------------------------------------------------------------------
+add_executable(duncad-inspect tools/duncad_inspect.c)
+target_link_libraries(duncad-inspect PRIVATE dc_compiler_flags)
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -123,6 +131,7 @@ dc_add_test(test_array       tests/test_array.c)
 dc_add_test(test_string_builder tests/test_string_builder.c)
 dc_add_test(test_manifest    tests/test_manifest.c)
 dc_add_test(test_bezier_curve tests/test_bezier_curve.c)
+dc_add_test(test_scad_export tests/test_scad_export.c)
 
 # Bezier canvas test — needs GTK4 + canvas + editor sources
 add_executable(test_bezier_canvas
@@ -169,6 +178,6 @@ set_tests_properties(test_bezier_editor PROPERTIES
 # ---------------------------------------------------------------------------
 add_custom_target(tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_bezier_canvas test_bezier_editor
+    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_scad_export test_bezier_canvas test_bezier_editor
     COMMENT "Building and running all DunCAD tests"
 )

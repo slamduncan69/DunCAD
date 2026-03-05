@@ -12,6 +12,7 @@
  */
 
 #include <gtk/gtk.h>
+#include "scad/scad_export.h"
 
 typedef struct DC_BezierEditor DC_BezierEditor;
 
@@ -32,5 +33,37 @@ void             dc_bezier_editor_set_point(DC_BezierEditor *editor,
 int              dc_bezier_editor_is_juncture(const DC_BezierEditor *editor,
                                               int index);
 int              dc_bezier_editor_get_chain_mode(const DC_BezierEditor *editor);
+
+/* Programmatic point selection (-1 to deselect). */
+void             dc_bezier_editor_select(DC_BezierEditor *editor, int index);
+
+/* Add a point at world coordinates (like clicking on empty canvas).
+ * Returns 0 on success, -1 on failure. */
+int              dc_bezier_editor_add_point_at(DC_BezierEditor *editor,
+                                               double x, double y);
+
+/* Delete the currently selected point. No-op if nothing selected. */
+void             dc_bezier_editor_delete_selected(DC_BezierEditor *editor);
+
+/* Set global chain mode (0=off, 1=on). */
+void             dc_bezier_editor_set_chain_mode(DC_BezierEditor *editor,
+                                                  int on);
+
+/* Set juncture flag for a specific point (0=smooth, 1=juncture). */
+void             dc_bezier_editor_set_juncture(DC_BezierEditor *editor,
+                                                int index, int on);
+
+/* Get the canvas owned by this editor (for zoom/pan/render access). */
+struct DC_BezierCanvas *dc_bezier_editor_get_canvas(DC_BezierEditor *editor);
+
+/* Extract juncture-delimited spans for export. Caller must free with
+ * dc_scad_spans_free(). Returns NULL if < 2 points. */
+DC_ScadSpan     *dc_bezier_editor_get_spans(const DC_BezierEditor *editor,
+                                            int *num_spans);
+
+/* Export current shape to .scad file at path. Returns 0/-1. */
+int              dc_bezier_editor_export_scad(DC_BezierEditor *editor,
+                                              const char *path,
+                                              DC_Error *err);
 
 #endif /* DC_BEZIER_EDITOR_H */

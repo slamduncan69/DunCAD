@@ -49,4 +49,11 @@ void dc_app_window_set_project_name(GtkWidget *window, const char *project_name)
  * ---------------------------------------------------------------------- */
 void dc_app_window_set_status(GtkWidget *window, const char *text);
 
+/* -------------------------------------------------------------------------
+ * dc_app_window_get_editor — retrieve the bezier editor attached to window.
+ *
+ * Returns: borrowed DC_BezierEditor*, or NULL if not found.
+ * ---------------------------------------------------------------------- */
+struct DC_BezierEditor *dc_app_window_get_editor(GtkWidget *window);
+
 #endif /* DC_APP_WINDOW_H */

@@ -262,3 +262,10 @@ dc_app_window_set_status(GtkWidget *window, const char *text)
 
     gtk_label_set_text(GTK_LABEL(label), text ? text : "");
 }
+
+struct DC_BezierEditor *
+dc_app_window_get_editor(GtkWidget *window)
+{
+    if (!window) return NULL;
+    return g_object_get_data(G_OBJECT(window), "dc-bezier-editor");
+}

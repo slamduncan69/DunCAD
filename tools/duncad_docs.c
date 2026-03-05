@@ -28,6 +28,7 @@ static const char HELP_ROOT[] =
 "  duncad-docs bezier        Bezier spline geometry and GTK4 editor\n"
 "  duncad-docs scad          OpenSCAD code generation\n"
 "  duncad-docs ui            GTK4 application window\n"
+"  duncad-docs inspect       Unix socket inspect/control server\n"
 "  duncad-docs build         Build system and test suite\n"
 "  duncad-docs conventions   Naming, ownership, and error handling\n"
 "\n"
@@ -341,34 +342,56 @@ static const char HELP_BEZIER_PANEL[] =
 static const char HELP_SCAD[] =
 "SCAD -- OpenSCAD Code Generation\n"
 "\n"
-"src/scad/ converts DC_BezierCurve splines into OpenSCAD (.scad)\n"
-"source files. The generated code uses a companion library that\n"
-"implements De Casteljau evaluation inside OpenSCAD.\n"
+"src/scad/ exports editor bezier spans into OpenSCAD (.scad) source\n"
+"files. Spans are arbitrary-degree sequences of DC_Point2 control\n"
+"points, matching the editor's juncture-delimited representation.\n"
+"A companion library implements De Casteljau evaluation in OpenSCAD.\n"
 "\n"
 "TOPICS:\n"
-"  duncad-docs scad export   dc_scad_export_spline() and output format\n";
+"  duncad-docs scad export   Export API and output format\n";
 
 static const char HELP_SCAD_EXPORT[] =
 "SCAD: EXPORT -- OpenSCAD Export\n"
 "\n"
-"Generates two files per export: a per-spline .scad file and a\n"
-"companion library (duncad_bezier.scad).\n"
+"Generates two files per export: a shape .scad file and a companion\n"
+"library (duncad_bezier.scad). Triggered by Export button or Ctrl+E.\n"
 "\n"
 "API (src/scad/scad_export.h):\n"
-"  bool dc_scad_export_spline(DC_BezierCurve *, path, DC_Error *)\n"
+"  DC_ScadSpan { DC_Point2 *points; int count; }\n"
+"\n"
+"  char *dc_scad_generate(name, spans, num_spans, closed, err)\n"
+"    Generate shape .scad source as a string.\n"
+"\n"
+"  char *dc_scad_generate_library()\n"
+"    Generate companion library source as a string.\n"
+"\n"
+"  int dc_scad_export(path, name, spans, num_spans, closed, err)\n"
+"    Write <path> and duncad_bezier.scad to disk.\n"
+"\n"
+"  void dc_scad_spans_free(spans, num_spans)\n"
+"    Free span array and owned point data.\n"
+"\n"
+"EDITOR INTEGRATION (src/bezier/bezier_editor.h):\n"
+"  DC_ScadSpan *dc_bezier_editor_get_spans(editor, &num_spans)\n"
+"    Extract juncture-delimited spans from editor points.\n"
+"\n"
+"  int dc_bezier_editor_export_scad(editor, path, err)\n"
+"    Export current shape to .scad file.\n"
 "\n"
 "GENERATED: <name>.scad\n"
-"  include <duncad_bezier.scad>\n"
-"  Encodes each segment as a 4-element control point list.\n"
-"  Calls dc_bezier_path(segments, steps) to produce the outline.\n"
+"  use <duncad_bezier.scad>\n"
+"  Encodes each span as an N-element control point list.\n"
+"  Closed shapes: polygon(dc_bezier_path(spans, 100))\n"
+"  Open shapes: hull-based line following the path.\n"
 "\n"
 "GENERATED: duncad_bezier.scad (companion library)\n"
-"  dc_bezier_point(p0,p1,p2,p3,t)  De Casteljau evaluation at t\n"
-"  dc_bezier_path(segs, steps)      tessellated polygon path\n"
-"  dc_bezier_shape(segs, steps, h)  linear_extrude wrapper\n"
+"  dc_lerp(a, b, t)                Linear interpolation\n"
+"  dc_decasteljau(pts, t)          Arbitrary-degree evaluation at t\n"
+"  dc_bezier_span(pts, steps)      Tessellate one span\n"
+"  dc_bezier_path(spans, steps)    Tessellate all spans into polygon\n"
 "\n"
 "SEE ALSO:\n"
-"  duncad-docs bezier curve   Source spline consumed by the exporter\n";
+"  duncad-docs bezier editor   Source editor producing the spans\n";
 
 static const char HELP_UI[] =
 "UI -- GTK4 Application Window\n"
@@ -413,6 +436,99 @@ static const char HELP_UI_WINDOW[] =
 "\n"
 "SEE ALSO:\n"
 "  duncad-docs bezier editor   The widget that fills the center panel\n";
+
+static const char HELP_INSPECT[] =
+"INSPECT -- Unix Socket Inspect/Control Server\n"
+"\n"
+"src/inspect/ provides bidirectional control of a running DunCAD\n"
+"instance via a Unix domain socket at /tmp/duncad.sock. The server\n"
+"runs in the GLib main loop (same thread as GTK), so all commands\n"
+"are safe to call GTK and editor functions directly.\n"
+"\n"
+"TOPICS:\n"
+"  duncad-docs inspect server    Socket server architecture\n"
+"  duncad-docs inspect cli       duncad-inspect CLI tool\n"
+"  duncad-docs inspect commands  Available commands\n";
+
+static const char HELP_INSPECT_SERVER[] =
+"INSPECT: SERVER -- Socket Server Architecture\n"
+"\n"
+"The inspect server uses GSocketService (GLib/GIO) to listen on\n"
+"a Unix domain socket at /tmp/duncad.sock. Connections are accepted\n"
+"in the GLib main loop, so handlers run on the GTK thread.\n"
+"\n"
+"PROTOCOL:\n"
+"  Client sends: command [args...]\\n\n"
+"  Server responds: JSON\\n\n"
+"\n"
+"LIFECYCLE:\n"
+"  dc_inspect_start(editor)   Start server (called from main.c)\n"
+"  dc_inspect_stop()          Stop server (called on shutdown)\n"
+"\n"
+"The socket file is unlinked on stop and on start (to clean up\n"
+"stale sockets from crashes). Only one instance per machine.\n"
+"\n"
+"FILES:\n"
+"  src/inspect/inspect.h   Public API (start/stop)\n"
+"  src/inspect/inspect.c   Server + command dispatch\n"
+"\n"
+"SEE ALSO:\n"
+"  duncad-docs inspect commands   Available commands\n"
+"  duncad-docs inspect cli        CLI tool usage\n";
+
+static const char HELP_INSPECT_CLI[] =
+"INSPECT: CLI -- duncad-inspect Command-Line Tool\n"
+"\n"
+"Standalone POSIX socket client (no GTK, no dc_core dependency).\n"
+"Connects to DunCAD via /tmp/duncad.sock, sends a command,\n"
+"prints the JSON response.\n"
+"\n"
+"USAGE:\n"
+"  duncad-inspect                 Dump state (default)\n"
+"  duncad-inspect <command> ...   Send any command\n"
+"  duncad-inspect --help          Show usage\n"
+"\n"
+"EXAMPLES:\n"
+"  duncad-inspect state           Get full editor/canvas state\n"
+"  duncad-inspect render          Render canvas to /tmp/duncad-canvas.png\n"
+"  duncad-inspect add_point 10 20 Add point at (10, 20)\n"
+"  duncad-inspect select 0        Select first point\n"
+"\n"
+"FILES:\n"
+"  tools/duncad_inspect.c   Source code\n"
+"\n"
+"SEE ALSO:\n"
+"  duncad-docs inspect commands   Full command reference\n";
+
+static const char HELP_INSPECT_COMMANDS[] =
+"INSPECT: COMMANDS -- Available Inspect Commands\n"
+"\n"
+"READ COMMANDS:\n"
+"  state                    Full state dump (JSON)\n"
+"  render [path]            Render canvas to PNG\n"
+"                           Default: /tmp/duncad-canvas.png\n"
+"  help                     List commands (JSON)\n"
+"\n"
+"WRITE COMMANDS:\n"
+"  select <index>           Select point (-1 to deselect)\n"
+"  set_point <i> <x> <y>   Move point to world coords\n"
+"  add_point <x> <y>       Add new point at world coords\n"
+"  delete                   Delete selected point\n"
+"  zoom <level>             Set zoom (px/mm)\n"
+"  pan <x> <y>             Set pan center (world coords mm)\n"
+"  chain <0|1>             Set global chain mode\n"
+"  juncture <i> <0|1>      Set point juncture flag\n"
+"  export <path>            Export to .scad file\n"
+"\n"
+"RESPONSE FORMAT:\n"
+"  All responses are JSON terminated by newline.\n"
+"  Success: {\"ok\":true, ...}\n"
+"  Error:   {\"error\":\"message\"}\n"
+"  State:   {\"editor\":{...}, \"points\":[...], \"canvas\":{...}}\n"
+"\n"
+"SEE ALSO:\n"
+"  duncad-docs inspect cli      CLI tool usage\n"
+"  duncad-docs inspect server   Server architecture\n";
 
 static const char HELP_BUILD[] =
 "BUILD -- Build System and Test Suite\n"
@@ -1190,6 +1306,12 @@ static const struct help_node TREE[] = {
     /* ui */
     { "ui",                    HELP_UI },
     { "ui.window",             HELP_UI_WINDOW },
+
+    /* inspect */
+    { "inspect",               HELP_INSPECT },
+    { "inspect.server",        HELP_INSPECT_SERVER },
+    { "inspect.cli",           HELP_INSPECT_CLI },
+    { "inspect.commands",      HELP_INSPECT_COMMANDS },
 
     /* build */
     { "build",                 HELP_BUILD },

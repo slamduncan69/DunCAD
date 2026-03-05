@@ -607,3 +607,62 @@ dc_bezier_canvas_space_held(const DC_BezierCanvas *canvas)
     if (!canvas) return 0;
     return canvas->space_held;
 }
+
+void
+dc_bezier_canvas_get_pan(const DC_BezierCanvas *canvas, double *x, double *y)
+{
+    if (!canvas) { if (x) *x = 0; if (y) *y = 0; return; }
+    if (x) *x = canvas->pan_x;
+    if (y) *y = canvas->pan_y;
+}
+
+void
+dc_bezier_canvas_set_pan(DC_BezierCanvas *canvas, double x, double y)
+{
+    if (!canvas) return;
+    canvas->pan_x = x;
+    canvas->pan_y = y;
+    gtk_widget_queue_draw(canvas->drawing_area);
+}
+
+void
+dc_bezier_canvas_get_viewport_size(const DC_BezierCanvas *canvas,
+                                    int *width, int *height)
+{
+    if (!canvas || !canvas->drawing_area) {
+        if (width)  *width  = 0;
+        if (height) *height = 0;
+        return;
+    }
+    if (width)  *width  = gtk_widget_get_width(canvas->drawing_area);
+    if (height) *height = gtk_widget_get_height(canvas->drawing_area);
+}
+
+int
+dc_bezier_canvas_render_to_png(DC_BezierCanvas *canvas, const char *path,
+                                int width, int height)
+{
+    if (!canvas || !path) return -1;
+
+    if (width <= 0 || height <= 0) {
+        width  = gtk_widget_get_width(canvas->drawing_area);
+        height = gtk_widget_get_height(canvas->drawing_area);
+        if (width <= 0 || height <= 0) {
+            width  = 800;
+            height = 600;
+        }
+    }
+
+    cairo_surface_t *surface =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+    cairo_t *cr = cairo_create(surface);
+
+    on_draw(NULL, cr, width, height, canvas);
+
+    cairo_status_t status = cairo_surface_write_to_png(surface, path);
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+
+    return (status == CAIRO_STATUS_SUCCESS) ? 0 : -1;
+}

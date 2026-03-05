@@ -112,4 +112,32 @@ double dc_bezier_canvas_get_zoom(const DC_BezierCanvas *canvas);
 /* Return 1 if space bar is currently held (pan mode), 0 otherwise. */
 int dc_bezier_canvas_space_held(const DC_BezierCanvas *canvas);
 
+/* -------------------------------------------------------------------------
+ * Pan read/write
+ * ---------------------------------------------------------------------- */
+
+/* Get the current pan center (world coordinates, mm). */
+void dc_bezier_canvas_get_pan(const DC_BezierCanvas *canvas,
+                               double *x, double *y);
+
+/* Set the pan center (world coordinates, mm). Queues redraw. */
+void dc_bezier_canvas_set_pan(DC_BezierCanvas *canvas, double x, double y);
+
+/* -------------------------------------------------------------------------
+ * Viewport size
+ * ---------------------------------------------------------------------- */
+
+/* Get the current drawing area dimensions in pixels. */
+void dc_bezier_canvas_get_viewport_size(const DC_BezierCanvas *canvas,
+                                         int *width, int *height);
+
+/* -------------------------------------------------------------------------
+ * Offscreen render
+ * ---------------------------------------------------------------------- */
+
+/* Render the canvas to a PNG file. If width/height are 0, uses the
+ * current widget dimensions. Returns 0 on success, -1 on failure. */
+int dc_bezier_canvas_render_to_png(DC_BezierCanvas *canvas, const char *path,
+                                    int width, int height);
+
 #endif /* DC_BEZIER_CANVAS_H */
