@@ -565,9 +565,9 @@ on_drag_update(GtkGestureDrag *gesture, double dx, double dy, gpointer data)
         float mx = (float)dx * scale;
         float my = (float)dy * scale;
 
-        vp->cam_center[0] = vp->drag_center[0] + mx * rx - my * ux;
-        vp->cam_center[1] = vp->drag_center[1]           - my * uy;
-        vp->cam_center[2] = vp->drag_center[2] + mx * rz - my * uz;
+        vp->cam_center[0] = vp->drag_center[0] - mx * rx + my * ux;
+        vp->cam_center[1] = vp->drag_center[1]           + my * uy;
+        vp->cam_center[2] = vp->drag_center[2] - mx * rz + my * uz;
     }
 
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));

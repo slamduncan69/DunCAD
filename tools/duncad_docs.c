@@ -1192,6 +1192,7 @@ static const char HELP_SESSIONS[] =
 "  duncad-docs sessions s003   2026-02-27  Failed closed-shape endpoint unification\n"
 "  duncad-docs sessions s004   2026-02-27  Closed shapes working; chain-off default\n"
 "  duncad-docs sessions s005   2026-03-05  Phase 3: OpenSCAD IDE integration\n"
+"  duncad-docs sessions s006   2026-03-05  Viewport pan fix and F5 shortcut\n"
 "\n"
 "SEE ALSO:\n"
 "  duncad-docs phases   Phase status and scheduled work\n"
@@ -1381,7 +1382,7 @@ static const char HELP_SESSIONS_S005[] =
 "  90d887f  fix: use fresh GtkSourceLanguageManager to avoid cached-IDs assertion\n"
 "  60136bc  feat: three-pane layout with OpenSCAD preview and bezier editor\n"
 "  6de7804  feat: OpenSCAD viewport camera controls (orbit, pan, zoom)\n"
-"  (pending) feat: real-time OpenGL 3D viewport with STL mesh rendering\n"
+"  7ac3e1b  feat: real-time OpenGL 3D viewport with STL mesh rendering\n"
 "\n"
 "GOAL:\n"
 "  Build the OpenSCAD IDE integration layer: inspect socket for agent\n"
@@ -1454,6 +1455,41 @@ static const char HELP_SESSIONS_S005[] =
 "  duncad-docs inspect        Socket server and CLI tool\n"
 "  duncad-docs scad runner    OpenSCAD subprocess wrapper\n"
 "  duncad-docs ui code_editor GtkSourceView editor panel\n";
+
+static const char HELP_SESSIONS_S006[] =
+"SESSIONS: S006 -- 2026-03-05: Viewport Pan Fix and F5 Shortcut\n"
+"\n"
+"PLATFORM: Claude Code (Opus 4.6)\n"
+"COMMITS:\n"
+"  3115209  fix: viewport pan uses proper view-plane vectors, add F5 render shortcut\n"
+"  (this)   fix: reverse pan direction to match natural drag expectation\n"
+"\n"
+"GOAL:\n"
+"  Fix viewport camera pan direction and sensitivity; add F5 keyboard\n"
+"  shortcut for rendering (matching OpenSCAD workflow).\n"
+"\n"
+"WHAT WAS FIXED:\n"
+"  Pan direction and sensitivity (gl_viewport.c):\n"
+"    - Previous: pan accumulated Y every frame, used wrong signs, too sensitive\n"
+"    - First fix (3115209): compute proper right/up vectors from camera\n"
+"      theta/phi, store full drag_center[3] at drag start, reduce scale\n"
+"      from 0.002 to 0.001\n"
+"    - Second fix (this commit): negate all displacement signs so dragging\n"
+"      right moves the view right (natural/expected direction)\n"
+"\n"
+"  F5 render shortcut (app_window.c):\n"
+"    - GtkEventControllerKey on window captures F5\n"
+"    - Calls dc_scad_preview_render() — same as clicking Render button\n"
+"\n"
+"KEY INSIGHT:\n"
+"  Pan moves the camera center, not the object. To get natural \"grab and\n"
+"  drag\" feel, displacement signs must be negated: dragging right should\n"
+"  move center left (so the view shifts right).\n"
+"\n"
+"FILES CHANGED:\n"
+"  src/gl/gl_viewport.c   Pan vector math: drag_center[3], view-plane\n"
+"                         right/up vectors, reversed signs\n"
+"  src/ui/app_window.c    F5 key handler via GtkEventControllerKey\n";
 
 
 /* ---- TREE REGISTRY ---- */
@@ -1538,6 +1574,7 @@ static const struct help_node TREE[] = {
     { "sessions.s003",               HELP_SESSIONS_S003 },
     { "sessions.s004",               HELP_SESSIONS_S004 },
     { "sessions.s005",               HELP_SESSIONS_S005 },
+    { "sessions.s006",               HELP_SESSIONS_S006 },
 
     /* add new nodes above this line */
     { NULL, NULL }
