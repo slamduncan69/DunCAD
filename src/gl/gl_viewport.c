@@ -553,14 +553,20 @@ on_drag_update(GtkGestureDrag *gesture, double dx, double dy, gpointer data)
         float phi   = vp->cam_phi   * (float)M_PI / 180.0f;
         float scale = vp->cam_dist * 0.001f;
 
-        /* Camera right vector (perpendicular to view in XZ plane) */
+        /* Camera forward vector (from camera toward center) */
+        float fx = cosf(phi) * sinf(theta);
+        float fy = sinf(phi);
+        float fz = cosf(phi) * cosf(theta);
+
+        /* Camera right vector (perpendicular to forward in XZ plane) */
         float rx = cosf(theta);
+        float ry = 0.0f;
         float rz = -sinf(theta);
 
-        /* Camera up vector (cross of forward and right, simplified) */
-        float ux = sinf(phi) * sinf(theta);
-        float uy = cosf(phi);
-        float uz = sinf(phi) * cosf(theta);
+        /* Camera up vector = cross(forward, right), perpendicular to view */
+        float ux = fy * rz - fz * ry;
+        float uy = fz * rx - fx * rz;
+        float uz = fx * ry - fy * rx;
 
         float mx = (float)dx * scale;
         float my = (float)dy * scale;

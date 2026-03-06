@@ -85,6 +85,7 @@ add_executable(duncad
     src/main.c
     src/ui/app_window.c
     src/ui/code_editor.c
+    src/ui/scad_completion.c
     src/ui/scad_preview.c
     src/gl/gl_viewport.c
     src/gl/stl_loader.c
@@ -151,6 +152,7 @@ add_executable(test_bezier_canvas
     src/bezier/bezier_editor.c
     src/ui/app_window.c
     src/ui/code_editor.c
+    src/ui/scad_completion.c
     src/ui/scad_preview.c
     src/gl/gl_viewport.c
     src/gl/stl_loader.c
@@ -180,6 +182,7 @@ add_executable(test_bezier_editor
     src/bezier/bezier_editor.c
     src/ui/app_window.c
     src/ui/code_editor.c
+    src/ui/scad_completion.c
     src/ui/scad_preview.c
     src/gl/gl_viewport.c
     src/gl/stl_loader.c

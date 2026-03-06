@@ -1,8 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include "ui/code_editor.h"
+#include "ui/scad_completion.h"
 #include "core/log.h"
 
 #include <gtksourceview/gtksource.h>
+#include <gtksourceview/completion-providers/words/gtksourcecompletionwords.h>
+#include <gtksourceview/completion-providers/snippets/gtksourcecompletionsnippets.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +87,59 @@ apply_dark_scheme(GtkSourceBuffer *buffer)
             return;
         }
     }
+}
+
+/* -------------------------------------------------------------------------
+ * Completion + Snippet setup
+ * ---------------------------------------------------------------------- */
+static void
+setup_completion(DC_CodeEditor *ed)
+{
+    GtkSourceCompletion *comp =
+        gtk_source_view_get_completion(ed->view);
+
+    /* 1. OpenSCAD keyword provider (fuzzy-matched static word list) */
+    DcScadCompletion *scad_prov = dc_scad_completion_new();
+    gtk_source_completion_add_provider(
+        comp, GTK_SOURCE_COMPLETION_PROVIDER(scad_prov));
+    g_object_unref(scad_prov);
+
+    /* 2. Words provider (auto-complete from words already in buffer) */
+    GtkSourceCompletionWords *words =
+        gtk_source_completion_words_new("Words");
+    gtk_source_completion_words_register(
+        words, GTK_TEXT_BUFFER(ed->buffer));
+    gtk_source_completion_add_provider(
+        comp, GTK_SOURCE_COMPLETION_PROVIDER(words));
+    g_object_unref(words);
+
+    /* 3. Snippet provider — needs search path for our custom snippets */
+#ifdef DC_SOURCE_DIR
+    GtkSourceSnippetManager *sm = gtk_source_snippet_manager_get_default();
+    const char * const *defaults = gtk_source_snippet_manager_get_search_path(sm);
+
+    GPtrArray *dirs = g_ptr_array_new();
+    if (defaults) {
+        for (int i = 0; defaults[i]; i++)
+            g_ptr_array_add(dirs, (gpointer)defaults[i]);
+    }
+    char custom_dir[1024];
+    snprintf(custom_dir, sizeof(custom_dir), "%s/data/snippets", DC_SOURCE_DIR);
+    g_ptr_array_add(dirs, custom_dir);
+    g_ptr_array_add(dirs, NULL);
+    gtk_source_snippet_manager_set_search_path(
+        sm, (const char * const *)dirs->pdata);
+    g_ptr_array_free(dirs, TRUE);
+#endif
+
+    GtkSourceCompletionSnippets *snip =
+        gtk_source_completion_snippets_new();
+    gtk_source_completion_add_provider(
+        comp, GTK_SOURCE_COMPLETION_PROVIDER(snip));
+    g_object_unref(snip);
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "code_editor: completion providers registered");
 }
 
 /* -------------------------------------------------------------------------
@@ -246,6 +302,9 @@ dc_code_editor_new(void)
     gtk_source_view_set_insert_spaces_instead_of_tabs(ed->view, TRUE);
     gtk_source_view_set_auto_indent(ed->view, TRUE);
     gtk_source_view_set_highlight_current_line(ed->view, TRUE);
+
+    /* Completion providers */
+    setup_completion(ed);
 
     /* Monospace font */
     PangoFontDescription *font = pango_font_description_from_string("Monospace 11");
