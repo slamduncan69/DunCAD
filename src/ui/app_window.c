@@ -89,6 +89,26 @@ make_placeholder_panel(const char *label_text)
 }
 
 /* -------------------------------------------------------------------------
+ * Key handler for window-level shortcuts
+ * ---------------------------------------------------------------------- */
+static gboolean
+on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
+               guint keycode, GdkModifierType mods, gpointer data)
+{
+    (void)ctrl; (void)keycode; (void)mods;
+    GtkWidget *window = data;
+
+    if (keyval == GDK_KEY_F5) {
+        DC_ScadPreview *pv = g_object_get_data(G_OBJECT(window),
+                                                "dc-scad-preview-ref");
+        if (pv) dc_scad_preview_render(pv);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* -------------------------------------------------------------------------
  * dc_app_window_create
  * ---------------------------------------------------------------------- */
 GtkWidget *
@@ -246,6 +266,13 @@ dc_app_window_create(GtkApplication *app)
     /* Wire the SCAD preview to the window */
     g_object_set_data_full(G_OBJECT(window), "dc-scad-preview", preview,
                            (GDestroyNotify)dc_scad_preview_free);
+
+    /* F5 = Render preview (window-level shortcut) */
+    g_object_set_data(G_OBJECT(window), "dc-scad-preview-ref", preview);
+    GtkEventController *key_ctrl = gtk_event_controller_key_new();
+    g_signal_connect(key_ctrl, "key-pressed",
+                     G_CALLBACK(on_key_pressed), window);
+    gtk_widget_add_controller(window, key_ctrl);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "application window created");
 

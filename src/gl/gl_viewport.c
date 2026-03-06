@@ -192,7 +192,7 @@ struct DC_GlViewport {
     /* Drag state */
     double       drag_x, drag_y;
     float        drag_theta, drag_phi;
-    float        drag_cx, drag_cy;
+    float        drag_center[3];    /* cam_center at drag start */
     int          dragging;  /* 0=none, 1=orbit, 2=pan */
 };
 
@@ -527,8 +527,7 @@ on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data)
 
     if (button == 3 || button == 2 || (mods & GDK_SHIFT_MASK)) {
         vp->dragging = 2;
-        vp->drag_cx = vp->cam_center[0];
-        vp->drag_cy = vp->cam_center[2];
+        memcpy(vp->drag_center, vp->cam_center, sizeof(vp->drag_center));
     } else {
         vp->dragging = 1;
         vp->drag_theta = vp->cam_theta;
@@ -549,14 +548,26 @@ on_drag_update(GtkGestureDrag *gesture, double dx, double dy, gpointer data)
         if (vp->cam_phi > 89.0f) vp->cam_phi = 89.0f;
         if (vp->cam_phi < -89.0f) vp->cam_phi = -89.0f;
     } else if (vp->dragging == 2) {
-        /* Pan — move center in view-plane */
+        /* Pan — move center along camera right/up vectors */
         float theta = vp->cam_theta * (float)M_PI / 180.0f;
-        float scale = vp->cam_dist * 0.002f;
-        float pdx = (float)dx * scale;
+        float phi   = vp->cam_phi   * (float)M_PI / 180.0f;
+        float scale = vp->cam_dist * 0.001f;
 
-        vp->cam_center[0] = vp->drag_cx - pdx * cosf(theta);
-        vp->cam_center[2] = vp->drag_cy + pdx * sinf(theta);
-        vp->cam_center[1] += -(float)dy * scale * 0.5f;
+        /* Camera right vector (perpendicular to view in XZ plane) */
+        float rx = cosf(theta);
+        float rz = -sinf(theta);
+
+        /* Camera up vector (cross of forward and right, simplified) */
+        float ux = sinf(phi) * sinf(theta);
+        float uy = cosf(phi);
+        float uz = sinf(phi) * cosf(theta);
+
+        float mx = (float)dx * scale;
+        float my = (float)dy * scale;
+
+        vp->cam_center[0] = vp->drag_center[0] + mx * rx - my * ux;
+        vp->cam_center[1] = vp->drag_center[1]           - my * uy;
+        vp->cam_center[2] = vp->drag_center[2] + mx * rz - my * uz;
     }
 
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
