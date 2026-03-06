@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include "ui/code_editor.h"
-#include "ui/scad_completion.h"
 #include "core/log.h"
 
 #include <gtksourceview/gtksource.h>
@@ -20,6 +19,7 @@ struct DC_CodeEditor {
     GtkWidget        *window;       /* borrowed, for file dialogs */
     char             *file_path;    /* owned, NULL if untitled */
     GtkWidget        *path_label;   /* shows filename in toolbar */
+    GtkTextBuffer    *seed_buffer;  /* hidden buffer with OpenSCAD keywords */
 };
 
 /* -------------------------------------------------------------------------
@@ -91,29 +91,66 @@ apply_dark_scheme(GtkSourceBuffer *buffer)
 
 /* -------------------------------------------------------------------------
  * Completion + Snippet setup
+ *
+ * Uses only built-in GtkSourceView providers (no custom GObject):
+ *   1. GtkSourceCompletionWords — registered on editor buffer AND on a
+ *      hidden buffer pre-seeded with all OpenSCAD keywords.
+ *   2. GtkSourceCompletionSnippets — loads .snippets XML from our data dir.
  * ---------------------------------------------------------------------- */
+
+/* All OpenSCAD keywords/builtins, one per line */
+static const char SCAD_KEYWORD_SEED[] =
+    /* 3D Primitives */
+    "cube\nsphere\ncylinder\npolyhedron\n"
+    /* 2D Primitives */
+    "circle\nsquare\npolygon\ntext\n"
+    /* Transforms */
+    "translate\nrotate\nscale\nmirror\nmultmatrix\nresize\noffset\ncolor\n"
+    /* Boolean Ops */
+    "difference\nunion\nintersection\n"
+    /* Extrusion */
+    "linear_extrude\nrotate_extrude\n"
+    /* CSG */
+    "hull\nminkowski\n"
+    /* Import */
+    "import\nsurface\nprojection\nrender\n"
+    /* Control */
+    "module\nfunction\nfor\nif\nelse\nlet\neach\nassert\necho\n"
+    "include\nuse\nchildren\n"
+    /* Math */
+    "abs\nsign\nsin\ncos\ntan\nasin\nacos\natan\natan2\n"
+    "floor\nceil\nround\nsqrt\npow\nexp\nlog\nln\nmin\nmax\nnorm\ncross\n"
+    /* List/String */
+    "len\nconcat\nlookup\nstr\nchr\nord\nsearch\n"
+    "is_undef\nis_bool\nis_num\nis_string\nis_list\nis_function\n"
+    /* Constants */
+    "true\nfalse\nundef\nPI\ncenter\nconvexity\ntwist\nslices\n";
+
 static void
 setup_completion(DC_CodeEditor *ed)
 {
     GtkSourceCompletion *comp =
         gtk_source_view_get_completion(ed->view);
 
-    /* 1. OpenSCAD keyword provider (fuzzy-matched static word list) */
-    DcScadCompletion *scad_prov = dc_scad_completion_new();
-    gtk_source_completion_add_provider(
-        comp, GTK_SOURCE_COMPLETION_PROVIDER(scad_prov));
-    g_object_unref(scad_prov);
-
-    /* 2. Words provider (auto-complete from words already in buffer) */
+    /* 1. Words provider — register on editor buffer + keyword seed buffer */
     GtkSourceCompletionWords *words =
-        gtk_source_completion_words_new("Words");
+        gtk_source_completion_words_new("OpenSCAD");
+
+    /* Register the editor's own buffer (learn typed words) */
     gtk_source_completion_words_register(
         words, GTK_TEXT_BUFFER(ed->buffer));
+
+    /* Create a hidden buffer pre-seeded with all OpenSCAD keywords.
+     * The words provider scans registered buffers for completions. */
+    ed->seed_buffer = gtk_text_buffer_new(NULL);
+    gtk_text_buffer_set_text(ed->seed_buffer, SCAD_KEYWORD_SEED, -1);
+    gtk_source_completion_words_register(words, ed->seed_buffer);
+
     gtk_source_completion_add_provider(
         comp, GTK_SOURCE_COMPLETION_PROVIDER(words));
     g_object_unref(words);
 
-    /* 3. Snippet provider — needs search path for our custom snippets */
+    /* 2. Snippet provider — loads .snippets files from our data dir */
 #ifdef DC_SOURCE_DIR
     GtkSourceSnippetManager *sm = gtk_source_snippet_manager_get_default();
     const char * const *defaults = gtk_source_snippet_manager_get_search_path(sm);
@@ -367,6 +404,7 @@ dc_code_editor_free(DC_CodeEditor *ed)
 {
     if (!ed) return;
     free(ed->file_path);
+    g_clear_object(&ed->seed_buffer);
     /* GtkSourceBuffer and View are owned by GTK widget hierarchy */
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "code editor freed");
     free(ed);

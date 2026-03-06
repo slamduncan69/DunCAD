@@ -4,22 +4,26 @@
 #include <ctype.h>
 
 /* -------------------------------------------------------------------------
- * OpenSCAD keyword/function completion provider for GtkSourceView 5.
+ * OpenSCAD completion provider for GtkSourceView 5.
  *
- * Implements GtkSourceCompletionProvider using a static word list of all
- * OpenSCAD builtins. Uses fuzzy matching from GtkSourceCompletion.
+ * Each keyword has an optional snippet template. When activated:
+ *   - If template exists: delete typed prefix, push snippet with tabstops
+ *   - If no template: insert plain word
+ *
+ * Snippets use GtkSourceView's ${ } syntax for tab-navigable placeholders.
  * ---------------------------------------------------------------------- */
 
-/* ---- Proposal object (wraps a single keyword string) ---- */
+/* ---- Proposal object ---- */
 
 #define DC_TYPE_SCAD_PROPOSAL (dc_scad_proposal_get_type())
 G_DECLARE_FINAL_TYPE(DcScadProposal, dc_scad_proposal,
                      DC, SCAD_PROPOSAL, GObject)
 
 struct _DcScadProposal {
-    GObject parent;
-    const char *word;       /* static string, not owned */
-    const char *detail;     /* short description, static */
+    GObject     parent;
+    const char *word;       /* keyword name (static) */
+    const char *snippet;    /* snippet template or NULL (static) */
+    const char *detail;     /* shown in popup (static) */
 };
 
 static void dc_scad_proposal_iface_init(GtkSourceCompletionProposalInterface *iface);
@@ -44,141 +48,166 @@ dc_scad_proposal_iface_init(GtkSourceCompletionProposalInterface *iface)
 static void dc_scad_proposal_class_init(DcScadProposalClass *klass) { (void)klass; }
 static void dc_scad_proposal_init(DcScadProposal *self) { (void)self; }
 
-static DcScadProposal *
-dc_scad_proposal_new(const char *word, const char *detail)
-{
-    DcScadProposal *p = g_object_new(DC_TYPE_SCAD_PROPOSAL, NULL);
-    p->word = word;
-    p->detail = detail;
-    return p;
-}
-
 /* ---- OpenSCAD keyword database ---- */
 
 typedef struct {
     const char *word;
+    const char *snippet;   /* NULL = insert word only */
     const char *detail;
 } ScadKeyword;
 
 static const ScadKeyword SCAD_KEYWORDS[] = {
     /* 3D Primitives */
-    { "cube",               "3D box: cube([x,y,z], center)" },
-    { "sphere",             "3D sphere: sphere(r, $fn)" },
-    { "cylinder",           "3D cylinder: cylinder(h, r, $fn)" },
-    { "polyhedron",         "3D polyhedron: polyhedron(points, faces)" },
+    { "cube",           "cube([${1:10}, ${2:10}, ${3:10}], center=${4:true});",
+                        "cube([x, y, z], center=true);" },
+    { "sphere",         "sphere(r=${1:10}, $$fn=${2:64});",
+                        "sphere(r, $fn);" },
+    { "cylinder",       "cylinder(h=${1:10}, r=${2:5}, $$fn=${3:64}, center=${4:true});",
+                        "cylinder(h, r, $fn, center);" },
+    { "polyhedron",     "polyhedron(points=[${1}], faces=[${2}]);",
+                        "polyhedron(points, faces);" },
 
     /* 2D Primitives */
-    { "circle",             "2D circle: circle(r, $fn)" },
-    { "square",             "2D rect: square([x,y], center)" },
-    { "polygon",            "2D polygon: polygon(points, paths)" },
-    { "text",               "2D text: text(t, size, font)" },
+    { "circle",         "circle(r=${1:10}, $$fn=${2:64});",
+                        "circle(r, $fn);" },
+    { "square",         "square([${1:10}, ${2:10}], center=${3:true});",
+                        "square([x, y], center);" },
+    { "polygon",        "polygon(points=[\n\t[${1:0}, ${2:0}],\n\t[${3:10}, ${4:0}],\n\t[${5:10}, ${6:10}],\n]);",
+                        "polygon(points=[...]);" },
+    { "text",           "text(\"${1:hello}\", size=${2:10});",
+                        "text(t, size);" },
 
     /* Transforms */
-    { "translate",          "Move: translate([x,y,z])" },
-    { "rotate",             "Rotate: rotate([x,y,z]) or rotate(a, v)" },
-    { "scale",              "Scale: scale([x,y,z])" },
-    { "mirror",             "Mirror: mirror([x,y,z])" },
-    { "multmatrix",         "4x4 transform: multmatrix(m)" },
-    { "resize",             "Resize to size: resize([x,y,z])" },
-    { "offset",             "2D offset: offset(r) or offset(delta)" },
+    { "translate",      "translate([${1:0}, ${2:0}, ${3:0}])\n\t${0};",
+                        "translate([x, y, z])" },
+    { "rotate",         "rotate([${1:0}, ${2:0}, ${3:0}])\n\t${0};",
+                        "rotate([x, y, z])" },
+    { "scale",          "scale([${1:1}, ${2:1}, ${3:1}])\n\t${0};",
+                        "scale([x, y, z])" },
+    { "mirror",         "mirror([${1:1}, ${2:0}, ${3:0}])\n\t${0};",
+                        "mirror([x, y, z])" },
+    { "resize",         "resize([${1:10}, ${2:10}, ${3:10}])\n\t${0};",
+                        "resize([x, y, z])" },
+    { "multmatrix",     "multmatrix(${1:m})\n\t${0};",
+                        "multmatrix(m)" },
+    { "offset",         "offset(r=${1:1})\n\t${0};",
+                        "offset(r) or offset(delta)" },
+    { "color",          "color(\"${1:red}\")\n\t${0};",
+                        "color(\"name\") or color([r,g,b,a])" },
 
     /* Boolean Operations */
-    { "union",              "Boolean union of children" },
-    { "difference",         "Subtract children from first child" },
-    { "intersection",       "Boolean intersection of children" },
+    { "difference",     "difference() {\n\t${1:// base}\n\t${2:// subtract}\n}",
+                        "difference() { base; subtract; }" },
+    { "union",          "union() {\n\t${0}\n}",
+                        "union() { ... }" },
+    { "intersection",   "intersection() {\n\t${0}\n}",
+                        "intersection() { ... }" },
 
     /* Extrusion */
-    { "linear_extrude",     "Extrude 2D to 3D: linear_extrude(height)" },
-    { "rotate_extrude",     "Revolve 2D to 3D: rotate_extrude(angle)" },
+    { "linear_extrude", "linear_extrude(height=${1:10}, center=${2:true})\n\t${0};",
+                        "linear_extrude(height, center)" },
+    { "rotate_extrude", "rotate_extrude(angle=${1:360}, $$fn=${2:64})\n\t${0};",
+                        "rotate_extrude(angle, $fn)" },
 
     /* CSG Operations */
-    { "hull",               "Convex hull of children" },
-    { "minkowski",          "Minkowski sum of children" },
+    { "hull",           "hull() {\n\t${0}\n}",
+                        "hull() { ... }" },
+    { "minkowski",      "minkowski() {\n\t${1:// base}\n\t${2:// round}\n}",
+                        "minkowski() { base; round; }" },
 
-    /* Import/Export */
-    { "import",             "Import file: import(\"file.stl\")" },
-    { "surface",            "Height map: surface(\"file.dat\")" },
-    { "projection",         "3D to 2D: projection(cut)" },
-    { "render",             "Force CGAL render: render(convexity)" },
+    /* Import/Projection */
+    { "import",         "import(\"${1:file.stl}\");",
+                        "import(\"file\");" },
+    { "surface",        "surface(\"${1:file.dat}\");",
+                        "surface(\"file\");" },
+    { "projection",     "projection(cut=${1:false})\n\t${0};",
+                        "projection(cut)" },
+    { "render",         "render(convexity=${1:10})\n\t${0};",
+                        "render(convexity)" },
 
     /* Control Flow */
-    { "module",             "Define module: module name() { }" },
-    { "function",           "Define function: function f(x) = expr" },
-    { "for",                "Loop: for (i = [start:step:end])" },
-    { "if",                 "Conditional: if (cond) { }" },
-    { "else",               "Else branch" },
-    { "let",                "Local binding: let (x = expr)" },
-    { "each",               "Flatten in list comprehension" },
-    { "assert",             "Runtime assertion: assert(cond, msg)" },
-    { "echo",               "Debug output: echo(value)" },
-    { "include",            "Include file: include <file.scad>" },
-    { "use",                "Use file: use <file.scad>" },
+    { "module",         "module ${1:name}(${2}) {\n\t${0}\n}",
+                        "module name(params) { ... }" },
+    { "function",       "function ${1:name}(${2}) = ${0};",
+                        "function name(params) = expr;" },
+    { "for",            "for (${1:i} = [${2:0}:${3:1}:${4:10}]) {\n\t${0}\n}",
+                        "for (i = [start:step:end]) { ... }" },
+    { "if",             "if (${1:condition}) {\n\t${0}\n}",
+                        "if (cond) { ... }" },
+    { "let",            "let (${1:x} = ${2:value})\n\t${0};",
+                        "let (x = value)" },
+    { "echo",           "echo(${1:value});",
+                        "echo(value);" },
+    { "assert",         "assert(${1:condition}, \"${2:message}\");",
+                        "assert(cond, msg);" },
+    { "include",        "include <${1:file.scad}>",
+                        "include <file.scad>" },
+    { "use",            "use <${1:file.scad}>",
+                        "use <file.scad>" },
+    { "children",       "children(${1:0});",
+                        "children(index);" },
 
-    /* Math Functions */
-    { "abs",                "Absolute value" },
-    { "sign",               "Sign of value (-1, 0, 1)" },
-    { "sin",                "Sine (degrees)" },
-    { "cos",                "Cosine (degrees)" },
-    { "tan",                "Tangent (degrees)" },
-    { "asin",               "Arc sine (degrees)" },
-    { "acos",               "Arc cosine (degrees)" },
-    { "atan",               "Arc tangent (degrees)" },
-    { "atan2",              "Arc tangent of y/x (degrees)" },
-    { "floor",              "Round down to integer" },
-    { "ceil",               "Round up to integer" },
-    { "round",              "Round to nearest integer" },
-    { "sqrt",               "Square root" },
-    { "pow",                "Power: pow(base, exp)" },
-    { "exp",                "e^x" },
-    { "log",                "Natural logarithm" },
-    { "ln",                 "Natural logarithm (alias)" },
-    { "min",                "Minimum value" },
-    { "max",                "Maximum value" },
-    { "norm",               "Vector length: norm(v)" },
-    { "cross",              "Cross product: cross(a, b)" },
+    /* Simple keywords — no snippet template */
+    { "else",       NULL, "else branch" },
+    { "each",       NULL, "flatten in list comprehension" },
+    { "true",       NULL, "boolean true" },
+    { "false",      NULL, "boolean false" },
+    { "undef",      NULL, "undefined value" },
+    { "PI",         NULL, "3.14159..." },
+    { "center",     NULL, "center=true/false" },
+    { "convexity",  NULL, "convexity hint" },
+    { "twist",      NULL, "twist angle for linear_extrude" },
+    { "slices",     NULL, "slices for extrusion" },
 
-    /* List/String Functions */
-    { "len",                "Length of list or string" },
-    { "concat",             "Concatenate lists" },
-    { "lookup",             "Table lookup: lookup(key, table)" },
-    { "str",                "Convert to string" },
-    { "chr",                "Character from code point" },
-    { "ord",                "Code point from character" },
-    { "search",             "Search in list/string" },
-    { "is_undef",           "Check if undefined" },
-    { "is_bool",            "Check if boolean" },
-    { "is_num",             "Check if number" },
-    { "is_string",          "Check if string" },
-    { "is_list",            "Check if list" },
-    { "is_function",        "Check if function" },
+    /* Math — simple function calls */
+    { "abs",        "abs(${1:x})",          "absolute value" },
+    { "sign",       "sign(${1:x})",         "sign (-1, 0, 1)" },
+    { "sin",        "sin(${1:deg})",        "sine (degrees)" },
+    { "cos",        "cos(${1:deg})",        "cosine (degrees)" },
+    { "tan",        "tan(${1:deg})",        "tangent (degrees)" },
+    { "asin",       "asin(${1:x})",         "arc sine (degrees)" },
+    { "acos",       "acos(${1:x})",         "arc cosine (degrees)" },
+    { "atan",       "atan(${1:x})",         "arc tangent (degrees)" },
+    { "atan2",      "atan2(${1:y}, ${2:x})", "arc tangent of y/x" },
+    { "floor",      "floor(${1:x})",        "round down" },
+    { "ceil",       "ceil(${1:x})",         "round up" },
+    { "round",      "round(${1:x})",        "round to nearest" },
+    { "sqrt",       "sqrt(${1:x})",         "square root" },
+    { "pow",        "pow(${1:base}, ${2:exp})", "power" },
+    { "exp",        "exp(${1:x})",          "e^x" },
+    { "log",        "log(${1:x})",          "natural logarithm" },
+    { "ln",         "ln(${1:x})",           "natural logarithm" },
+    { "min",        "min(${1:a}, ${2:b})",  "minimum" },
+    { "max",        "max(${1:a}, ${2:b})",  "maximum" },
+    { "norm",       "norm(${1:v})",         "vector length" },
+    { "cross",      "cross(${1:a}, ${2:b})", "cross product" },
+
+    /* List/String functions */
+    { "len",        "len(${1:list})",       "length" },
+    { "concat",     "concat(${1:a}, ${2:b})", "concatenate lists" },
+    { "lookup",     "lookup(${1:key}, ${2:table})", "table lookup" },
+    { "str",        "str(${1:value})",      "convert to string" },
+    { "chr",        "chr(${1:code})",       "char from code point" },
+    { "ord",        "ord(${1:char})",       "code point from char" },
+    { "search",     "search(${1:needle}, ${2:haystack})", "search" },
+    { "is_undef",   "is_undef(${1:x})",    "check if undefined" },
+    { "is_bool",    "is_bool(${1:x})",      "check if boolean" },
+    { "is_num",     "is_num(${1:x})",       "check if number" },
+    { "is_string",  "is_string(${1:x})",    "check if string" },
+    { "is_list",    "is_list(${1:x})",      "check if list" },
+    { "is_function","is_function(${1:x})",  "check if function" },
 
     /* Special Variables */
-    { "$fn",                "Fragment count (resolution)" },
-    { "$fa",                "Fragment angle minimum" },
-    { "$fs",                "Fragment size minimum" },
-    { "$t",                 "Animation time (0..1)" },
-    { "$vpr",               "Viewport rotation" },
-    { "$vpt",               "Viewport translation" },
-    { "$vpd",               "Viewport distance" },
-    { "$vpf",               "Viewport FOV" },
-    { "$children",          "Number of child modules" },
-    { "$preview",           "true in preview, false in render" },
-
-    /* Modifier Characters */
-    { "children",           "Access child modules: children(i)" },
-    { "color",              "Color: color(\"name\") or color([r,g,b,a])" },
-
-    /* Constants */
-    { "true",               "Boolean true" },
-    { "false",              "Boolean false" },
-    { "undef",              "Undefined value" },
-    { "PI",                 "Pi (3.14159...)" },
-
-    /* Common Parameters */
-    { "center",             "Center the shape (true/false)" },
-    { "convexity",          "Convexity hint for rendering" },
-    { "twist",              "Twist angle for linear_extrude" },
-    { "slices",             "Slices for extrusion" },
+    { "$fn",        NULL, "fragment count (resolution)" },
+    { "$fa",        NULL, "fragment angle minimum" },
+    { "$fs",        NULL, "fragment size minimum" },
+    { "$t",         NULL, "animation time (0..1)" },
+    { "$vpr",       NULL, "viewport rotation" },
+    { "$vpt",       NULL, "viewport translation" },
+    { "$vpd",       NULL, "viewport distance" },
+    { "$vpf",       NULL, "viewport FOV" },
+    { "$children",  NULL, "number of child modules" },
+    { "$preview",   NULL, "true in preview, false in render" },
 };
 
 #define N_KEYWORDS (sizeof(SCAD_KEYWORDS) / sizeof(SCAD_KEYWORDS[0]))
@@ -187,7 +216,6 @@ static const ScadKeyword SCAD_KEYWORDS[] = {
 
 struct _DcScadCompletion {
     GObject parent;
-    GListStore *all_proposals;   /* full list, built once */
 };
 
 static void dc_scad_completion_provider_init(GtkSourceCompletionProviderInterface *iface);
@@ -208,7 +236,7 @@ provider_get_priority(GtkSourceCompletionProvider *self,
                       GtkSourceCompletionContext  *context)
 {
     (void)self; (void)context;
-    return 100;  /* higher than words provider */
+    return 200;
 }
 
 static gboolean
@@ -216,7 +244,6 @@ provider_is_trigger(GtkSourceCompletionProvider *self,
                     const GtkTextIter *iter, gunichar ch)
 {
     (void)self; (void)iter;
-    /* Trigger on $ (for special vars like $fn) */
     return ch == '$';
 }
 
@@ -228,19 +255,19 @@ provider_populate_async(GtkSourceCompletionProvider *provider,
                         gpointer                    user_data)
 {
     DcScadCompletion *self = DC_SCAD_COMPLETION(provider);
-    (void)cancellable;
 
     GTask *task = g_task_new(self, cancellable, callback, user_data);
 
     char *word = gtk_source_completion_context_get_word(context);
     if (!word || strlen(word) < 1) {
-        g_task_return_pointer(task, NULL, NULL);
+        /* Return empty list, never NULL (NULL can disable the provider) */
+        GListStore *empty = g_list_store_new(DC_TYPE_SCAD_PROPOSAL);
+        g_task_return_pointer(task, empty, g_object_unref);
         g_object_unref(task);
         g_free(word);
         return;
     }
 
-    /* Build filtered list using fuzzy matching */
     char *casefold = g_utf8_casefold(word, -1);
     GListStore *results = g_list_store_new(DC_TYPE_SCAD_PROPOSAL);
 
@@ -248,8 +275,10 @@ provider_populate_async(GtkSourceCompletionProvider *provider,
         guint priority = 0;
         if (gtk_source_completion_fuzzy_match(SCAD_KEYWORDS[i].word,
                                               casefold, &priority)) {
-            DcScadProposal *p = dc_scad_proposal_new(
-                SCAD_KEYWORDS[i].word, SCAD_KEYWORDS[i].detail);
+            DcScadProposal *p = g_object_new(DC_TYPE_SCAD_PROPOSAL, NULL);
+            p->word    = SCAD_KEYWORDS[i].word;
+            p->snippet = SCAD_KEYWORDS[i].snippet;
+            p->detail  = SCAD_KEYWORDS[i].detail;
             g_list_store_append(results, p);
             g_object_unref(p);
         }
@@ -283,7 +312,9 @@ provider_display(GtkSourceCompletionProvider *self,
 
     switch (col) {
     case GTK_SOURCE_COMPLETION_COLUMN_ICON:
-        gtk_source_completion_cell_set_icon_name(cell, "completion-word-symbolic");
+        gtk_source_completion_cell_set_icon_name(
+            cell, p->snippet ? "completion-snippet-symbolic"
+                             : "completion-word-symbolic");
         break;
 
     case GTK_SOURCE_COMPLETION_COLUMN_TYPED_TEXT: {
@@ -303,14 +334,42 @@ provider_display(GtkSourceCompletionProvider *self,
         break;
     }
 
+    case GTK_SOURCE_COMPLETION_COLUMN_AFTER:
+        /* Show the full syntax hint to the right of the keyword */
+        if (p->detail)
+            gtk_source_completion_cell_set_text(cell, p->detail);
+        else
+            gtk_source_completion_cell_set_text(cell, NULL);
+        break;
+
     case GTK_SOURCE_COMPLETION_COLUMN_COMMENT:
-        gtk_source_completion_cell_set_text(cell, p->detail);
+        gtk_source_completion_cell_set_text(cell, NULL);
         break;
 
     default:
         gtk_source_completion_cell_set_text(cell, NULL);
         break;
     }
+}
+
+/* Deferred snippet push — runs after the completion system finishes */
+typedef struct {
+    GtkSourceView    *view;    /* borrowed ref kept alive by widget */
+    GtkSourceSnippet *snippet; /* owned */
+} SnippetIdle;
+
+static gboolean
+push_snippet_idle(gpointer data)
+{
+    SnippetIdle *si = data;
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(si->view));
+    GtkTextIter cursor;
+    gtk_text_buffer_get_iter_at_mark(
+        buf, &cursor, gtk_text_buffer_get_insert(buf));
+    gtk_source_view_push_snippet(si->view, si->snippet, &cursor);
+    g_object_unref(si->snippet);
+    g_free(si);
+    return G_SOURCE_REMOVE;
 }
 
 static void
@@ -326,10 +385,34 @@ provider_activate(GtkSourceCompletionProvider *self,
         return;
 
     GtkSourceBuffer *buffer = gtk_source_completion_context_get_buffer(context);
+    GtkSourceView *view = gtk_source_completion_context_get_view(context);
+
+    /* Delete the typed prefix */
     gtk_text_buffer_begin_user_action(GTK_TEXT_BUFFER(buffer));
     gtk_text_buffer_delete(GTK_TEXT_BUFFER(buffer), &begin, &end);
-    gtk_text_buffer_insert(GTK_TEXT_BUFFER(buffer), &begin, p->word, -1);
     gtk_text_buffer_end_user_action(GTK_TEXT_BUFFER(buffer));
+
+    if (p->snippet) {
+        /* Parse snippet and defer push to idle — the completion system
+         * needs to finish its activate cycle before we push a snippet,
+         * otherwise it permanently blocks interactive completion. */
+        GError *err = NULL;
+        GtkSourceSnippet *snip =
+            gtk_source_snippet_new_parsed(p->snippet, &err);
+        if (snip) {
+            SnippetIdle *si = g_new(SnippetIdle, 1);
+            si->view = view;
+            si->snippet = snip;  /* transfer ownership */
+            g_idle_add(push_snippet_idle, si);
+        } else {
+            if (err) g_error_free(err);
+            gtk_text_buffer_insert(
+                GTK_TEXT_BUFFER(buffer), &begin, p->word, -1);
+        }
+    } else {
+        gtk_text_buffer_insert(
+            GTK_TEXT_BUFFER(buffer), &begin, p->word, -1);
+    }
 }
 
 static void
@@ -338,34 +421,25 @@ provider_refilter(GtkSourceCompletionProvider *self,
                   GListModel                 *model)
 {
     (void)self; (void)context; (void)model;
-    /* Re-populate on each keystroke (simple approach) */
 }
 
 static void
 dc_scad_completion_provider_init(GtkSourceCompletionProviderInterface *iface)
 {
-    iface->get_title      = provider_get_title;
-    iface->get_priority   = provider_get_priority;
-    iface->is_trigger     = provider_is_trigger;
-    iface->populate_async = provider_populate_async;
+    iface->get_title       = provider_get_title;
+    iface->get_priority    = provider_get_priority;
+    iface->is_trigger      = provider_is_trigger;
+    iface->populate_async  = provider_populate_async;
     iface->populate_finish = provider_populate_finish;
-    iface->display        = provider_display;
-    iface->activate       = provider_activate;
-    iface->refilter       = provider_refilter;
-}
-
-static void
-dc_scad_completion_finalize(GObject *obj)
-{
-    DcScadCompletion *self = DC_SCAD_COMPLETION(obj);
-    g_clear_object(&self->all_proposals);
-    G_OBJECT_CLASS(dc_scad_completion_parent_class)->finalize(obj);
+    iface->display         = provider_display;
+    iface->activate        = provider_activate;
+    iface->refilter        = provider_refilter;
 }
 
 static void
 dc_scad_completion_class_init(DcScadCompletionClass *klass)
 {
-    G_OBJECT_CLASS(klass)->finalize = dc_scad_completion_finalize;
+    (void)klass;
 }
 
 static void

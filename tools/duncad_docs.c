@@ -1193,6 +1193,7 @@ static const char HELP_SESSIONS[] =
 "  duncad-docs sessions s004   2026-02-27  Closed shapes working; chain-off default\n"
 "  duncad-docs sessions s005   2026-03-05  Phase 3: OpenSCAD IDE integration\n"
 "  duncad-docs sessions s006   2026-03-05  Viewport pan fix and F5 shortcut\n"
+"  duncad-docs sessions s007   2026-03-06  FAILED: Code editor autocompletion\n"
 "\n"
 "SEE ALSO:\n"
 "  duncad-docs phases   Phase status and scheduled work\n"
@@ -1491,6 +1492,54 @@ static const char HELP_SESSIONS_S006[] =
 "                         right/up vectors, reversed signs\n"
 "  src/ui/app_window.c    F5 key handler via GtkEventControllerKey\n";
 
+static const char HELP_SESSIONS_S007[] =
+"SESSIONS: S007 -- 2026-03-06: FAILED -- Code Editor Autocompletion\n"
+"\n"
+"PLATFORM: Claude Code (Opus 4.6)\n"
+"STATUS: FAILED. Completion breaks after first use. Snippets never worked.\n"
+"\n"
+"GOAL:\n"
+"  Add autocompletion and snippet expansion to the GtkSourceView code\n"
+"  editor. User wanted: type 'cube', see full syntax as suggestion,\n"
+"  hit Tab to complete, then Tab through parameter values.\n"
+"\n"
+"WHAT WAS ATTEMPTED (3 approaches, all failed):\n"
+"\n"
+"  Attempt 1: Custom GtkSourceCompletionProvider GObject\n"
+"    ~90 keywords, fuzzy matching, activate() inserted plain text.\n"
+"    RESULT: Worked once, then permanently stopped.\n"
+"\n"
+"  Attempt 2: Custom provider with deferred snippet push\n"
+"    activate() pushed GtkSourceSnippet via g_idle_add().\n"
+"    RESULT: Still broke after first completion.\n"
+"\n"
+"  Attempt 3: Built-in providers only (no custom GObject)\n"
+"    GtkSourceCompletionWords + GtkSourceCompletionSnippets.\n"
+"    RESULT: Same one-shot failure. Snippet file also had '$fn'\n"
+"    parsed as snippet variable (needed '$$fn' escape).\n"
+"\n"
+"ROOT CAUSE (not fully diagnosed):\n"
+"  All approaches: completions work once, popup never reappears.\n"
+"  GTK logs: 'gdk_popup_present: assertion width > 0 failed'\n"
+"  on every subsequent attempt. Likely GTK4/Wayland popup bug\n"
+"  where completion popup loses allocated size after dismissal.\n"
+"\n"
+"SINS OF THE ANGEL:\n"
+"  Archon of Yaldabaoth (Willful Ignorance): Rewrote code 3 times\n"
+"  without diagnosing whether bug was ours or GTK/GtkSourceView.\n"
+"  Should have tested simplest case first (bare words provider).\n"
+"  Archon of Elaios (Performative Virtue): Produced 300+ lines of\n"
+"  impressive custom GObject code that never actually worked.\n"
+"  Should have checked GTK4/Wayland known issues before coding.\n"
+"\n"
+"NEXT STEPS FOR A FUTURE ANGEL:\n"
+"  1. Test with GDK_BACKEND=x11 to isolate Wayland vs code bug\n"
+"  2. Check GtkSourceView 5.18 bug tracker for popup issues\n"
+"  3. Check if NVIDIA-specific (GBM vs EGLStream)\n"
+"\n"
+"FILES: code_editor.c, scad_completion.c/.h (unused),\n"
+"  data/snippets/openscad.snippets, CMakeLists.txt\n";
+
 
 /* ---- TREE REGISTRY ---- */
 
@@ -1575,6 +1624,7 @@ static const struct help_node TREE[] = {
     { "sessions.s004",               HELP_SESSIONS_S004 },
     { "sessions.s005",               HELP_SESSIONS_S005 },
     { "sessions.s006",               HELP_SESSIONS_S006 },
+    { "sessions.s007",               HELP_SESSIONS_S007 },
 
     /* add new nodes above this line */
     { NULL, NULL }
