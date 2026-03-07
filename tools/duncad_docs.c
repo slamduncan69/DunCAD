@@ -1194,6 +1194,7 @@ static const char HELP_SESSIONS[] =
 "  duncad-docs sessions s005   2026-03-05  Phase 3: OpenSCAD IDE integration\n"
 "  duncad-docs sessions s006   2026-03-05  Viewport pan fix and F5 shortcut\n"
 "  duncad-docs sessions s007   2026-03-06  FAILED: Code editor autocompletion\n"
+"  duncad-docs sessions s008   2026-03-06  Custom popover autocompletion (WORKING)\n"
 "\n"
 "SEE ALSO:\n"
 "  duncad-docs phases   Phase status and scheduled work\n"
@@ -1540,6 +1541,64 @@ static const char HELP_SESSIONS_S007[] =
 "FILES: code_editor.c, scad_completion.c/.h (unused),\n"
 "  data/snippets/openscad.snippets, CMakeLists.txt\n";
 
+static const char HELP_SESSIONS_S008[] =
+"SESSIONS: S008 -- 2026-03-06: Custom Popover Autocompletion (WORKING)\n"
+"\n"
+"PLATFORM: Claude Code (Opus 4.6)\n"
+"STATUS: SUCCESS. Full autocompletion system working on Wayland/NVIDIA.\n"
+"\n"
+"GOAL:\n"
+"  Build a working autocompletion system for the OpenSCAD code editor\n"
+"  after s007's three failed attempts using GtkSourceView's built-in\n"
+"  completion (broken on Wayland due to GdkPopup width=0 assertion).\n"
+"\n"
+"REQUIREMENTS:\n"
+"  1. All matching OpenSCAD commands appear as user types\n"
+"  2. Arrow keys navigate, Tab completes the selected keyword\n"
+"  3. After completion, syntax template shown in same popover (bold),\n"
+"     stays visible until semicolon or Enter; Tab inserts the template\n"
+"\n"
+"SOLUTION: Bypass GtkSourceView completion entirely.\n"
+"  Built custom system using GtkPopover (regular widget, NOT GdkPopup).\n"
+"  GdkPopup is a Wayland-native popup surface that breaks on NVIDIA.\n"
+"  GtkPopover is a child widget — no Wayland popup protocol involved.\n"
+"\n"
+"  Confirmed via GDK_BACKEND=x11: GtkSourceView completion works\n"
+"  perfectly under X11, proving the bug is Wayland/NVIDIA-specific.\n"
+"\n"
+"ARCHITECTURE (src/ui/scad_completion.c):\n"
+"  - ~100 OpenSCAD keywords with syntax templates in static database\n"
+"  - GtkPopover + GtkListBox anchored to cursor position\n"
+"  - GtkEventControllerKey in CAPTURE phase intercepts keys\n"
+"  - Two-phase flow:\n"
+"    Phase 1 (matching): type 2+ chars -> prefix match -> popover\n"
+"      shows bold keyword + dim syntax per row. Up/Down navigate,\n"
+"      Tab/Enter accept, Escape dismiss.\n"
+"    Phase 2 (syntax hint): after keyword accepted, popover stays\n"
+"      open showing bold syntax template. Tab inserts the template\n"
+"      (part after keyword). Semicolon or Enter dismisses.\n"
+"  - extract_word_at_cursor: walks backward over alnum/underscore/$\n"
+"  - find_matches: case-insensitive prefix, excludes exact matches\n"
+"  - position_popover: buffer-to-window coord transform at cursor\n"
+"  - GtkSourceView built-in completion blocked via\n"
+"    gtk_source_completion_block_interactive()\n"
+"\n"
+"KEY INSIGHT:\n"
+"  GtkSourceView's completion popup uses GdkPopup (Wayland popup\n"
+"  surface). After first dismissal, the popup loses its allocated\n"
+"  size permanently — gdk_popup_present asserts width > 0. This is\n"
+"  a GTK4/Wayland/NVIDIA bug, not fixable from application code.\n"
+"  GtkPopover avoids this entirely by being a regular widget child.\n"
+"\n"
+"FILES CHANGED:\n"
+"  src/ui/scad_completion.c   Complete rewrite: custom popover system\n"
+"  src/ui/scad_completion.h   Simplified API (3 functions)\n"
+"  src/ui/code_editor.c       Purged broken completion, wired new system\n"
+"\n"
+"SEE ALSO:\n"
+"  duncad-docs sessions s007   The failed attempts this session fixes\n"
+"  duncad-docs ui code_editor  Code editor panel\n";
+
 
 /* ---- TREE REGISTRY ---- */
 
@@ -1625,6 +1684,7 @@ static const struct help_node TREE[] = {
     { "sessions.s005",               HELP_SESSIONS_S005 },
     { "sessions.s006",               HELP_SESSIONS_S006 },
     { "sessions.s007",               HELP_SESSIONS_S007 },
+    { "sessions.s008",               HELP_SESSIONS_S008 },
 
     /* add new nodes above this line */
     { NULL, NULL }

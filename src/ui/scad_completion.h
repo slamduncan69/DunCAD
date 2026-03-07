@@ -3,15 +3,13 @@
 
 #include <gtksourceview/gtksource.h>
 
-G_BEGIN_DECLS
+typedef struct DC_ScadCompletion DC_ScadCompletion;
 
-#define DC_TYPE_SCAD_COMPLETION (dc_scad_completion_get_type())
+DC_ScadCompletion *dc_scad_completion_new(GtkSourceView *view,
+                                          GtkSourceBuffer *buffer);
+void dc_scad_completion_free(DC_ScadCompletion *comp);
 
-G_DECLARE_FINAL_TYPE(DcScadCompletion, dc_scad_completion,
-                     DC, SCAD_COMPLETION, GObject)
-
-DcScadCompletion *dc_scad_completion_new(void);
-
-G_END_DECLS
+/* Returns the syntax hint label widget — caller adds it to their layout */
+GtkWidget *dc_scad_completion_syntax_label(DC_ScadCompletion *comp);
 
 #endif /* DC_SCAD_COMPLETION_H */
