@@ -3,6 +3,8 @@
 #include "ui/code_editor.h"
 #include "gl/gl_viewport.h"
 #include "scad/scad_runner.h"
+#include "scad/scad_splitter.h"
+#include "ui/transform_panel.h"
 #include "core/log.h"
 
 #include <stdio.h>
@@ -26,13 +28,98 @@ struct DC_ScadPreview {
     char           *tmp_scad;       /* temp .scad path (owned) */
     char           *tmp_stl;        /* temp .stl path (owned) */
     int             rendering;
+
+    /* Multi-object render state */
+    DC_ScadStatements *stmts;       /* current split (owned) */
+    int             render_idx;     /* which statement we're rendering next */
+    int             render_total;   /* total statements to render */
+    int             render_ok;      /* how many succeeded */
+
+    /* Transform panel overlay */
+    DC_TransformPanel *transform;
 };
 
 /* -------------------------------------------------------------------------
- * Render callback — OpenSCAD STL export completed
+ * Multi-object render pipeline
+ *
+ * 1. Split SCAD source into top-level statements
+ * 2. Render each statement as a separate STL
+ * 3. Load each STL as a separate GL object with line range
+ * 4. If splitting fails or yields 1 statement, fall back to single-STL
  * ---------------------------------------------------------------------- */
+static void render_next_statement(DC_ScadPreview *pv);
+
 static void
-on_render_done(DC_ScadResult *result, void *userdata)
+on_stmt_render_done(DC_ScadResult *result, void *userdata)
+{
+    DC_ScadPreview *pv = userdata;
+    int idx = pv->render_idx - 1; /* render_idx was incremented before launch */
+
+    if (result && result->exit_code == 0 && pv->stmts && idx < pv->stmts->count) {
+        /* Load this statement's STL as an object */
+        char stl_path[256];
+        snprintf(stl_path, sizeof(stl_path), "/tmp/duncad-obj-%d.stl", idx);
+
+        DC_ScadStatement *s = &pv->stmts->stmts[idx];
+        int rc = dc_gl_viewport_add_object(pv->viewport, stl_path,
+                                            s->line_start, s->line_end);
+        if (rc >= 0) pv->render_ok++;
+
+        unlink(stl_path);
+    }
+
+    if (result) dc_scad_result_free(result);
+
+    /* Continue with next statement */
+    render_next_statement(pv);
+}
+
+static void
+render_next_statement(DC_ScadPreview *pv)
+{
+    if (!pv->stmts || pv->render_idx >= pv->stmts->count) {
+        /* All done */
+        pv->rendering = 0;
+        gtk_widget_set_sensitive(pv->render_btn, TRUE);
+
+        char status[128];
+        snprintf(status, sizeof(status),
+                 "Rendered %d/%d objects — click to select",
+                 pv->render_ok, pv->render_total);
+        gtk_label_set_text(GTK_LABEL(pv->status_label), status);
+
+        /* Reset camera to fit all objects */
+        dc_gl_viewport_reset_camera(pv->viewport);
+        return;
+    }
+
+    int idx = pv->render_idx++;
+    DC_ScadStatement *s = &pv->stmts->stmts[idx];
+
+    /* Write this statement to a temp SCAD file */
+    char scad_path[256];
+    snprintf(scad_path, sizeof(scad_path), "/tmp/duncad-obj-%d.scad", idx);
+    char stl_path[256];
+    snprintf(stl_path, sizeof(stl_path), "/tmp/duncad-obj-%d.stl", idx);
+
+    FILE *f = fopen(scad_path, "w");
+    if (!f) {
+        render_next_statement(pv);
+        return;
+    }
+    fputs(s->text, f);
+    fclose(f);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Rendering object %d/%d...", idx + 1, pv->render_total);
+    gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
+
+    dc_scad_run_export(scad_path, stl_path, on_stmt_render_done, pv);
+}
+
+/* Fallback: single-STL render (when split yields 0 or 1 statement) */
+static void
+on_single_render_done(DC_ScadResult *result, void *userdata)
 {
     DC_ScadPreview *pv = userdata;
     pv->rendering = 0;
@@ -44,7 +131,6 @@ on_render_done(DC_ScadResult *result, void *userdata)
     }
 
     if (result->exit_code == 0) {
-        /* Load the STL into the GL viewport */
         int rc = dc_gl_viewport_load_stl(pv->viewport, pv->tmp_stl);
         if (rc == 0) {
             char status[128];
@@ -82,22 +168,43 @@ do_render(DC_ScadPreview *pv)
         return;
     }
 
-    FILE *f = fopen(pv->tmp_scad, "w");
-    if (!f) {
-        gtk_label_set_text(GTK_LABEL(pv->status_label), "Cannot write temp file");
+    /* Split into top-level statements */
+    dc_scad_stmts_free(pv->stmts);
+    pv->stmts = dc_scad_split(text);
+
+    if (pv->stmts && pv->stmts->count > 1) {
+        /* Multi-object render: each statement gets its own STL */
+        dc_gl_viewport_clear_objects(pv->viewport);
+        dc_gl_viewport_clear_mesh(pv->viewport);
+
+        pv->rendering = 1;
+        pv->render_idx = 0;
+        pv->render_total = pv->stmts->count;
+        pv->render_ok = 0;
+        gtk_widget_set_sensitive(pv->render_btn, FALSE);
+
         free(text);
-        return;
+        render_next_statement(pv);
+    } else {
+        /* Single statement or parse failed — use legacy single-STL path */
+        dc_gl_viewport_clear_objects(pv->viewport);
+
+        FILE *f = fopen(pv->tmp_scad, "w");
+        if (!f) {
+            gtk_label_set_text(GTK_LABEL(pv->status_label), "Cannot write temp file");
+            free(text);
+            return;
+        }
+        fputs(text, f);
+        fclose(f);
+        free(text);
+
+        pv->rendering = 1;
+        gtk_widget_set_sensitive(pv->render_btn, FALSE);
+        gtk_label_set_text(GTK_LABEL(pv->status_label), "Rendering STL...");
+
+        dc_scad_run_export(pv->tmp_scad, pv->tmp_stl, on_single_render_done, pv);
     }
-    fputs(text, f);
-    fclose(f);
-    free(text);
-
-    pv->rendering = 1;
-    gtk_widget_set_sensitive(pv->render_btn, FALSE);
-    gtk_label_set_text(GTK_LABEL(pv->status_label), "Rendering STL...");
-
-    /* Export to STL via OpenSCAD */
-    dc_scad_run_export(pv->tmp_scad, pv->tmp_stl, on_render_done, pv);
 }
 
 /* -------------------------------------------------------------------------
@@ -180,10 +287,23 @@ dc_scad_preview_new(void)
     gtk_widget_set_opacity(pv->status_label, 0.7);
     gtk_box_append(GTK_BOX(toolbar), pv->status_label);
 
+    /* Transform panel (overlay on viewport) */
+    pv->transform = dc_transform_panel_new();
+
+    /* Overlay: GL viewport as main child, transform panel floats on top */
+    GtkWidget *overlay = gtk_overlay_new();
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), dc_gl_viewport_widget(pv->viewport));
+    if (pv->transform) {
+        gtk_overlay_add_overlay(GTK_OVERLAY(overlay),
+                                dc_transform_panel_widget(pv->transform));
+    }
+    gtk_widget_set_vexpand(overlay, TRUE);
+    gtk_widget_set_hexpand(overlay, TRUE);
+
     /* Container */
     pv->container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_append(GTK_BOX(pv->container), toolbar);
-    gtk_box_append(GTK_BOX(pv->container), dc_gl_viewport_widget(pv->viewport));
+    gtk_box_append(GTK_BOX(pv->container), overlay);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "scad preview created");
     return pv;
@@ -193,7 +313,9 @@ void
 dc_scad_preview_free(DC_ScadPreview *pv)
 {
     if (!pv) return;
+    dc_transform_panel_free(pv->transform);
     dc_gl_viewport_free(pv->viewport);
+    dc_scad_stmts_free(pv->stmts);
     free(pv->tmp_scad);
     free(pv->tmp_stl);
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "scad preview freed");
@@ -209,11 +331,25 @@ dc_scad_preview_widget(DC_ScadPreview *pv)
 void
 dc_scad_preview_set_code_editor(DC_ScadPreview *pv, DC_CodeEditor *ed)
 {
-    if (pv) pv->code_ed = ed;
+    if (!pv) return;
+    pv->code_ed = ed;
+    dc_transform_panel_set_code_editor(pv->transform, ed);
 }
 
 void
 dc_scad_preview_render(DC_ScadPreview *pv)
 {
     if (pv) do_render(pv);
+}
+
+DC_GlViewport *
+dc_scad_preview_get_viewport(DC_ScadPreview *pv)
+{
+    return pv ? pv->viewport : NULL;
+}
+
+DC_TransformPanel *
+dc_scad_preview_get_transform(DC_ScadPreview *pv)
+{
+    return pv ? pv->transform : NULL;
 }

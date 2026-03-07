@@ -42,4 +42,8 @@ const char *dc_code_editor_get_path(const DC_CodeEditor *ed);
 /* Set the window reference for file dialogs. */
 void dc_code_editor_set_window(DC_CodeEditor *ed, GtkWidget *window);
 
+/* Select (highlight) a range of lines (1-based, inclusive).
+ * Scrolls the editor to show the selection. */
+void dc_code_editor_select_lines(DC_CodeEditor *ed, int line_start, int line_end);
+
 #endif /* DC_CODE_EDITOR_H */

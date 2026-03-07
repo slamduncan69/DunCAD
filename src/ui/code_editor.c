@@ -439,3 +439,29 @@ dc_code_editor_set_window(DC_CodeEditor *ed, GtkWidget *window)
 {
     if (ed) ed->window = window;
 }
+
+void
+dc_code_editor_select_lines(DC_CodeEditor *ed, int line_start, int line_end)
+{
+    if (!ed || line_start < 1) return;
+
+    GtkTextBuffer *buf = GTK_TEXT_BUFFER(ed->buffer);
+
+    /* Convert 1-based lines to 0-based iters */
+    GtkTextIter start, end;
+    gtk_text_buffer_get_iter_at_line(buf, &start, line_start - 1);
+
+    /* End: go to start of line_end+1 (or end of buffer) */
+    int line_count = gtk_text_buffer_get_line_count(buf);
+    if (line_end >= line_count) {
+        gtk_text_buffer_get_end_iter(buf, &end);
+    } else {
+        gtk_text_buffer_get_iter_at_line(buf, &end, line_end);
+    }
+
+    gtk_text_buffer_select_range(buf, &start, &end);
+
+    /* Scroll to show the selection */
+    GtkTextMark *mark = gtk_text_buffer_get_insert(buf);
+    gtk_text_view_scroll_mark_onscreen(GTK_TEXT_VIEW(ed->view), mark);
+}

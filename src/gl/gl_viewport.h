@@ -47,4 +47,28 @@ void dc_gl_viewport_toggle_grid(DC_GlViewport *vp);
 /* Toggle axis indicator visibility. */
 void dc_gl_viewport_toggle_axes(DC_GlViewport *vp);
 
+/* ---- Multi-object support ---- */
+
+/* Clear all loaded objects. */
+void dc_gl_viewport_clear_objects(DC_GlViewport *vp);
+
+/* Add a mesh object. Returns object index (0-based), or -1 on failure.
+ * line_start/line_end are 1-based SCAD source line range. */
+int dc_gl_viewport_add_object(DC_GlViewport *vp, const char *stl_path,
+                               int line_start, int line_end);
+
+/* Get the currently selected object index (-1 if none). */
+int dc_gl_viewport_get_selected(DC_GlViewport *vp);
+
+/* Get the line range of a selected object. Returns 0 on success. */
+int dc_gl_viewport_get_object_lines(DC_GlViewport *vp, int obj_idx,
+                                     int *line_start, int *line_end);
+
+/* Selection callback — called when user clicks an object.
+ * obj_idx is -1 if clicked on background. */
+typedef void (*DC_GlPickCb)(int obj_idx, int line_start, int line_end,
+                             void *userdata);
+void dc_gl_viewport_set_pick_callback(DC_GlViewport *vp,
+                                       DC_GlPickCb cb, void *userdata);
+
 #endif /* DC_GL_VIEWPORT_H */

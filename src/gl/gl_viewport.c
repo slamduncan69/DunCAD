@@ -132,6 +132,24 @@ static const char *MESH_FRAG_SRC =
     "    FragColor = vec4(result, 1.0);\n"
     "}\n";
 
+/* Flat-color shader for color-ID picking pass */
+static const char *PICK_VERT_SRC =
+    "#version 330 core\n"
+    "layout(location=0) in vec3 aNormal;\n"
+    "layout(location=1) in vec3 aPos;\n"
+    "uniform mat4 uMVP;\n"
+    "void main() {\n"
+    "    gl_Position = uMVP * vec4(aPos, 1.0);\n"
+    "}\n";
+
+static const char *PICK_FRAG_SRC =
+    "#version 330 core\n"
+    "out vec4 FragColor;\n"
+    "uniform vec3 uPickColor;\n"
+    "void main() {\n"
+    "    FragColor = vec4(uPickColor, 1.0);\n"
+    "}\n";
+
 static const char *LINE_VERT_SRC =
     "#version 330 core\n"
     "layout(location=0) in vec3 aPos;\n"
@@ -169,11 +187,33 @@ struct DC_GlViewport {
     int          show_grid;
     int          show_axes;
 
-    /* Mesh */
+    /* Legacy single mesh (still used for single-STL loads) */
     DC_StlMesh  *mesh;
     GLuint       mesh_vao;
     GLuint       mesh_vbo;
     int          mesh_uploaded;
+
+    /* Multi-object support */
+    struct {
+        DC_StlMesh *mesh;
+        GLuint      vao;
+        GLuint      vbo;
+        int         uploaded;
+        int         line_start;
+        int         line_end;
+    }            objects[256];
+    int          obj_count;
+    int          selected_obj;   /* -1 = none */
+
+    /* Color-ID pick framebuffer */
+    GLuint       pick_fbo;
+    GLuint       pick_rbo_color;
+    GLuint       pick_rbo_depth;
+    int          pick_w, pick_h; /* current FBO size */
+
+    /* Pick callback */
+    DC_GlPickCb  pick_cb;
+    void        *pick_cb_data;
 
     /* Grid */
     GLuint       grid_vao;
@@ -187,6 +227,7 @@ struct DC_GlViewport {
     /* Shaders */
     GLuint       mesh_prog;
     GLuint       line_prog;
+    GLuint       pick_prog;
     int          gl_ready;
 
     /* Drag state */
@@ -318,6 +359,9 @@ build_axes(DC_GlViewport *vp, float len)
     glBindVertexArray(0);
 }
 
+/* Forward declarations */
+static void upload_object(DC_GlViewport *vp, int idx);
+
 /* =========================================================================
  * Mesh upload
  * ========================================================================= */
@@ -385,8 +429,9 @@ on_realize(GtkGLArea *area, gpointer data)
 
     vp->mesh_prog = link_program(MESH_VERT_SRC, MESH_FRAG_SRC);
     vp->line_prog = link_program(LINE_VERT_SRC, LINE_FRAG_SRC);
+    vp->pick_prog = link_program(PICK_VERT_SRC, PICK_FRAG_SRC);
 
-    if (!vp->mesh_prog || !vp->line_prog) {
+    if (!vp->mesh_prog || !vp->line_prog || !vp->pick_prog) {
         dc_log(DC_LOG_ERROR, DC_LOG_EVENT_APP, "gl_viewport: shader compilation failed");
         return;
     }
@@ -409,6 +454,16 @@ on_unrealize(GtkGLArea *area, gpointer data)
 
     if (vp->mesh_prog) glDeleteProgram(vp->mesh_prog);
     if (vp->line_prog) glDeleteProgram(vp->line_prog);
+    if (vp->pick_prog) glDeleteProgram(vp->pick_prog);
+    if (vp->pick_fbo) glDeleteFramebuffers(1, &vp->pick_fbo);
+    if (vp->pick_rbo_color) glDeleteRenderbuffers(1, &vp->pick_rbo_color);
+    if (vp->pick_rbo_depth) glDeleteRenderbuffers(1, &vp->pick_rbo_depth);
+    for (int i = 0; i < vp->obj_count; i++) {
+        if (vp->objects[i].vao) {
+            glDeleteVertexArrays(1, &vp->objects[i].vao);
+            glDeleteBuffers(1, &vp->objects[i].vbo);
+        }
+    }
     if (vp->mesh_vao) { glDeleteVertexArrays(1, &vp->mesh_vao); glDeleteBuffers(1, &vp->mesh_vbo); }
     if (vp->grid_vao) { glDeleteVertexArrays(1, &vp->grid_vao); glDeleteBuffers(1, &vp->grid_vbo); }
     if (vp->axes_vao) { glDeleteVertexArrays(1, &vp->axes_vao); glDeleteBuffers(1, &vp->axes_vbo); }
@@ -456,6 +511,12 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
     if (vp->mesh && !vp->mesh_uploaded)
         upload_mesh(vp);
 
+    /* Upload any pending multi-objects */
+    for (int i = 0; i < vp->obj_count; i++) {
+        if (vp->objects[i].mesh && !vp->objects[i].uploaded)
+            upload_object(vp, i);
+    }
+
     /* --- Draw grid --- */
     if (vp->show_grid && vp->grid_vao) {
         glUseProgram(vp->line_prog);
@@ -474,8 +535,8 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         glLineWidth(1.0f);
     }
 
-    /* --- Draw mesh --- */
-    if (vp->mesh && vp->mesh_uploaded && vp->mesh_vao) {
+    /* --- Draw mesh (legacy single mesh or multi-object) --- */
+    {
         glUseProgram(vp->mesh_prog);
 
         float model[16];
@@ -487,7 +548,6 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         glUniformMatrix4fv(glGetUniformLocation(vp->mesh_prog, "uMVP"), 1, GL_FALSE, mvp);
         glUniformMatrix4fv(glGetUniformLocation(vp->mesh_prog, "uModel"), 1, GL_FALSE, model);
 
-        /* Normal matrix = transpose(inverse(upper-left 3x3 of model)) — identity for now */
         float nmat[9] = {1,0,0, 0,1,0, 0,0,1};
         glUniformMatrix3fv(glGetUniformLocation(vp->mesh_prog, "uNormalMat"), 1, GL_FALSE, nmat);
 
@@ -496,11 +556,33 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         glUniform3fv(glGetUniformLocation(vp->mesh_prog, "uLightDir"), 1, light_dir);
         glUniform3fv(glGetUniformLocation(vp->mesh_prog, "uViewPos"), 1, eye);
 
-        float color[3] = {0.6f, 0.75f, 0.9f};  /* OpenSCAD-ish blue */
-        glUniform3fv(glGetUniformLocation(vp->mesh_prog, "uColor"), 1, color);
+        if (vp->obj_count > 0) {
+            /* Multi-object rendering */
+            for (int i = 0; i < vp->obj_count; i++) {
+                if (!vp->objects[i].mesh || !vp->objects[i].uploaded)
+                    continue;
 
-        glBindVertexArray(vp->mesh_vao);
-        glDrawArrays(GL_TRIANGLES, 0, vp->mesh->num_vertices);
+                float color[3];
+                if (i == vp->selected_obj) {
+                    /* Gold/orange highlight for selected */
+                    color[0] = 1.0f; color[1] = 0.7f; color[2] = 0.2f;
+                } else {
+                    /* OpenSCAD-ish blue */
+                    color[0] = 0.6f; color[1] = 0.75f; color[2] = 0.9f;
+                }
+                glUniform3fv(glGetUniformLocation(vp->mesh_prog, "uColor"), 1, color);
+
+                glBindVertexArray(vp->objects[i].vao);
+                glDrawArrays(GL_TRIANGLES, 0, vp->objects[i].mesh->num_vertices);
+            }
+        } else if (vp->mesh && vp->mesh_uploaded && vp->mesh_vao) {
+            /* Legacy single mesh */
+            float color[3] = {0.6f, 0.75f, 0.9f};
+            glUniform3fv(glGetUniformLocation(vp->mesh_prog, "uColor"), 1, color);
+
+            glBindVertexArray(vp->mesh_vao);
+            glDrawArrays(GL_TRIANGLES, 0, vp->mesh->num_vertices);
+        }
     }
 
     glBindVertexArray(0);
@@ -603,6 +685,187 @@ on_scroll(GtkEventControllerScroll *ctrl, double dx, double dy, gpointer data)
 }
 
 /* =========================================================================
+ * Color-ID pick pass
+ * ========================================================================= */
+
+/* Ensure pick FBO matches viewport size */
+static void
+ensure_pick_fbo(DC_GlViewport *vp, int w, int h)
+{
+    if (vp->pick_fbo && vp->pick_w == w && vp->pick_h == h)
+        return;
+
+    if (vp->pick_fbo) glDeleteFramebuffers(1, &vp->pick_fbo);
+    if (vp->pick_rbo_color) glDeleteRenderbuffers(1, &vp->pick_rbo_color);
+    if (vp->pick_rbo_depth) glDeleteRenderbuffers(1, &vp->pick_rbo_depth);
+
+    glGenFramebuffers(1, &vp->pick_fbo);
+    glGenRenderbuffers(1, &vp->pick_rbo_color);
+    glGenRenderbuffers(1, &vp->pick_rbo_depth);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, vp->pick_fbo);
+
+    glBindRenderbuffer(GL_RENDERBUFFER, vp->pick_rbo_color);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              GL_RENDERBUFFER, vp->pick_rbo_color);
+
+    glBindRenderbuffer(GL_RENDERBUFFER, vp->pick_rbo_depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, vp->pick_rbo_depth);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    vp->pick_w = w;
+    vp->pick_h = h;
+}
+
+/* Encode object index as RGB color (index 0 = (1,0,0)/255, etc.)
+ * Background is black (0,0,0) = no object. */
+static void
+obj_idx_to_color(int idx, float *rgb)
+{
+    int id = idx + 1; /* 0 reserved for background */
+    rgb[0] = (float)(id & 0xFF) / 255.0f;
+    rgb[1] = (float)((id >> 8) & 0xFF) / 255.0f;
+    rgb[2] = (float)((id >> 16) & 0xFF) / 255.0f;
+}
+
+static int
+color_to_obj_idx(unsigned char r, unsigned char g, unsigned char b)
+{
+    int id = r | (g << 8) | (b << 16);
+    return id - 1; /* -1 if background (id=0) */
+}
+
+/* Perform pick at pixel (px, py) in widget coords.
+ * Returns object index or -1 if background. */
+static int
+do_pick(DC_GlViewport *vp, int px, int py)
+{
+    if (!vp->gl_ready || vp->obj_count == 0 || !vp->pick_prog)
+        return -1;
+
+    int w = gtk_widget_get_width(GTK_WIDGET(vp->gl_area));
+    int h = gtk_widget_get_height(GTK_WIDGET(vp->gl_area));
+    int scale = gtk_widget_get_scale_factor(GTK_WIDGET(vp->gl_area));
+    int fw = w * scale, fh = h * scale;
+
+    gtk_gl_area_make_current(GTK_GL_AREA(vp->gl_area));
+    ensure_pick_fbo(vp, fw, fh);
+
+    /* Build same view/proj as normal render */
+    float eye[3];
+    camera_eye(vp, eye);
+    float up[3] = {0, 1, 0};
+    float view[16], proj[16], vp_mat[16], mvp[16], model[16];
+
+    mat4_lookat(view, eye, vp->cam_center, up);
+    float aspect = (float)w / (float)h;
+    if (vp->ortho) {
+        float half = vp->cam_dist * 0.5f;
+        mat4_ortho(proj, -half*aspect, half*aspect, -half, half,
+                   0.1f, vp->cam_dist * 10.0f);
+    } else {
+        mat4_perspective(proj, 45.0f, aspect, 0.1f, vp->cam_dist * 10.0f);
+    }
+    mat4_mul(vp_mat, proj, view);
+    mat4_identity(model);
+    mat4_mul(mvp, vp_mat, model);
+
+    /* Render to pick FBO */
+    glBindFramebuffer(GL_FRAMEBUFFER, vp->pick_fbo);
+    glViewport(0, 0, fw, fh);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(vp->pick_prog);
+    glUniformMatrix4fv(glGetUniformLocation(vp->pick_prog, "uMVP"),
+                       1, GL_FALSE, mvp);
+
+    for (int i = 0; i < vp->obj_count; i++) {
+        if (!vp->objects[i].mesh || !vp->objects[i].uploaded)
+            continue;
+
+        float rgb[3];
+        obj_idx_to_color(i, rgb);
+        glUniform3fv(glGetUniformLocation(vp->pick_prog, "uPickColor"),
+                     1, rgb);
+
+        glBindVertexArray(vp->objects[i].vao);
+        glDrawArrays(GL_TRIANGLES, 0, vp->objects[i].mesh->num_vertices);
+    }
+
+    /* Read pixel at click position (flip Y for OpenGL) */
+    int fpx = px * scale;
+    int fpy = fh - (py * scale) - 1;
+    unsigned char pixel[4] = {0};
+    glReadPixels(fpx, fpy, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    int result = color_to_obj_idx(pixel[0], pixel[1], pixel[2]);
+    if (result < 0 || result >= vp->obj_count) result = -1;
+
+    return result;
+}
+
+/* Upload a single object mesh to GL */
+static void
+upload_object(DC_GlViewport *vp, int idx)
+{
+    if (idx < 0 || idx >= vp->obj_count) return;
+    if (!vp->objects[idx].mesh || vp->objects[idx].uploaded) return;
+
+    if (!vp->objects[idx].vao) {
+        glGenVertexArrays(1, &vp->objects[idx].vao);
+        glGenBuffers(1, &vp->objects[idx].vbo);
+    }
+
+    DC_StlMesh *m = vp->objects[idx].mesh;
+    glBindVertexArray(vp->objects[idx].vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vp->objects[idx].vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)(m->num_vertices * 6 * sizeof(float)),
+                 m->data, GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float),
+                          (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
+
+    vp->objects[idx].uploaded = 1;
+}
+
+/* Click handler — single click (not drag) triggers pick */
+static void
+on_click_pressed(GtkGestureClick *gesture, int n_press,
+                 double x, double y, gpointer data)
+{
+    (void)gesture; (void)n_press;
+    DC_GlViewport *vp = data;
+
+    if (vp->obj_count == 0) return;
+
+    int obj = do_pick(vp, (int)x, (int)y);
+    vp->selected_obj = obj;
+
+    /* Notify callback */
+    if (vp->pick_cb) {
+        if (obj >= 0 && obj < vp->obj_count) {
+            vp->pick_cb(obj, vp->objects[obj].line_start,
+                        vp->objects[obj].line_end, vp->pick_cb_data);
+        } else {
+            vp->pick_cb(-1, 0, 0, vp->pick_cb_data);
+        }
+    }
+
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+/* =========================================================================
  * Public API
  * ========================================================================= */
 
@@ -618,6 +881,7 @@ dc_gl_viewport_new(void)
     vp->cam_phi = 30.0f;
     vp->show_grid = 1;
     vp->show_axes = 1;
+    vp->selected_obj = -1;
 
     /* Create GtkGLArea */
     vp->gl_area = gtk_gl_area_new();
@@ -644,6 +908,12 @@ dc_gl_viewport_new(void)
     g_signal_connect(scroll, "scroll", G_CALLBACK(on_scroll), vp);
     gtk_widget_add_controller(vp->gl_area, scroll);
 
+    /* Click gesture for object picking (single click, button 1) */
+    GtkGesture *click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 1);
+    g_signal_connect(click, "pressed", G_CALLBACK(on_click_pressed), vp);
+    gtk_widget_add_controller(vp->gl_area, GTK_EVENT_CONTROLLER(click));
+
     /* Queue an initial render once mapped */
     g_signal_connect_swapped(vp->gl_area, "map",
         G_CALLBACK(gtk_gl_area_queue_render), vp->gl_area);
@@ -657,6 +927,8 @@ dc_gl_viewport_free(DC_GlViewport *vp)
 {
     if (!vp) return;
     dc_stl_free(vp->mesh);
+    for (int i = 0; i < vp->obj_count; i++)
+        dc_stl_free(vp->objects[i].mesh);
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "gl_viewport freed");
     free(vp);
 }
@@ -767,4 +1039,93 @@ dc_gl_viewport_toggle_axes(DC_GlViewport *vp)
     if (!vp) return;
     vp->show_axes = !vp->show_axes;
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+/* =========================================================================
+ * Multi-object API
+ * ========================================================================= */
+
+void
+dc_gl_viewport_clear_objects(DC_GlViewport *vp)
+{
+    if (!vp) return;
+
+    if (vp->gl_ready) {
+        gtk_gl_area_make_current(GTK_GL_AREA(vp->gl_area));
+        for (int i = 0; i < vp->obj_count; i++) {
+            if (vp->objects[i].vao) {
+                glDeleteVertexArrays(1, &vp->objects[i].vao);
+                glDeleteBuffers(1, &vp->objects[i].vbo);
+            }
+        }
+    }
+
+    for (int i = 0; i < vp->obj_count; i++)
+        dc_stl_free(vp->objects[i].mesh);
+
+    memset(vp->objects, 0, sizeof(vp->objects));
+    vp->obj_count = 0;
+    vp->selected_obj = -1;
+
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+int
+dc_gl_viewport_add_object(DC_GlViewport *vp, const char *stl_path,
+                           int line_start, int line_end)
+{
+    if (!vp || !stl_path || vp->obj_count >= 256) return -1;
+
+    DC_StlMesh *mesh = dc_stl_load(stl_path);
+    if (!mesh) {
+        dc_log(DC_LOG_WARN, DC_LOG_EVENT_APP,
+               "gl_viewport: failed to load object STL %s", stl_path);
+        return -1;
+    }
+
+    int idx = vp->obj_count++;
+    vp->objects[idx].mesh = mesh;
+    vp->objects[idx].vao = 0;
+    vp->objects[idx].vbo = 0;
+    vp->objects[idx].uploaded = 0;
+    vp->objects[idx].line_start = line_start;
+    vp->objects[idx].line_end = line_end;
+
+    /* Upload immediately if GL is ready */
+    if (vp->gl_ready) {
+        gtk_gl_area_make_current(GTK_GL_AREA(vp->gl_area));
+        upload_object(vp, idx);
+    }
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "gl_viewport: added object %d (%d tris, lines %d-%d)",
+           idx, mesh->num_triangles, line_start, line_end);
+
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+    return idx;
+}
+
+int
+dc_gl_viewport_get_selected(DC_GlViewport *vp)
+{
+    return vp ? vp->selected_obj : -1;
+}
+
+int
+dc_gl_viewport_get_object_lines(DC_GlViewport *vp, int obj_idx,
+                                 int *line_start, int *line_end)
+{
+    if (!vp || obj_idx < 0 || obj_idx >= vp->obj_count) return -1;
+    if (line_start) *line_start = vp->objects[obj_idx].line_start;
+    if (line_end) *line_end = vp->objects[obj_idx].line_end;
+    return 0;
+}
+
+void
+dc_gl_viewport_set_pick_callback(DC_GlViewport *vp,
+                                  DC_GlPickCb cb, void *userdata)
+{
+    if (!vp) return;
+    vp->pick_cb = cb;
+    vp->pick_cb_data = userdata;
 }

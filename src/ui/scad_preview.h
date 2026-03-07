@@ -35,4 +35,10 @@ void dc_scad_preview_set_code_editor(DC_ScadPreview *pv, DC_CodeEditor *ed);
 /* Trigger a render (same as clicking the Render button). */
 void dc_scad_preview_render(DC_ScadPreview *pv);
 
+/* Get the GL viewport (for setting pick callbacks, etc.). Borrowed pointer. */
+struct DC_GlViewport *dc_scad_preview_get_viewport(DC_ScadPreview *pv);
+
+/* Get the transform panel (for pick callback wiring). Borrowed pointer. */
+struct DC_TransformPanel *dc_scad_preview_get_transform(DC_ScadPreview *pv);
+
 #endif /* DC_SCAD_PREVIEW_H */

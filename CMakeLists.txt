@@ -70,6 +70,7 @@ add_library(dc_core STATIC
     src/core/manifest.c
     src/bezier/bezier_curve.c
     src/scad/scad_export.c
+    src/scad/scad_splitter.c
 )
 target_include_directories(dc_core PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(dc_core
@@ -87,6 +88,7 @@ add_executable(duncad
     src/ui/code_editor.c
     src/ui/scad_completion.c
     src/ui/scad_preview.c
+    src/ui/transform_panel.c
     src/gl/gl_viewport.c
     src/gl/stl_loader.c
     src/bezier/bezier_canvas.c
@@ -154,6 +156,7 @@ add_executable(test_bezier_canvas
     src/ui/code_editor.c
     src/ui/scad_completion.c
     src/ui/scad_preview.c
+    src/ui/transform_panel.c
     src/gl/gl_viewport.c
     src/gl/stl_loader.c
     src/scad/scad_runner.c
@@ -184,6 +187,7 @@ add_executable(test_bezier_editor
     src/ui/code_editor.c
     src/ui/scad_completion.c
     src/ui/scad_preview.c
+    src/ui/transform_panel.c
     src/gl/gl_viewport.c
     src/gl/stl_loader.c
     src/scad/scad_runner.c

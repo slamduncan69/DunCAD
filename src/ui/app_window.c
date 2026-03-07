@@ -1,6 +1,8 @@
 #include "app_window.h"
 #include "ui/code_editor.h"
 #include "ui/scad_preview.h"
+#include "ui/transform_panel.h"
+#include "gl/gl_viewport.h"
 #include "bezier/bezier_editor.h"
 #include "core/log.h"
 
@@ -86,6 +88,57 @@ make_placeholder_panel(const char *label_text)
 
     gtk_box_append(GTK_BOX(box), label);
     return box;
+}
+
+/* -------------------------------------------------------------------------
+ * Pick callback — viewport object click → code editor + transform panel
+ * ---------------------------------------------------------------------- */
+typedef struct {
+    DC_CodeEditor     *code_ed;
+    DC_TransformPanel *transform;
+} PickCtx;
+
+static void
+on_object_picked(int obj_idx, int line_start, int line_end, void *userdata)
+{
+    PickCtx *ctx = userdata;
+    if (obj_idx >= 0 && ctx->code_ed) {
+        dc_code_editor_select_lines(ctx->code_ed, line_start, line_end);
+
+        /* Get the statement text from the code editor to populate transform panel */
+        char *full = dc_code_editor_get_text(ctx->code_ed);
+        if (full && ctx->transform) {
+            /* Extract lines line_start..line_end from full text */
+            int line = 1;
+            const char *p = full;
+            const char *start_ptr = NULL;
+            const char *end_ptr = NULL;
+
+            while (*p) {
+                if (line == line_start && !start_ptr) start_ptr = p;
+                if (*p == '\n') {
+                    if (line == line_end) { end_ptr = p; break; }
+                    line++;
+                }
+                p++;
+            }
+            if (!start_ptr) start_ptr = full;
+            if (!end_ptr) end_ptr = full + strlen(full);
+
+            size_t len = (size_t)(end_ptr - start_ptr);
+            char *stmt = malloc(len + 1);
+            if (stmt) {
+                memcpy(stmt, start_ptr, len);
+                stmt[len] = '\0';
+                dc_transform_panel_show(ctx->transform, stmt,
+                                         line_start, line_end);
+                free(stmt);
+            }
+            free(full);
+        }
+    } else if (ctx->transform) {
+        dc_transform_panel_hide(ctx->transform);
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -266,6 +319,17 @@ dc_app_window_create(GtkApplication *app)
     /* Wire the SCAD preview to the window */
     g_object_set_data_full(G_OBJECT(window), "dc-scad-preview", preview,
                            (GDestroyNotify)dc_scad_preview_free);
+
+    /* Wire pick callback: viewport click → code editor + transform panel */
+    DC_GlViewport *gl_vp = dc_scad_preview_get_viewport(preview);
+    if (gl_vp) {
+        /* PickCtx lives as long as the window (freed via destroy-notify) */
+        PickCtx *pick_ctx = malloc(sizeof(PickCtx));
+        pick_ctx->code_ed = code_ed;
+        pick_ctx->transform = dc_scad_preview_get_transform(preview);
+        dc_gl_viewport_set_pick_callback(gl_vp, on_object_picked, pick_ctx);
+        g_object_set_data_full(G_OBJECT(window), "dc-pick-ctx", pick_ctx, free);
+    }
 
     /* F5 = Render preview (window-level shortcut) */
     g_object_set_data(G_OBJECT(window), "dc-scad-preview-ref", preview);
