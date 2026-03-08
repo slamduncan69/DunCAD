@@ -35,17 +35,98 @@ struct DC_ScadPreview {
     int             render_total;   /* total statements to render */
     int             render_ok;      /* how many succeeded */
 
+    /* Preamble: includes, variables, $fn/$fa/$fs — prepended to each object */
+    char           *preamble;       /* owned, collected from non-geometry stmts */
+
     /* Transform panel overlay */
     DC_TransformPanel *transform;
 };
 
 /* -------------------------------------------------------------------------
+ * Preamble detection.
+ *
+ * A "preamble" statement is one that doesn't produce geometry on its own
+ * but is needed by geometry statements: include/use directives, variable
+ * assignments, $fn/$fa/$fs settings, module/function definitions, and
+ * comment-only lines. Heuristic: no '{' in the text means preamble.
+ * ---------------------------------------------------------------------- */
+static int
+is_preamble(const char *text)
+{
+    /* Skip leading whitespace and comments */
+    const char *p = text;
+    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+
+    /* Comment-only lines */
+    if (p[0] == '/' && (p[1] == '/' || p[1] == '*')) {
+        /* Pure comment with no code after — check if there's anything
+         * non-comment left. For simplicity, if the whole statement is
+         * just a comment (no semicolons, no braces), it's preamble. */
+        if (!strchr(text, ';') && !strchr(text, '{'))
+            return 1;
+        /* Comment followed by code — skip comment prefix */
+        if (p[1] == '/') {
+            /* Skip to next line */
+            while (*p && *p != '\n') p++;
+            while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+        }
+    }
+
+    /* include <...> or use <...> directives */
+    if (strncmp(p, "include", 7) == 0 || strncmp(p, "use", 3) == 0)
+        return 1;
+
+    /* Variable assignment: identifier = value; or $var = value;
+     * Pattern: optional '$', then identifier chars, then whitespace, then '=' */
+    const char *q = p;
+    if (*q == '$') q++;
+    if ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') || *q == '_') {
+        q++;
+        while ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
+               (*q >= '0' && *q <= '9') || *q == '_')
+            q++;
+        /* Skip whitespace */
+        while (*q == ' ' || *q == '\t') q++;
+        /* If next char is '=', this is an assignment — preamble */
+        if (*q == '=')
+            return 1;
+    }
+
+    return 0;
+}
+
+/* Build a single preamble string from all preamble statements. */
+static char *
+collect_preamble(DC_ScadStatements *stmts)
+{
+    size_t total = 0;
+    for (int i = 0; i < stmts->count; i++) {
+        if (is_preamble(stmts->stmts[i].text))
+            total += strlen(stmts->stmts[i].text) + 1; /* +1 for newline */
+    }
+    if (total == 0) return strdup("");
+
+    char *buf = malloc(total + 1);
+    if (!buf) return strdup("");
+    buf[0] = '\0';
+
+    for (int i = 0; i < stmts->count; i++) {
+        if (is_preamble(stmts->stmts[i].text)) {
+            strcat(buf, stmts->stmts[i].text);
+            strcat(buf, "\n");
+        }
+    }
+    return buf;
+}
+
+/* -------------------------------------------------------------------------
  * Multi-object render pipeline
  *
  * 1. Split SCAD source into top-level statements
- * 2. Render each statement as a separate STL
- * 3. Load each STL as a separate GL object with line range
- * 4. If splitting fails or yields 1 statement, fall back to single-STL
+ * 2. Collect preamble (includes, variables, $fn/$fa/$fs)
+ * 3. Render each geometry statement as a separate STL, prepending preamble
+ * 4. Load each STL as a separate GL object with line range
+ * 5. If splitting fails or yields 1 statement, fall back to single-STL
  * ---------------------------------------------------------------------- */
 static void render_next_statement(DC_ScadPreview *pv);
 
@@ -93,10 +174,28 @@ render_next_statement(DC_ScadPreview *pv)
         return;
     }
 
+    /* Skip preamble statements — they get prepended to geometry stmts */
+    while (pv->render_idx < pv->stmts->count &&
+           is_preamble(pv->stmts->stmts[pv->render_idx].text)) {
+        pv->render_idx++;
+    }
+    if (pv->render_idx >= pv->stmts->count) {
+        /* Only preamble left — finish */
+        pv->rendering = 0;
+        gtk_widget_set_sensitive(pv->render_btn, TRUE);
+        char status[128];
+        snprintf(status, sizeof(status),
+                 "Rendered %d/%d objects — click to select",
+                 pv->render_ok, pv->render_total);
+        gtk_label_set_text(GTK_LABEL(pv->status_label), status);
+        dc_gl_viewport_reset_camera(pv->viewport);
+        return;
+    }
+
     int idx = pv->render_idx++;
     DC_ScadStatement *s = &pv->stmts->stmts[idx];
 
-    /* Write this statement to a temp SCAD file */
+    /* Write preamble + this geometry statement to a temp SCAD file */
     char scad_path[256];
     snprintf(scad_path, sizeof(scad_path), "/tmp/duncad-obj-%d.scad", idx);
     char stl_path[256];
@@ -107,6 +206,8 @@ render_next_statement(DC_ScadPreview *pv)
         render_next_statement(pv);
         return;
     }
+    if (pv->preamble && pv->preamble[0])
+        fputs(pv->preamble, f);
     fputs(s->text, f);
     fclose(f);
 
@@ -173,13 +274,33 @@ do_render(DC_ScadPreview *pv)
     pv->stmts = dc_scad_split(text);
 
     if (pv->stmts && pv->stmts->count > 1) {
-        /* Multi-object render: each statement gets its own STL */
+        /* Multi-object render: each geometry statement gets its own STL */
         dc_gl_viewport_clear_objects(pv->viewport);
         dc_gl_viewport_clear_mesh(pv->viewport);
 
+        /* Clean up stale temp files from previous renders */
+        for (int i = 0; i < 64; i++) {
+            char path[256];
+            snprintf(path, sizeof(path), "/tmp/duncad-obj-%d.scad", i);
+            unlink(path);
+            snprintf(path, sizeof(path), "/tmp/duncad-obj-%d.stl", i);
+            unlink(path);
+        }
+
+        /* Collect preamble (includes, variables, $fn/$fa/$fs) */
+        free(pv->preamble);
+        pv->preamble = collect_preamble(pv->stmts);
+
+        /* Count geometry (non-preamble) statements */
+        int geo_count = 0;
+        for (int i = 0; i < pv->stmts->count; i++) {
+            if (!is_preamble(pv->stmts->stmts[i].text))
+                geo_count++;
+        }
+
         pv->rendering = 1;
         pv->render_idx = 0;
-        pv->render_total = pv->stmts->count;
+        pv->render_total = geo_count;
         pv->render_ok = 0;
         gtk_widget_set_sensitive(pv->render_btn, FALSE);
 
@@ -316,6 +437,7 @@ dc_scad_preview_free(DC_ScadPreview *pv)
     dc_transform_panel_free(pv->transform);
     dc_gl_viewport_free(pv->viewport);
     dc_scad_stmts_free(pv->stmts);
+    free(pv->preamble);
     free(pv->tmp_scad);
     free(pv->tmp_stl);
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "scad preview freed");

@@ -1129,3 +1129,96 @@ dc_gl_viewport_set_pick_callback(DC_GlViewport *vp,
     vp->pick_cb = cb;
     vp->pick_cb_data = userdata;
 }
+
+void
+dc_gl_viewport_select_object(DC_GlViewport *vp, int obj_idx)
+{
+    if (!vp) return;
+    if (obj_idx >= vp->obj_count) return;
+
+    vp->selected_obj = obj_idx;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+
+    if (vp->pick_cb) {
+        if (obj_idx >= 0 && obj_idx < vp->obj_count) {
+            vp->pick_cb(obj_idx, vp->objects[obj_idx].line_start,
+                        vp->objects[obj_idx].line_end, vp->pick_cb_data);
+        } else {
+            vp->pick_cb(-1, 0, 0, vp->pick_cb_data);
+        }
+    }
+}
+
+int
+dc_gl_viewport_get_object_count(DC_GlViewport *vp)
+{
+    return vp ? vp->obj_count : 0;
+}
+
+void
+dc_gl_viewport_get_camera_center(DC_GlViewport *vp, float *x, float *y, float *z)
+{
+    if (!vp) return;
+    if (x) *x = vp->cam_center[0];
+    if (y) *y = vp->cam_center[1];
+    if (z) *z = vp->cam_center[2];
+}
+
+void
+dc_gl_viewport_set_camera_center(DC_GlViewport *vp, float x, float y, float z)
+{
+    if (!vp) return;
+    vp->cam_center[0] = x;
+    vp->cam_center[1] = y;
+    vp->cam_center[2] = z;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+float
+dc_gl_viewport_get_camera_dist(DC_GlViewport *vp)
+{
+    return vp ? vp->cam_dist : 0.0f;
+}
+
+void
+dc_gl_viewport_set_camera_dist(DC_GlViewport *vp, float dist)
+{
+    if (!vp) return;
+    vp->cam_dist = dist;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+void
+dc_gl_viewport_get_camera_angles(DC_GlViewport *vp, float *theta, float *phi)
+{
+    if (!vp) return;
+    if (theta) *theta = vp->cam_theta;
+    if (phi)   *phi   = vp->cam_phi;
+}
+
+void
+dc_gl_viewport_set_camera_angles(DC_GlViewport *vp, float theta, float phi)
+{
+    if (!vp) return;
+    vp->cam_theta = theta;
+    vp->cam_phi   = phi;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+int
+dc_gl_viewport_get_ortho(DC_GlViewport *vp)
+{
+    return vp ? vp->ortho : 0;
+}
+
+int
+dc_gl_viewport_get_grid(DC_GlViewport *vp)
+{
+    return vp ? vp->show_grid : 0;
+}
+
+int
+dc_gl_viewport_get_axes(DC_GlViewport *vp)
+{
+    return vp ? vp->show_axes : 0;
+}

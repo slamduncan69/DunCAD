@@ -14,16 +14,15 @@
  * Use the companion CLI tool `duncad-inspect` to interact.
  */
 
-#include "bezier/bezier_editor.h"
-
-/* Forward declaration */
-typedef struct DC_CodeEditor DC_CodeEditor;
+#include <gtk/gtk.h>
 
 #define DC_INSPECT_SOCK_PATH "/tmp/duncad.sock"
 
-/* Start the inspect server. Returns 0 on success, -1 on failure.
- * code_ed may be NULL if no code editor is available. */
-int dc_inspect_start(DC_BezierEditor *editor, DC_CodeEditor *code_ed);
+/* Start the inspect server with access to the full application window.
+ * All subsystems (bezier editor, code editor, GL viewport, SCAD preview,
+ * transform panel) are extracted from the window via getters.
+ * Returns 0 on success, -1 on failure. */
+int dc_inspect_start(GtkWidget *window);
 
 /* Stop the server and clean up the socket file. */
 void dc_inspect_stop(void);

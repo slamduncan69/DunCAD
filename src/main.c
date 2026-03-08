@@ -1,5 +1,4 @@
 #include "ui/app_window.h"
-#include "ui/code_editor.h"
 #include "inspect/inspect.h"
 #include "core/log.h"
 
@@ -18,12 +17,8 @@ on_activate(GtkApplication *app, gpointer user_data)
     GtkWidget *window = dc_app_window_create(app);
     gtk_window_present(GTK_WINDOW(window));
 
-    /* Start the inspect socket server */
-    DC_BezierEditor *editor = dc_app_window_get_editor(window);
-    DC_CodeEditor *code_ed = dc_app_window_get_code_editor(window);
-    if (editor) {
-        dc_inspect_start(editor, code_ed);
-    }
+    /* Start the inspect socket server — full window access */
+    dc_inspect_start(window);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "DunCAD activated");
 }

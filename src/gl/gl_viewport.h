@@ -64,6 +64,33 @@ int dc_gl_viewport_get_selected(DC_GlViewport *vp);
 int dc_gl_viewport_get_object_lines(DC_GlViewport *vp, int obj_idx,
                                      int *line_start, int *line_end);
 
+/* Select an object by index (-1 to deselect). Triggers pick callback. */
+void dc_gl_viewport_select_object(DC_GlViewport *vp, int obj_idx);
+
+/* Get the number of loaded objects. */
+int dc_gl_viewport_get_object_count(DC_GlViewport *vp);
+
+/* ---- Camera state ---- */
+
+/* Get/set camera orbit center (target point). */
+void dc_gl_viewport_get_camera_center(DC_GlViewport *vp, float *x, float *y, float *z);
+void dc_gl_viewport_set_camera_center(DC_GlViewport *vp, float x, float y, float z);
+
+/* Get/set camera distance from orbit center. */
+float dc_gl_viewport_get_camera_dist(DC_GlViewport *vp);
+void dc_gl_viewport_set_camera_dist(DC_GlViewport *vp, float dist);
+
+/* Get/set camera angles (theta=azimuth, phi=elevation, degrees). */
+void dc_gl_viewport_get_camera_angles(DC_GlViewport *vp, float *theta, float *phi);
+void dc_gl_viewport_set_camera_angles(DC_GlViewport *vp, float theta, float phi);
+
+/* Get projection mode: 0=perspective, 1=ortho. */
+int dc_gl_viewport_get_ortho(DC_GlViewport *vp);
+
+/* Get visibility flags: grid, axes. */
+int dc_gl_viewport_get_grid(DC_GlViewport *vp);
+int dc_gl_viewport_get_axes(DC_GlViewport *vp);
+
 /* Selection callback — called when user clicks an object.
  * obj_idx is -1 if clicked on background. */
 typedef void (*DC_GlPickCb)(int obj_idx, int line_start, int line_end,

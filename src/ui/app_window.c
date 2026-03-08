@@ -390,3 +390,10 @@ dc_app_window_get_code_editor(GtkWidget *window)
     if (!window) return NULL;
     return g_object_get_data(G_OBJECT(window), "dc-code-editor");
 }
+
+struct DC_ScadPreview *
+dc_app_window_get_scad_preview(GtkWidget *window)
+{
+    if (!window) return NULL;
+    return g_object_get_data(G_OBJECT(window), "dc-scad-preview-ref");
+}

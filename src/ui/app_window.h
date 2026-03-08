@@ -63,4 +63,11 @@ struct DC_BezierEditor *dc_app_window_get_editor(GtkWidget *window);
  * ---------------------------------------------------------------------- */
 struct DC_CodeEditor *dc_app_window_get_code_editor(GtkWidget *window);
 
+/* -------------------------------------------------------------------------
+ * dc_app_window_get_scad_preview — retrieve the SCAD preview panel.
+ *
+ * Returns: borrowed DC_ScadPreview*, or NULL if not found.
+ * ---------------------------------------------------------------------- */
+struct DC_ScadPreview *dc_app_window_get_scad_preview(GtkWidget *window);
+
 #endif /* DC_APP_WINDOW_H */

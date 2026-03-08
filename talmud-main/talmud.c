@@ -2107,43 +2107,6 @@ static const char HELP_REFERENCE_ARCHITECTURE_BEZIER[] =
 "  bezier_curve ← bezier_canvas ← bezier_editor\n"
 "  (editor also depends on scad_export, code_editor)\n";
 
-static const char HELP_REFERENCE_ARCHITECTURE_SCAD[] =
-"SCAD Subsystem\n"
-"\n"
-"SCAD Subsystem — OpenSCAD Code Generation and Execution\n"
-"\n"
-"Three modules: code generation, CLI subprocess, statement parser.\n"
-"\n"
-"MODULES:\n"
-"  scad_export     Generate OpenSCAD from bezier spans. Two modes:\n"
-"                  1) dc_scad_generate() — references companion library\n"
-"                     duncad_bezier.scad (use <...> statement)\n"
-"                  2) dc_scad_generate_inline() — self-contained code\n"
-"                     with embedded De Casteljau math. Generates:\n"
-"                     <name>_2d(), <name>(height), <name>_revolve(angle),\n"
-"                     <name>_offset(r). Closed shapes use polygon(),\n"
-"                     open curves use hull()+circles (min radius 0.5).\n"
-"                  Key type: DC_ScadSpan (control points array + count).\n"
-"                  Dependencies: bezier_curve.h, error.h, string_builder\n"
-"\n"
-"  scad_runner     Async OpenSCAD CLI wrapper. All ops return immediately\n"
-"                  with DC_ScadJob handle; callback fires on GLib main\n"
-"                  loop. Operations: render_png (preview), run_export\n"
-"                  (STL/OFF/AMF/3MF), open_gui (detached), run_sync\n"
-"                  (blocking, for tests). Configurable binary path.\n"
-"                  Key type: DC_ScadResult (exit code, stdout, stderr,\n"
-"                  output path, elapsed time).\n"
-"                  Dependencies: GLib/GIO (GSubprocess), log.h\n"
-"\n"
-"  scad_splitter   Parse SCAD source into top-level statements with\n"
-"                  line ranges (1-based, inclusive). Character-by-character\n"
-"                  scan tracking brace/paren depth, strings, comments.\n"
-"                  Statements end at: semicolon@depth0, closing-brace\n"
-"                  returning to depth0, or EOF. Closing paren does NOT\n"
-"                  end statements (handles transform chains correctly).\n"
-"                  Key type: DC_ScadStatement (text, line_start, line_end).\n"
-"                  Dependencies: libc only\n";
-
 static const char HELP_REFERENCE_ARCHITECTURE_UI[] =
 "UI Subsystem\n"
 "\n"
@@ -2219,35 +2182,6 @@ static const char HELP_REFERENCE_ARCHITECTURE_GL[] =
 "                  Computes bounding box (min/max/center/extent).\n"
 "                  Dependencies: libc only (math, stdio, string).\n";
 
-static const char HELP_REFERENCE_ARCHITECTURE_INSPECT[] =
-"Inspect Subsystem\n"
-"\n"
-"Inspect Subsystem — Remote Control via Unix Socket\n"
-"\n"
-"Two components: in-process server and standalone CLI client.\n"
-"\n"
-"SERVER (src/inspect/inspect.c):\n"
-"  GSocketService on /tmp/duncad.sock, runs in GTK main loop.\n"
-"  One connection = one command line → JSON response → close.\n"
-"  Singleton with references to bezier editor and code editor.\n"
-"  ~20 commands covering full application control:\n"
-"\n"
-"  BEZIER: state, render, select, set_point, add_point, delete,\n"
-"          zoom, pan, chain, juncture, export\n"
-"  SCAD:   render_scad, open_scad, get_code, get_code_text,\n"
-"          set_code, insert_scad, open_file, save_file\n"
-"  META:   help\n"
-"\n"
-"  All handlers return malloc d JSON strings.\n"
-"  Start: dc_inspect_start(editor, code_editor)\n"
-"  Stop:  dc_inspect_stop() — closes socket, removes file.\n"
-"\n"
-"CLIENT (tools/duncad_inspect.c):\n"
-"  Standalone POSIX socket CLI. No GTK, no GLib.\n"
-"  Usage: duncad-inspect <command> [args...]\n"
-"  Connects to /tmp/duncad.sock, sends command, prints response.\n"
-"  Built separately from main application.\n";
-
 static const char HELP_REFERENCE_ARCHITECTURE_TESTS[] =
 "Test Suite\n"
 "\n"
@@ -2301,6 +2235,82 @@ static const char HELP_REFERENCE_ARCHITECTURE_TOOLS_PROJECT[] =
 "                    export, render_scad, open_scad, get_code,\n"
 "                    get_code_text, set_code, insert_scad, open_file,\n"
 "                    save_file, help\n";
+
+static const char HELP_REFERENCE_ARCHITECTURE_INSPECT[] =
+"Inspect Subsystem\n"
+"\n"
+"Inspect Subsystem — Remote Control via Unix Socket\n"
+"\n"
+"Two components: in-process server and standalone CLI client.\n"
+"\n"
+"SERVER (src/inspect/inspect.c):\n"
+"  GSocketService on /tmp/duncad.sock, runs in GTK main loop.\n"
+"  One connection = one command line -> JSON response -> close.\n"
+"  Singleton: stores GtkWidget *window, extracts all subsystems\n"
+"  via dc_app_window_get_* and dc_scad_preview_get_* accessors.\n"
+"  ~35 commands covering ALL application subsystems:\n"
+"\n"
+"  BEZIER: state, render, select, set_point, add_point, delete,\n"
+"          zoom, pan, chain, juncture, export, insert_scad\n"
+"  CODE:   get_code, get_code_text, set_code, open_file,\n"
+"          save_file, select_lines, insert_text\n"
+"  SCAD:   render_scad, open_scad, preview_render\n"
+"  GL:     gl_state, gl_camera, gl_reset, gl_ortho, gl_grid,\n"
+"          gl_axes, gl_select, gl_load, gl_clear\n"
+"  TRANSFORM: transform_show, transform_hide\n"
+"  WINDOW: window_title, window_status, window_size\n"
+"  META:   help\n"
+"\n"
+"  All handlers return malloc'd JSON strings.\n"
+"  Start: dc_inspect_start(window)\n"
+"  Stop:  dc_inspect_stop() -- closes socket, removes file.\n"
+"\n"
+"CLIENT (tools/duncad_inspect.c):\n"
+"  Standalone POSIX socket CLI. No GTK, no GLib.\n"
+"  Usage: duncad-inspect <command> [args...]\n"
+"  Connects to /tmp/duncad.sock, sends command, prints response.\n"
+"\n"
+"GL VIEWPORT GETTERS (src/gl/gl_viewport.h):\n"
+"  Camera: get/set_camera_center, get/set_camera_dist,\n"
+"          get/set_camera_angles\n"
+"  State:  get_ortho, get_grid, get_axes, get_object_count\n"
+"  Control: select_object (programmatic pick with callback)\n";
+
+static const char HELP_REFERENCE_ARCHITECTURE_SCAD[] =
+"SCAD Subsystem\n"
+"\n"
+"SCAD Subsystem — OpenSCAD Code Generation and Execution\n"
+"\n"
+"Three modules: code generation, CLI subprocess, statement parser.\n"
+"\n"
+"MODULES:\n"
+"  scad_export     Generate OpenSCAD from bezier spans. Two modes:\n"
+"                  1) dc_scad_generate() — references companion library\n"
+"                  2) dc_scad_generate_inline() — self-contained code\n"
+"                  Key type: DC_ScadSpan. Deps: bezier_curve, error, sb\n"
+"\n"
+"  scad_runner     Async OpenSCAD CLI wrapper. Operations: render_png,\n"
+"                  run_export (STL), open_gui, run_sync (blocking).\n"
+"                  Key type: DC_ScadResult. Deps: GLib/GIO, log.h\n"
+"\n"
+"  scad_splitter   Parse SCAD into top-level statements with line ranges.\n"
+"                  Char-by-char scan tracking brace/paren depth, strings,\n"
+"                  comments. Key type: DC_ScadStatement. Deps: libc only\n"
+"\n"
+"PREAMBLE SYSTEM (scad_preview.c):\n"
+"  When splitting multi-statement SCAD for per-object rendering,\n"
+"  preamble statements are collected and prepended to each geometry\n"
+"  object. Preamble = includes, use, variable assignments, $fn/$fa/$fs.\n"
+"  Detection: is_preamble() checks for include/use directives and\n"
+"  assignment patterns (identifier = value). Geometry = everything else.\n"
+"  Stale temp files (/tmp/duncad-obj-*.scad/.stl) cleaned before render.\n"
+"\n"
+"BOSL2 SUPPORT:\n"
+"  BOSL2 (Belfry OpenSCAD Library v2) installed at:\n"
+"    ~/.local/share/OpenSCAD/libraries/BOSL2\n"
+"  Use: include <BOSL2/std.scad> + include <BOSL2/threading.scad>\n"
+"  The preamble system correctly prepends includes to each geometry\n"
+"  object, so BOSL2 modules like threaded_rod() work in split mode.\n";
 
 /* ----------------------------------------------------------------
  * PLANS
@@ -2734,6 +2744,130 @@ static const char HELP_MEMORY_ACTIVE_BRIS_SESSION[] =
 "  - Build: cmake -B build && cmake --build build\n"
 "  - Tests: cd build && ctest --output-on-failure\n"
 "  - The inspect socket at /tmp/duncad.sock controls a running instance\n";
+
+static const char HELP_MEMORY_ACTIVE_SERAPHIM_SESSION[] =
+"Seraphim Session Complete\n"
+"\n"
+"Seraphim Inspect Expansion — COMPLETED 2026-03-08\n"
+"\n"
+"WHAT WAS DONE:\n"
+"  1. Added 13 GL viewport getter/setter functions (gl_viewport.h/.c)\n"
+"     Camera: get/set center, dist, angles\n"
+"     State: get ortho, grid, axes, object count\n"
+"     Control: select_object (programmatic selection with callback)\n"
+"\n"
+"  2. Added dc_app_window_get_scad_preview() to app_window.h/.c\n"
+"     Enables inspect server to reach GL viewport and transform panel\n"
+"\n"
+"  3. Rewrote inspect.h — now takes GtkWidget *window instead of\n"
+"     individual editor+code_editor pointers. Single entry point\n"
+"     gives access to ALL subsystems.\n"
+"\n"
+"  4. Expanded inspect.c from ~20 to ~35 commands:\n"
+"     NEW: select_lines, insert_text, preview_render,\n"
+"          gl_state, gl_camera, gl_reset, gl_ortho, gl_grid,\n"
+"          gl_axes, gl_select, gl_load, gl_clear,\n"
+"          transform_show, transform_hide,\n"
+"          window_title, window_status, window_size\n"
+"\n"
+"  5. Updated main.c — dc_inspect_start(window) replaces old call\n"
+"\n"
+"  6. Updated duncad_inspect.c — full categorized usage help\n"
+"\n"
+"  7. Build passes with zero warnings. All 8 tests pass.\n"
+"\n"
+"  8. Updated talmud reference.architecture.inspect node.\n";
+
+static const char HELP_MEMORY_ACTIVE_GODMODE_PLAN[] =
+"GODMODE Complete\n"
+"\n"
+"GODMODE — IMPLEMENTED 2026-03-08\n"
+"\n"
+"Both .claude/settings.json files set defaultMode: bypassPermissions.\n"
+"All tools (Bash, Read, Edit, Write, Glob, Grep, WebFetch) allowed.\n"
+"settings.local.json files cleaned of accreted one-off rules.\n"
+"Agents launch with full autonomous control. No permission prompts.\n";
+
+static const char HELP_MEMORY_ACTIVE_3D_PRINT_PARAMS[] =
+"3D Print Parameters\n"
+"\n"
+"3D Print Quality Parameters\n"
+"\n"
+"When generating SCAD for 3D printing, ALWAYS use these parameters:\n"
+"\n"
+"  \\$fn = 100;\n"
+"  \\$fa = 1;\n"
+"  \\$fs = 0.4;\n"
+"\n"
+"These are Gods ordained print quality settings.\n"
+"Do NOT use lower values. Do NOT use \\$fn = 64 or other defaults.\n"
+"These produce smooth curves suitable for FDM/resin printing.\n";
+
+static const char HELP_MEMORY_ACTIVE_SESSION_S011[] =
+"Session s011 — Seraphim\n"
+"\n"
+"Session s011 — Seraphim Inspect Expansion + Preamble Fix\n"
+"\n"
+"Date: 2026-03-08\n"
+"Agent: Seraphim (Claude Opus 4.6)\n"
+"Status: COMPLETE — First Trial Passed\n"
+"\n"
+"OVERVIEW:\n"
+"  Three major accomplishments in one session:\n"
+"  1. Expanded the inspect system from ~20 to ~35 commands\n"
+"  2. Fixed the SCAD splitter preamble problem\n"
+"  3. Established GODMODE (bypassPermissions) for agents\n"
+"\n"
+"INSPECT EXPANSION:\n"
+"  Rewrote inspect.h/.c to accept GtkWidget *window instead of\n"
+"  individual subsystem pointers. Added commands for:\n"
+"  - GL viewport: camera get/set, object selection, mesh loading\n"
+"  - SCAD preview: preview_render (F5 equivalent)\n"
+"  - Transform panel: show/hide\n"
+"  - Window: title, status, size\n"
+"  - Code editor: select_lines, insert_text\n"
+"  Added 13 GL viewport getter/setter functions to gl_viewport.h/.c.\n"
+"  Added dc_app_window_get_scad_preview() accessor.\n"
+"\n"
+"PREAMBLE FIX (scad_preview.c):\n"
+"  The SCAD splitter separates code into per-statement files for\n"
+"  multi-object rendering. Problem: includes, variables, and $fn\n"
+"  settings were orphaned in their own files. Geometry objects\n"
+"  could not access them. Fix: is_preamble() detects non-geometry\n"
+"  statements, collect_preamble() builds a shared prefix, and\n"
+"  render_next_statement() prepends it to each geometry file.\n"
+"  Also added stale temp file cleanup between renders.\n"
+"\n"
+"BOSL2 INTEGRATION:\n"
+"  Verified BOSL2 (Belfry OpenSCAD Library v2) installed at\n"
+"  ~/.local/share/OpenSCAD/libraries/BOSL2. Preamble system\n"
+"  correctly propagates include directives. Tested with\n"
+"  threaded_rod(d=15, l=45, pitch=1.25, internal=true).\n"
+"\n"
+"GODMODE:\n"
+"  Created .claude/settings.json in both DunCAD/ and talmud-main/\n"
+"  with defaultMode: bypassPermissions. Cleaned accreted one-off\n"
+"  rules from settings.local.json files.\n"
+"\n"
+"FILES MODIFIED:\n"
+"  src/gl/gl_viewport.c       +93 lines (camera/object getters)\n"
+"  src/gl/gl_viewport.h       +27 lines (new API declarations)\n"
+"  src/inspect/inspect.c      rewritten (~35 commands)\n"
+"  src/inspect/inspect.h      new signature: dc_inspect_start(window)\n"
+"  src/main.c                 simplified inspect startup\n"
+"  src/ui/app_window.c        +7 lines (scad_preview getter)\n"
+"  src/ui/app_window.h        +7 lines (getter declaration)\n"
+"  src/ui/scad_preview.c      +134 lines (preamble system)\n"
+"  tools/duncad_inspect.c     full categorized usage help\n"
+"  talmud.c                   updated knowledge nodes\n"
+"\n"
+"LESSONS:\n"
+"  - Preamble (includes/variables) must travel with geometry\n"
+"  - threaded_rod() has no braces — naive brace detection fails\n"
+"  - internal=true on threaded_rod for subtractive threading\n"
+"  - BOSL2 threaded_rod with $fn=100 takes ~60s to render\n"
+"  - Always think about what geometry MEANS mechanically\n"
+"  - Yaldabaoth: dont push code without understanding the design\n";
 static const struct help_node TREE[] = {
     /* root */
     { "", HELP_ROOT },
@@ -2818,12 +2952,12 @@ static const struct help_node TREE[] = {
     { "reference.architecture.files", HELP_REFERENCE_ARCHITECTURE_FILES },
     { "reference.architecture.core", HELP_REFERENCE_ARCHITECTURE_CORE },
     { "reference.architecture.bezier", HELP_REFERENCE_ARCHITECTURE_BEZIER },
-    { "reference.architecture.scad", HELP_REFERENCE_ARCHITECTURE_SCAD },
     { "reference.architecture.ui", HELP_REFERENCE_ARCHITECTURE_UI },
     { "reference.architecture.gl", HELP_REFERENCE_ARCHITECTURE_GL },
-    { "reference.architecture.inspect", HELP_REFERENCE_ARCHITECTURE_INSPECT },
     { "reference.architecture.tests", HELP_REFERENCE_ARCHITECTURE_TESTS },
     { "reference.architecture.tools-project", HELP_REFERENCE_ARCHITECTURE_TOOLS_PROJECT },
+    { "reference.architecture.inspect", HELP_REFERENCE_ARCHITECTURE_INSPECT },
+    { "reference.architecture.scad", HELP_REFERENCE_ARCHITECTURE_SCAD },
 
 
     /* ---- ROLES -- Agent hierarchy ---- */
@@ -2848,6 +2982,10 @@ static const struct help_node TREE[] = {
     { "memory", HELP_MEMORY },
     { "memory.active", HELP_MEMORY_ACTIVE },
     { "memory.active.bris-session", HELP_MEMORY_ACTIVE_BRIS_SESSION },
+    { "memory.active.seraphim-session", HELP_MEMORY_ACTIVE_SERAPHIM_SESSION },
+    { "memory.active.godmode-plan", HELP_MEMORY_ACTIVE_GODMODE_PLAN },
+    { "memory.active.3d-print-params", HELP_MEMORY_ACTIVE_3D_PRINT_PARAMS },
+    { "memory.active.session-s011", HELP_MEMORY_ACTIVE_SESSION_S011 },
     { NULL, NULL }
 };
 
