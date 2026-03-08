@@ -1,0 +1,25 @@
+.env
+
+# Compiled C binaries (yotzer all regenerates everything)
+# Talmud (the bible — lives inside talmud/ as talmud/talmud)
+talmud/talmud
+!talmud/talmud.c
+
+# Darshan
+talmud/profane/darshan/darshan
+!talmud/profane/darshan/darshan.c
+
+# Sofer
+talmud/narthex/sofer/sofer
+!talmud/narthex/sofer/sofer.c
+
+# Yotzer
+talmud/narthex/yotzer/yotzer
+!talmud/narthex/yotzer/yotzer.c
+*.yotzer
+
+# Samsara (impermanent runtime state)
+talmud/samsara/
+
+# Old binary at project root
+/durgios

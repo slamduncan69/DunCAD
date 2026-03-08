@@ -1,0 +1,5 @@
+# Purgatory — plans awaiting salvation
+# Fields: priority	name	status	description
+# Status: ACTIVE, BLOCKED, PAUSED
+# Managed by: talmud purgatory
+
