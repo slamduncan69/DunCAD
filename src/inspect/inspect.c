@@ -293,6 +293,55 @@ cmd_get_code(void)
 }
 
 static char *
+cmd_get_code_text(void)
+{
+    if (!s_code_ed)
+        return strdup("{\"error\":\"no code editor\"}\n");
+
+    char *text = dc_code_editor_get_text(s_code_ed);
+    if (!text)
+        return strdup("{\"ok\":true,\"text\":\"\"}\n");
+
+    DC_StringBuilder *sb = dc_sb_new();
+    if (!sb) { free(text); return strdup("{\"error\":\"alloc\"}\n"); }
+
+    dc_sb_append(sb, "{\"ok\":true,\"text\":\"");
+    /* Escape the text for JSON */
+    for (const char *p = text; *p; p++) {
+        if (*p == '"') dc_sb_append(sb, "\\\"");
+        else if (*p == '\\') dc_sb_append(sb, "\\\\");
+        else if (*p == '\n') dc_sb_append(sb, "\\n");
+        else if (*p == '\r') dc_sb_append(sb, "\\r");
+        else if (*p == '\t') dc_sb_append(sb, "\\t");
+        else dc_sb_append_char(sb, *p);
+    }
+    dc_sb_append(sb, "\"}\n");
+    free(text);
+
+    char *result = dc_sb_take(sb);
+    dc_sb_free(sb);
+    return result;
+}
+
+static char *
+cmd_insert_scad(void)
+{
+    if (!s_editor)
+        return strdup("{\"error\":\"no bezier editor\"}\n");
+
+    DC_Error err = {0};
+    int rc = dc_bezier_editor_insert_scad(s_editor, &err);
+
+    char *resp = malloc(640);
+    if (!resp) return NULL;
+    if (rc == 0)
+        snprintf(resp, 640, "{\"ok\":true}\n");
+    else
+        snprintf(resp, 640, "{\"ok\":false,\"error\":\"%s\"}\n", err.message);
+    return resp;
+}
+
+static char *
 cmd_set_code(const char *args)
 {
     if (!s_code_ed)
@@ -405,11 +454,13 @@ dispatch(const char *cmd)
     if (strcmp(name, "export")      == 0) return cmd_export(args);
     if (strcmp(name, "render_scad") == 0) return cmd_render_scad(args);
     if (strcmp(name, "open_scad")   == 0) return cmd_open_scad(args);
-    if (strcmp(name, "get_code")    == 0) return cmd_get_code();
-    if (strcmp(name, "set_code")    == 0) return cmd_set_code(args);
-    if (strcmp(name, "open_file")   == 0) return cmd_open_file(args);
-    if (strcmp(name, "save_file")   == 0) return cmd_save_file(args);
-    if (strcmp(name, "help")        == 0) return cmd_help();
+    if (strcmp(name, "get_code")      == 0) return cmd_get_code();
+    if (strcmp(name, "get_code_text") == 0) return cmd_get_code_text();
+    if (strcmp(name, "set_code")      == 0) return cmd_set_code(args);
+    if (strcmp(name, "insert_scad")   == 0) return cmd_insert_scad();
+    if (strcmp(name, "open_file")     == 0) return cmd_open_file(args);
+    if (strcmp(name, "save_file")     == 0) return cmd_save_file(args);
+    if (strcmp(name, "help")          == 0) return cmd_help();
 
     char *err = malloc(256);
     if (!err) return NULL;

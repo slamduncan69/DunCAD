@@ -44,6 +44,33 @@ char *dc_scad_generate(const char *name, const DC_ScadSpan *spans,
                        int num_spans, int closed, DC_Error *err);
 
 /* -------------------------------------------------------------------------
+ * dc_scad_generate_inline — produce self-contained .scad source.
+ *
+ * Like dc_scad_generate, but embeds the bezier math functions directly
+ * into the output (no companion library required). The output is a
+ * complete, renderable OpenSCAD file.
+ *
+ * Generated modules:
+ *   <name>_2d()                  2D bezier shape (polygon or stroked path)
+ *   <name>(height)               linear_extrude wrapper
+ *   <name>_revolve(angle)        rotate_extrude wrapper
+ *   <name>_offset(r)             offset wrapper around 2D shape
+ *
+ * Parameters:
+ *   name       — shape identifier (used for variable/module names)
+ *   spans      — array of spans
+ *   num_spans  — number of spans
+ *   closed     — 1 if shape is closed (polygon), 0 for open (stroked path)
+ *   thickness  — stroke width for open curves (ignored if closed)
+ *   err        — error output (may be NULL)
+ *
+ * Returns: heap-allocated string; caller must free(). NULL on error.
+ * ---------------------------------------------------------------------- */
+char *dc_scad_generate_inline(const char *name, const DC_ScadSpan *spans,
+                              int num_spans, int closed, double thickness,
+                              DC_Error *err);
+
+/* -------------------------------------------------------------------------
  * dc_scad_generate_library — produce duncad_bezier.scad as a string.
  *
  * Returns: heap-allocated string; caller must free(). NULL on alloc failure.

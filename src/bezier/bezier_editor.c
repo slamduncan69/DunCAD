@@ -4,6 +4,7 @@
 #include "core/array.h"
 #include "core/log.h"
 #include "ui/app_window.h"
+#include "ui/code_editor.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -50,6 +51,7 @@ struct DC_BezierEditor {
     GtkWidget       *stats_label;  /* "4 pts  2 segs  Open  Chain: OFF" */
     gulong           entry_x_hid;  /* "activate" signal handler ID */
     gulong           entry_y_hid;
+    DC_CodeEditor   *code_ed;      /* borrowed, for Insert SCAD */
 };
 
 /* -------------------------------------------------------------------------
@@ -153,6 +155,7 @@ enforce_c1_at_p0(DC_BezierEditor *ed)
 /* Forward declarations */
 static void update_status(DC_BezierEditor *ed);
 static void trigger_export(DC_BezierEditor *ed);
+static void trigger_insert(DC_BezierEditor *ed);
 
 /* -------------------------------------------------------------------------
  * Numeric input panel — refresh from editor state
@@ -746,6 +749,13 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
         return TRUE;
     }
 
+    /* Ctrl+I: insert SCAD into code editor */
+    if ((keyval == GDK_KEY_i || keyval == GDK_KEY_I) &&
+        (state & GDK_CONTROL_MASK)) {
+        trigger_insert(ed);
+        return TRUE;
+    }
+
     if (keyval == GDK_KEY_Delete || keyval == GDK_KEY_BackSpace) {
         int count = (int)dc_array_length(ed->pts);
         int sel = ed->selected;
@@ -916,6 +926,40 @@ on_export_clicked(GtkButton *btn, gpointer data)
     trigger_export(data);
 }
 
+static void
+trigger_insert(DC_BezierEditor *ed)
+{
+    int count = (int)dc_array_length(ed->pts);
+    if (count < 2) {
+        dc_app_window_set_status(ed->window,
+                                  "Need at least 2 points to insert");
+        return;
+    }
+    if (!ed->code_ed) {
+        dc_app_window_set_status(ed->window,
+                                  "No code editor connected");
+        return;
+    }
+
+    DC_Error err = {0};
+    int rc = dc_bezier_editor_insert_scad(ed, &err);
+    if (rc == 0) {
+        dc_app_window_set_status(ed->window,
+                                  "Bezier SCAD inserted into code editor");
+    } else {
+        char msg[544];
+        snprintf(msg, sizeof(msg), "Insert failed: %s", err.message);
+        dc_app_window_set_status(ed->window, msg);
+    }
+}
+
+static void
+on_insert_clicked(GtkButton *btn, gpointer data)
+{
+    (void)btn;
+    trigger_insert(data);
+}
+
 /* -------------------------------------------------------------------------
  * Destroy notify
  * ---------------------------------------------------------------------- */
@@ -1020,10 +1064,19 @@ dc_bezier_editor_new(void)
     /* Export button */
     GtkWidget *export_btn = gtk_button_new_with_label("Export");
     gtk_widget_set_focusable(export_btn, FALSE);
-    gtk_widget_set_tooltip_text(export_btn, "Export to OpenSCAD (Ctrl+E)");
+    gtk_widget_set_tooltip_text(export_btn, "Export to OpenSCAD file (Ctrl+E)");
     g_signal_connect(export_btn, "clicked",
                      G_CALLBACK(on_export_clicked), ed);
     gtk_box_append(GTK_BOX(toolbar), export_btn);
+
+    /* Insert SCAD button */
+    GtkWidget *insert_btn = gtk_button_new_with_label("Insert SCAD");
+    gtk_widget_set_focusable(insert_btn, FALSE);
+    gtk_widget_set_tooltip_text(insert_btn,
+        "Insert self-contained bezier module into code editor (Ctrl+I)");
+    g_signal_connect(insert_btn, "clicked",
+                     G_CALLBACK(on_insert_clicked), ed);
+    gtk_box_append(GTK_BOX(toolbar), insert_btn);
 
     gtk_box_append(GTK_BOX(ed->container), toolbar);
 
@@ -1352,6 +1405,55 @@ dc_bezier_editor_export_scad(DC_BezierEditor *editor,
     free(name);
     dc_scad_spans_free(spans, num_spans);
     return rc;
+}
+
+/* -------------------------------------------------------------------------
+ * dc_bezier_editor_set_code_editor
+ * ---------------------------------------------------------------------- */
+void
+dc_bezier_editor_set_code_editor(DC_BezierEditor *editor,
+                                  DC_CodeEditor *code_ed)
+{
+    if (!editor) return;
+    editor->code_ed = code_ed;
+}
+
+/* -------------------------------------------------------------------------
+ * dc_bezier_editor_insert_scad — insert inline SCAD at cursor
+ * ---------------------------------------------------------------------- */
+int
+dc_bezier_editor_insert_scad(DC_BezierEditor *editor, DC_Error *err)
+{
+    if (!editor) {
+        if (err)
+            DC_SET_ERROR(err, DC_ERROR_INVALID_ARG,
+                         "insert_scad: editor required");
+        return -1;
+    }
+    if (!editor->code_ed) {
+        if (err)
+            DC_SET_ERROR(err, DC_ERROR_INVALID_ARG,
+                         "insert_scad: no code editor connected");
+        return -1;
+    }
+
+    int num_spans = 0;
+    DC_ScadSpan *spans = dc_bezier_editor_get_spans(editor, &num_spans);
+    if (!spans || num_spans <= 0) {
+        if (err)
+            DC_SET_ERROR(err, DC_ERROR_INVALID_ARG,
+                         "insert_scad: need at least 2 points");
+        return -1;
+    }
+
+    char *src = dc_scad_generate_inline("shape", spans, num_spans,
+                                         editor->closed, 1.0, err);
+    dc_scad_spans_free(spans, num_spans);
+    if (!src) return -1;
+
+    dc_code_editor_insert_at_cursor(editor->code_ed, src);
+    free(src);
+    return 0;
 }
 
 /* -------------------------------------------------------------------------

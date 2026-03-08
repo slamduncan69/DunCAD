@@ -14,6 +14,7 @@
 #include <gtk/gtk.h>
 #include "scad/scad_export.h"
 
+typedef struct DC_CodeEditor DC_CodeEditor;
 typedef struct DC_BezierEditor DC_BezierEditor;
 
 DC_BezierEditor *dc_bezier_editor_new(void);
@@ -65,5 +66,14 @@ DC_ScadSpan     *dc_bezier_editor_get_spans(const DC_BezierEditor *editor,
 int              dc_bezier_editor_export_scad(DC_BezierEditor *editor,
                                               const char *path,
                                               DC_Error *err);
+
+/* Set the code editor reference for Insert SCAD. */
+void             dc_bezier_editor_set_code_editor(DC_BezierEditor *editor,
+                                                   DC_CodeEditor *code_ed);
+
+/* Insert self-contained bezier SCAD at the code editor cursor.
+ * Returns 0 on success, -1 on error. */
+int              dc_bezier_editor_insert_scad(DC_BezierEditor *editor,
+                                               DC_Error *err);
 
 #endif /* DC_BEZIER_EDITOR_H */

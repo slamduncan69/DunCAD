@@ -46,4 +46,10 @@ void dc_code_editor_set_window(DC_CodeEditor *ed, GtkWidget *window);
  * Scrolls the editor to show the selection. */
 void dc_code_editor_select_lines(DC_CodeEditor *ed, int line_start, int line_end);
 
+/* Insert text at the current cursor position. */
+void dc_code_editor_insert_at_cursor(DC_CodeEditor *ed, const char *text);
+
+/* Get the underlying GtkSourceBuffer (borrowed). */
+GtkTextBuffer *dc_code_editor_get_buffer(DC_CodeEditor *ed);
+
 #endif /* DC_CODE_EDITOR_H */

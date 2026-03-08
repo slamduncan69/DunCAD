@@ -206,6 +206,82 @@ test_export_null_path(void)
 }
 
 /* -------------------------------------------------------------------------
+ * Inline generation tests
+ * ---------------------------------------------------------------------- */
+
+static int
+test_inline_closed(void)
+{
+    DC_Point2 pts[] = {{0.0, 0.0}, {5.0, 10.0}, {10.0, 0.0}};
+    DC_ScadSpan span = { .points = pts, .count = 3 };
+
+    DC_Error err = {0};
+    char *src = dc_scad_generate_inline("heart", &span, 1, 1, 1.0, &err);
+    ASSERT(src != NULL);
+    ASSERT(err.code == DC_OK);
+
+    /* Should be self-contained (no use <...>) */
+    ASSERT(strstr(src, "use <") == NULL);
+
+    /* Should have embedded bezier math */
+    ASSERT(strstr(src, "_heart_decasteljau") != NULL);
+    ASSERT(strstr(src, "_heart_lerp") != NULL);
+    ASSERT(strstr(src, "_heart_path") != NULL);
+
+    /* Should have span data */
+    ASSERT(strstr(src, "heart_spans") != NULL);
+
+    /* Should have 2D module with polygon (closed) */
+    ASSERT(strstr(src, "module heart_2d()") != NULL);
+    ASSERT(strstr(src, "polygon(") != NULL);
+
+    /* Should have 3D modules */
+    ASSERT(strstr(src, "module heart(height") != NULL);
+    ASSERT(strstr(src, "linear_extrude") != NULL);
+    ASSERT(strstr(src, "module heart_revolve(angle") != NULL);
+    ASSERT(strstr(src, "rotate_extrude") != NULL);
+    ASSERT(strstr(src, "module heart_offset(r") != NULL);
+
+    /* Should have preview call */
+    ASSERT(strstr(src, "heart();") != NULL);
+
+    free(src);
+    return 0;
+}
+
+static int
+test_inline_open(void)
+{
+    DC_Point2 pts[] = {{0.0, 0.0}, {5.0, 10.0}, {10.0, 0.0}};
+    DC_ScadSpan span = { .points = pts, .count = 3 };
+
+    char *src = dc_scad_generate_inline("wire", &span, 1, 0, 2.0, NULL);
+    ASSERT(src != NULL);
+
+    /* Open curve should use hull-chained circles for stroke */
+    ASSERT(strstr(src, "hull()") != NULL);
+    ASSERT(strstr(src, "module wire_2d(width") != NULL);
+    ASSERT(strstr(src, "circle(d = width)") != NULL);
+
+    free(src);
+    return 0;
+}
+
+static int
+test_inline_null_args(void)
+{
+    DC_Point2 pts[] = {{0.0, 0.0}};
+    DC_ScadSpan span = { .points = pts, .count = 1 };
+    DC_Error err = {0};
+
+    char *src = dc_scad_generate_inline(NULL, &span, 1, 1, 1.0, &err);
+    ASSERT(src == NULL);
+    ASSERT(err.code == DC_ERROR_INVALID_ARG);
+
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 int
@@ -222,6 +298,9 @@ main(void)
     RUN_TEST(test_spans_free_null);
     RUN_TEST(test_export_writes_files);
     RUN_TEST(test_export_null_path);
+    RUN_TEST(test_inline_closed);
+    RUN_TEST(test_inline_open);
+    RUN_TEST(test_inline_null_args);
 
     fprintf(stderr, "=== %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

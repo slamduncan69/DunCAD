@@ -311,6 +311,9 @@ dc_app_window_create(GtkApplication *app)
      * automatic cleanup via destroy-notify. */
     dc_bezier_editor_set_window(editor, window);
 
+    /* Connect bezier editor to code editor for Insert SCAD */
+    dc_bezier_editor_set_code_editor(editor, code_ed);
+
     /* Wire the code editor to the window */
     dc_code_editor_set_window(code_ed, window);
     g_object_set_data_full(G_OBJECT(window), "dc-code-editor", code_ed,

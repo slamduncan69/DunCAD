@@ -465,3 +465,26 @@ dc_code_editor_select_lines(DC_CodeEditor *ed, int line_start, int line_end)
     GtkTextMark *mark = gtk_text_buffer_get_insert(buf);
     gtk_text_view_scroll_mark_onscreen(GTK_TEXT_VIEW(ed->view), mark);
 }
+
+/* -------------------------------------------------------------------------
+ * dc_code_editor_insert_at_cursor
+ * ---------------------------------------------------------------------- */
+void
+dc_code_editor_insert_at_cursor(DC_CodeEditor *ed, const char *text)
+{
+    if (!ed || !text) return;
+    gtk_text_buffer_insert_at_cursor(GTK_TEXT_BUFFER(ed->buffer), text, -1);
+    /* Scroll to show the insertion point */
+    GtkTextMark *mark = gtk_text_buffer_get_insert(GTK_TEXT_BUFFER(ed->buffer));
+    gtk_text_view_scroll_mark_onscreen(GTK_TEXT_VIEW(ed->view), mark);
+}
+
+/* -------------------------------------------------------------------------
+ * dc_code_editor_get_buffer
+ * ---------------------------------------------------------------------- */
+GtkTextBuffer *
+dc_code_editor_get_buffer(DC_CodeEditor *ed)
+{
+    if (!ed) return NULL;
+    return GTK_TEXT_BUFFER(ed->buffer);
+}
