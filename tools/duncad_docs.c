@@ -1196,6 +1196,7 @@ static const char HELP_SESSIONS[] =
 "  duncad-docs sessions s007   2026-03-06  FAILED: Code editor autocompletion\n"
 "  duncad-docs sessions s008   2026-03-06  Custom popover autocompletion (WORKING)\n"
 "  duncad-docs sessions s009   2026-03-06  Multi-object picking + transform panel\n"
+"  duncad-docs sessions s010   2026-03-07  FAILED: Bezier live sync to code editor\n"
 "\n"
 "SEE ALSO:\n"
 "  duncad-docs phases   Phase status and scheduled work\n"
@@ -1682,6 +1683,73 @@ static const char HELP_SESSIONS_S009[] =
 "  duncad-docs sessions s008   Previous session (autocompletion)\n"
 "  duncad-docs scad             SCAD module overview\n";
 
+static const char HELP_SESSIONS_S010[] =
+"SESSIONS: S010 -- 2026-03-07: FAILED: Bezier Live Sync to Code Editor\n"
+"\n"
+"PLATFORM: Claude Code (Opus 4.6)\n"
+"STATUS: FAILED. Reverted entirely at user's command.\n"
+"\n"
+"GOAL:\n"
+"  Replace the bezier editor's file-based Export with live sync to the\n"
+"  code editor. Every point add/drag/delete should instantly update\n"
+"  SCAD code in the IDE's left panel, like the transform panel does.\n"
+"\n"
+"APPROACH TAKEN:\n"
+"  1. Added DC_CodeEditor* to DC_BezierEditor struct\n"
+"  2. Added dc_bezier_editor_set_code_editor() API\n"
+"  3. Created sync_scad() that generates SCAD and inserts/replaces a\n"
+"     marker-delimited block in the code editor:\n"
+"       // --- DunCAD Bezier Begin ---\n"
+"       ... generated SCAD ...\n"
+"       // --- DunCAD Bezier End ---\n"
+"  4. Called sync_scad() from refresh_panel() so every mutation syncs\n"
+"  5. Created dc_scad_generate_inline() — self-contained SCAD with\n"
+"     embedded library (no use <duncad_bezier.scad> dependency)\n"
+"  6. Changed Export button to 'Sync SCAD'\n"
+"  7. Wired code editor in app_window.c\n"
+"\n"
+"PROBLEMS:\n"
+"  1. Original dc_scad_generate() uses 'use <duncad_bezier.scad>'\n"
+"     which references a companion file that doesn't exist when\n"
+"     rendering from the code editor. Fixed with inline variant.\n"
+"  2. Open curves use hull()-based path with circle(0.01) — produces\n"
+"     invisible geometry. Fixed to circle(0.5) but still ugly.\n"
+"  3. App kept crashing during testing — likely from sync_scad()\n"
+"     being called during GTK widget construction before editor\n"
+"     was fully initialized.\n"
+"  4. The generated SCAD module structure itself was not producing\n"
+"     usable renderable output in the viewport.\n"
+"  5. User judged the overall approach unworthy and ordered revert.\n"
+"\n"
+"LESSONS:\n"
+"  - The SCAD export module (dc_scad_generate) was designed for\n"
+"    file-based export with a companion library. Inline embedding\n"
+"    is a different use case that needs proper design, not a hack.\n"
+"  - Calling sync from refresh_panel() fires during construction\n"
+"    and every selection change, not just data mutations. Need a\n"
+"    dedicated 'data changed' hook separate from UI refresh.\n"
+"  - The open-shape hull-chain approach produces poor geometry.\n"
+"    A proper bezier-to-polygon tessellation would be better.\n"
+"  - Test the SCAD output renders correctly BEFORE wiring live\n"
+"    sync. Validate the generated code independently first.\n"
+"\n"
+"WHAT TO DO NEXT TIME:\n"
+"  1. First: make dc_scad_generate produce self-contained, renderable\n"
+"     SCAD that works in isolation (test with openscad CLI)\n"
+"  2. Then: design the sync mechanism carefully — debounce during\n"
+"     drag, don't fire during construction, use a 'dirty' flag\n"
+"  3. Consider: should the bezier block replace the entire editor\n"
+"     content, or coexist with user-written code? Markers are\n"
+"     fragile if the user edits inside them.\n"
+"  4. Consider: write companion library to /tmp/ automatically\n"
+"     instead of inlining, so the existing export format works.\n"
+"\n"
+"FILES CHANGED: None (all reverted)\n"
+"\n"
+"SEE ALSO:\n"
+"  duncad-docs sessions s009   Previous session (picking + transforms)\n"
+"  duncad-docs scad export     Current file-based export system\n";
+
 
 /* ---- TREE REGISTRY ---- */
 
@@ -1769,6 +1837,7 @@ static const struct help_node TREE[] = {
     { "sessions.s007",               HELP_SESSIONS_S007 },
     { "sessions.s008",               HELP_SESSIONS_S008 },
     { "sessions.s009",               HELP_SESSIONS_S009 },
+    { "sessions.s010",               HELP_SESSIONS_S010 },
 
     /* add new nodes above this line */
     { NULL, NULL }
