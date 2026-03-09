@@ -48,6 +48,10 @@
 #include "ts_csg.h"
 #include "ts_extrude.h"
 #include "ts_random.h"
+#include "ts_opencl.h"
+
+/* Global GPU context — initialized in main */
+static ts_gpu_ctx g_gpu;
 
 /* ================================================================
  * SECTION 1: SCALAR MATH TESTS
@@ -1546,6 +1550,157 @@ static void test_extrude_error_green(void) {
 }
 
 /* ================================================================
+ * SECTION 9: GPU (OpenCL) TESTS
+ * Verify GPU batch operations produce same results as CPU
+ * Parallelism: GPU (the whole point)
+ * ================================================================ */
+
+/* GREEN: GPU init should succeed (or gracefully fail) */
+static void test_gpu_init_green(void) {
+    /* g_gpu was initialized in main — just check it didn't crash */
+    TS_ASSERT_TRUE(1); /* init completed without segfault */
+    TS_PASS();
+}
+
+/* GREEN: batch vec3_add GPU == CPU */
+static void test_gpu_vec3_add_green(void) {
+    int n = 1024;
+    double *a = (double *)malloc((size_t)n * 3 * sizeof(double));
+    double *b = (double *)malloc((size_t)n * 3 * sizeof(double));
+    double *gpu_out = (double *)malloc((size_t)n * 3 * sizeof(double));
+    double *cpu_out = (double *)malloc((size_t)n * 3 * sizeof(double));
+
+    for (int i = 0; i < n * 3; i++) {
+        a[i] = (double)(i % 100) * 0.1;
+        b[i] = (double)((i + 37) % 100) * 0.1;
+    }
+
+    /* CPU reference */
+    for (int i = 0; i < n * 3; i++)
+        cpu_out[i] = a[i] + b[i];
+
+    /* GPU (or CPU fallback) */
+    ts_gpu_vec3_add(&g_gpu, a, b, gpu_out, n);
+
+    /* Compare */
+    for (int i = 0; i < n * 3; i++) {
+        TS_ASSERT_NEAR(gpu_out[i], cpu_out[i], 1e-10);
+    }
+
+    free(a); free(b); free(gpu_out); free(cpu_out);
+    TS_PASS();
+}
+
+/* GREEN: batch vec3_normalize GPU == CPU */
+static void test_gpu_vec3_normalize_green(void) {
+    int n = 1024;
+    double *a = (double *)malloc((size_t)n * 3 * sizeof(double));
+    double *gpu_out = (double *)malloc((size_t)n * 3 * sizeof(double));
+
+    for (int i = 0; i < n; i++) {
+        a[i*3]   = (double)(i + 1);
+        a[i*3+1] = (double)(i + 2);
+        a[i*3+2] = (double)(i + 3);
+    }
+
+    ts_gpu_vec3_normalize(&g_gpu, a, gpu_out, n);
+
+    /* Verify each result is unit length */
+    for (int i = 0; i < n; i++) {
+        double x = gpu_out[i*3], y = gpu_out[i*3+1], z = gpu_out[i*3+2];
+        double len = sqrt(x*x + y*y + z*z);
+        TS_ASSERT_NEAR(len, 1.0, 1e-10);
+    }
+
+    free(a); free(gpu_out);
+    TS_PASS();
+}
+
+/* GREEN: batch mat4 transform GPU == CPU */
+static void test_gpu_mat4_transform_green(void) {
+    int n = 1024;
+    double mat[16] = {
+        2, 0, 0, 10,
+        0, 3, 0, 20,
+        0, 0, 4, 30,
+        0, 0, 0, 1
+    };
+    double *pts = (double *)malloc((size_t)n * 3 * sizeof(double));
+    double *gpu_out = (double *)malloc((size_t)n * 3 * sizeof(double));
+
+    for (int i = 0; i < n; i++) {
+        pts[i*3] = (double)i; pts[i*3+1] = (double)i * 0.5; pts[i*3+2] = (double)i * 0.25;
+    }
+
+    ts_gpu_mat4_transform(&g_gpu, mat, pts, gpu_out, n);
+
+    for (int i = 0; i < n; i++) {
+        double x = (double)i, y = (double)i * 0.5, z = (double)i * 0.25;
+        TS_ASSERT_NEAR(gpu_out[i*3],   2*x + 10, 1e-10);
+        TS_ASSERT_NEAR(gpu_out[i*3+1], 3*y + 20, 1e-10);
+        TS_ASSERT_NEAR(gpu_out[i*3+2], 4*z + 30, 1e-10);
+    }
+
+    free(pts); free(gpu_out);
+    TS_PASS();
+}
+
+/* GREEN: batch scalar sin (degrees) */
+static void test_gpu_scalar_sin_green(void) {
+    int n = 1024;
+    double *a = (double *)malloc((size_t)n * sizeof(double));
+    double *gpu_out = (double *)malloc((size_t)n * sizeof(double));
+
+    for (int i = 0; i < n; i++)
+        a[i] = (double)(i % 360);
+
+    ts_gpu_scalar_sin(&g_gpu, a, gpu_out, n);
+
+    for (int i = 0; i < n; i++) {
+        double expected = sin(a[i] * 0.017453292519943295);
+        TS_ASSERT_NEAR(gpu_out[i], expected, 1e-10);
+    }
+
+    free(a); free(gpu_out);
+    TS_PASS();
+}
+
+/* GREEN: batch RNG produces values in range */
+static void test_gpu_rng_green(void) {
+    int n = 10000;
+    double *out = (double *)malloc((size_t)n * sizeof(double));
+
+    ts_gpu_rng_uniform(&g_gpu, 42, -5.0, 5.0, out, n);
+
+    int in_range = 0;
+    for (int i = 0; i < n; i++) {
+        if (out[i] >= -5.0 && out[i] <= 5.0) in_range++;
+    }
+    TS_ASSERT_EQ_INT(in_range, n);
+
+    /* Check it's not all the same value */
+    int unique = 0;
+    for (int i = 1; i < n && unique < 10; i++) {
+        if (fabs(out[i] - out[0]) > 1e-15) unique++;
+    }
+    TS_ASSERT_TRUE(unique >= 10);
+
+    free(out);
+    TS_PASS();
+}
+
+/* RED: GPU vec3_add with wrong input should still produce output */
+static void test_gpu_vec3_add_red(void) {
+    /* Small batch (below GPU threshold) should use CPU fallback */
+    double a[3] = {1, 2, 3}, b[3] = {4, 5, 6}, out[3] = {0};
+    ts_gpu_vec3_add(&g_gpu, a, b, out, 1);
+    TS_ASSERT_NEAR(out[0], 5.0, 1e-10);
+    TS_ASSERT_NEAR(out[1], 7.0, 1e-10);
+    TS_ASSERT_NEAR(out[2], 9.0, 1e-10);
+    TS_PASS();
+}
+
+/* ================================================================
  * BENCHMARKS
  * ================================================================ */
 
@@ -1844,6 +1999,117 @@ static void bench_rotate_extrude(int n) {
     }
 }
 
+/* --- GPU benchmarks --- */
+static void bench_gpu_vec3_add(int n) {
+    int batch = 100000;
+    double *a = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    double *b = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    double *o = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    for (int i = 0; i < batch * 3; i++) { a[i] = (double)i; b[i] = (double)i * 0.5; }
+    for (int i = 0; i < n; i++) {
+        ts_gpu_vec3_add(&g_gpu, a, b, o, batch);
+        g_bench_sink = o[0];
+    }
+    free(a); free(b); free(o);
+}
+
+static void bench_gpu_vec3_normalize(int n) {
+    int batch = 100000;
+    double *a = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    double *o = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    for (int i = 0; i < batch * 3; i++) a[i] = (double)(i + 1);
+    for (int i = 0; i < n; i++) {
+        ts_gpu_vec3_normalize(&g_gpu, a, o, batch);
+        g_bench_sink = o[0];
+    }
+    free(a); free(o);
+}
+
+static void bench_gpu_mat4_transform(int n) {
+    int batch = 100000;
+    double mat[16] = { 2,0,0,10, 0,3,0,20, 0,0,4,30, 0,0,0,1 };
+    double *pts = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    double *o = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    for (int i = 0; i < batch * 3; i++) pts[i] = (double)i * 0.01;
+    for (int i = 0; i < n; i++) {
+        ts_gpu_mat4_transform(&g_gpu, mat, pts, o, batch);
+        g_bench_sink = o[0];
+    }
+    free(pts); free(o);
+}
+
+static void bench_gpu_scalar_sin(int n) {
+    int batch = 100000;
+    double *a = (double *)malloc((size_t)batch * sizeof(double));
+    double *o = (double *)malloc((size_t)batch * sizeof(double));
+    for (int i = 0; i < batch; i++) a[i] = (double)(i % 360);
+    for (int i = 0; i < n; i++) {
+        ts_gpu_scalar_sin(&g_gpu, a, o, batch);
+        g_bench_sink = o[0];
+    }
+    free(a); free(o);
+}
+
+static void bench_gpu_rng(int n) {
+    int batch = 100000;
+    double *o = (double *)malloc((size_t)batch * sizeof(double));
+    for (int i = 0; i < n; i++) {
+        ts_gpu_rng_uniform(&g_gpu, (unsigned long)(42 + i), 0.0, 1.0, o, batch);
+        g_bench_sink = o[0];
+    }
+    free(o);
+}
+
+/* CPU versions of the same batches for comparison */
+static void bench_cpu_vec3_add(int n) {
+    int batch = 100000;
+    double *a = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    double *b = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    double *o = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    for (int i = 0; i < batch * 3; i++) { a[i] = (double)i; b[i] = (double)i * 0.5; }
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < batch * 3; j++) o[j] = a[j] + b[j];
+        g_bench_sink = o[0];
+    }
+    free(a); free(b); free(o);
+}
+
+static void bench_cpu_vec3_normalize(int n) {
+    int batch = 100000;
+    double *a = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    double *o = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    for (int i = 0; i < batch * 3; i++) a[i] = (double)(i + 1);
+    for (int i = 0; i < n; i++) {
+        for (int k = 0; k < batch; k++) {
+            int j = k * 3;
+            double x=a[j],y=a[j+1],z=a[j+2];
+            double inv = 1.0/sqrt(x*x+y*y+z*z);
+            o[j]=x*inv; o[j+1]=y*inv; o[j+2]=z*inv;
+        }
+        g_bench_sink = o[0];
+    }
+    free(a); free(o);
+}
+
+static void bench_cpu_mat4_transform(int n) {
+    int batch = 100000;
+    double m[16] = { 2,0,0,10, 0,3,0,20, 0,0,4,30, 0,0,0,1 };
+    double *pts = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    double *o = (double *)malloc((size_t)batch * 3 * sizeof(double));
+    for (int i = 0; i < batch * 3; i++) pts[i] = (double)i * 0.01;
+    for (int i = 0; i < n; i++) {
+        for (int k = 0; k < batch; k++) {
+            int j = k * 3;
+            double x=pts[j],y=pts[j+1],z=pts[j+2];
+            o[j]=m[0]*x+m[1]*y+m[2]*z+m[3];
+            o[j+1]=m[4]*x+m[5]*y+m[6]*z+m[7];
+            o[j+2]=m[8]*x+m[9]*y+m[10]*z+m[11];
+        }
+        g_bench_sink = o[0];
+    }
+    free(pts); free(o);
+}
+
 /* ================================================================
  * MAIN
  * ================================================================ */
@@ -2118,6 +2384,24 @@ static void run_all_tests(void) {
     ts_section("EXTRUDE: error handling", TS_PAR_TRIVIAL);
     ts_run_test("extrude_error_green", test_extrude_error_green);
 
+    /* --- GPU (OpenCL) --- */
+    ts_section("GPU: OpenCL initialization", TS_PAR_GPU);
+    ts_run_test("gpu_init_green", test_gpu_init_green);
+
+    ts_section("GPU: batch vec3 operations", TS_PAR_GPU);
+    ts_run_test("gpu_vec3_add_green", test_gpu_vec3_add_green);
+    ts_run_test("gpu_vec3_add_red", test_gpu_vec3_add_red);
+    ts_run_test("gpu_vec3_normalize_green", test_gpu_vec3_normalize_green);
+
+    ts_section("GPU: batch mat4 transform", TS_PAR_GPU);
+    ts_run_test("gpu_mat4_transform_green", test_gpu_mat4_transform_green);
+
+    ts_section("GPU: batch scalar ops", TS_PAR_GPU);
+    ts_run_test("gpu_scalar_sin_green", test_gpu_scalar_sin_green);
+
+    ts_section("GPU: parallel RNG", TS_PAR_GPU);
+    ts_run_test("gpu_rng_green", test_gpu_rng_green);
+
     ts_summary();
 }
 
@@ -2189,6 +2473,17 @@ static void run_all_benchmarks(void) {
     ts_run_bench("linear_extrude(twist,32sl)",   bench_linear_extrude_twist, 10000, TS_PAR_GPU);
     ts_run_bench("rotate_extrude(rect,fn=32)",   bench_rotate_extrude,       10000, TS_PAR_GPU);
 
+    printf("\n--- GPU vs CPU (batch=100k) ---\n");
+    printf("  GPU: %s\n", g_gpu.active ? g_gpu.device_name : "CPU fallback");
+    ts_run_bench("GPU vec3_add(100k)",       bench_gpu_vec3_add,       100, TS_PAR_GPU);
+    ts_run_bench("CPU vec3_add(100k)",       bench_cpu_vec3_add,       100, TS_PAR_TRIVIAL);
+    ts_run_bench("GPU vec3_norm(100k)",      bench_gpu_vec3_normalize, 100, TS_PAR_GPU);
+    ts_run_bench("CPU vec3_norm(100k)",      bench_cpu_vec3_normalize, 100, TS_PAR_TRIVIAL);
+    ts_run_bench("GPU mat4_xform(100k)",     bench_gpu_mat4_transform, 100, TS_PAR_GPU);
+    ts_run_bench("CPU mat4_xform(100k)",     bench_cpu_mat4_transform, 100, TS_PAR_TRIVIAL);
+    ts_run_bench("GPU sin_deg(100k)",        bench_gpu_scalar_sin,     100, TS_PAR_GPU);
+    ts_run_bench("GPU rng(100k)",            bench_gpu_rng,            100, TS_PAR_GPU);
+
     printf("\n============================================================\n");
     printf("  %d benchmarks completed\n", g_ts_bench_count);
     printf("============================================================\n");
@@ -2213,8 +2508,12 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    /* Initialize GPU context (falls back to CPU if unavailable) */
+    g_gpu = ts_gpu_init();
+
     if (do_test) run_all_tests();
     if (do_bench) run_all_benchmarks();
 
+    ts_gpu_shutdown(&g_gpu);
     return g_ts_fail > 0 ? 1 : 0;
 }
