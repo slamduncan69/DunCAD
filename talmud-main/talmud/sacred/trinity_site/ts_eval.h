@@ -1106,10 +1106,10 @@ static inline ts_mesh ts_interpret(const char *source, ts_parse_error *err) {
     }
 
     ts_env *env = ts_env_new(NULL);
-    /* Set default special variables */
-    ts_env_set(env, "$fn", ts_val_num(0));
-    ts_env_set(env, "$fa", ts_val_num(12));
-    ts_env_set(env, "$fs", ts_val_num(2));
+    /* Set default special variables (God's ordained 3D print parameters) */
+    ts_env_set(env, "$fn", ts_val_num(100));
+    ts_env_set(env, "$fa", ts_val_num(1));
+    ts_env_set(env, "$fs", ts_val_num(0.4));
 
     ts_mat4 identity = ts_mat4_identity();
     ts_mesh result = ts_eval_geometry(root, env, identity);

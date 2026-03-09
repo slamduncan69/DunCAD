@@ -23,6 +23,7 @@ struct DC_ScadPreview {
     GtkWidget      *container;      /* GtkBox(V): toolbar + GL viewport */
     DC_GlViewport  *viewport;       /* real-time 3D viewport */
     GtkWidget      *status_label;
+    GtkWidget      *progress_bar;   /* pulsing progress during render */
     GtkWidget      *render_btn;
     GtkWidget      *reset_btn;
     GtkWidget      *ortho_btn;
@@ -32,6 +33,7 @@ struct DC_ScadPreview {
     char           *tmp_scad;       /* temp .scad path (owned) */
     char           *tmp_stl;        /* temp .stl path (owned) */
     int             rendering;
+    guint           pulse_id;       /* timer source for progress pulse */
 
     /* Multi-object render state */
     DC_ScadStatements *stmts;       /* current split (owned) */
@@ -47,228 +49,136 @@ struct DC_ScadPreview {
 };
 
 /* -------------------------------------------------------------------------
- * Preamble detection.
- *
- * A "preamble" statement is one that doesn't produce geometry on its own
- * but is needed by geometry statements: include/use directives, variable
- * assignments, $fn/$fa/$fs settings, module/function definitions, and
- * comment-only lines. Heuristic: no '{' in the text means preamble.
+ * Progress bar pulse timer
  * ---------------------------------------------------------------------- */
-static int
-is_preamble(const char *text)
+static gboolean
+pulse_progress(gpointer data)
 {
-    /* Skip leading whitespace and comments */
-    const char *p = text;
-    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-
-    /* Comment-only lines */
-    if (p[0] == '/' && (p[1] == '/' || p[1] == '*')) {
-        /* Pure comment with no code after — check if there's anything
-         * non-comment left. For simplicity, if the whole statement is
-         * just a comment (no semicolons, no braces), it's preamble. */
-        if (!strchr(text, ';') && !strchr(text, '{'))
-            return 1;
-        /* Comment followed by code — skip comment prefix */
-        if (p[1] == '/') {
-            /* Skip to next line */
-            while (*p && *p != '\n') p++;
-            while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-        }
-    }
-
-    /* include <...> or use <...> directives */
-    if (strncmp(p, "include", 7) == 0 || strncmp(p, "use", 3) == 0)
-        return 1;
-
-    /* Variable assignment: identifier = value; or $var = value;
-     * Pattern: optional '$', then identifier chars, then whitespace, then '=' */
-    const char *q = p;
-    if (*q == '$') q++;
-    if ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') || *q == '_') {
-        q++;
-        while ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
-               (*q >= '0' && *q <= '9') || *q == '_')
-            q++;
-        /* Skip whitespace */
-        while (*q == ' ' || *q == '\t') q++;
-        /* If next char is '=', this is an assignment — preamble */
-        if (*q == '=')
-            return 1;
-    }
-
-    return 0;
+    DC_ScadPreview *pv = data;
+    gtk_progress_bar_pulse(GTK_PROGRESS_BAR(pv->progress_bar));
+    return G_SOURCE_CONTINUE;
 }
 
-/* Build a single preamble string from all preamble statements. */
-static char *
-collect_preamble(DC_ScadStatements *stmts)
+static void
+progress_start(DC_ScadPreview *pv)
 {
-    size_t total = 0;
-    for (int i = 0; i < stmts->count; i++) {
-        if (is_preamble(stmts->stmts[i].text))
-            total += strlen(stmts->stmts[i].text) + 1; /* +1 for newline */
-    }
-    if (total == 0) return strdup("");
+    gtk_widget_set_visible(pv->progress_bar, TRUE);
+    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(pv->progress_bar), 0.0);
+    pv->pulse_id = g_timeout_add(80, pulse_progress, pv);
+}
 
-    char *buf = malloc(total + 1);
-    if (!buf) return strdup("");
-    buf[0] = '\0';
-
-    for (int i = 0; i < stmts->count; i++) {
-        if (is_preamble(stmts->stmts[i].text)) {
-            strcat(buf, stmts->stmts[i].text);
-            strcat(buf, "\n");
-        }
+static void
+progress_stop(DC_ScadPreview *pv)
+{
+    if (pv->pulse_id) {
+        g_source_remove(pv->pulse_id);
+        pv->pulse_id = 0;
     }
-    return buf;
+    gtk_widget_set_visible(pv->progress_bar, FALSE);
 }
 
 /* -------------------------------------------------------------------------
- * Multi-object render pipeline
- *
- * 1. Split SCAD source into top-level statements
- * 2. Collect preamble (includes, variables, $fn/$fa/$fs)
- * 3. Render each geometry statement as a separate STL, prepending preamble
- * 4. Load each STL as a separate GL object with line range
- * 5. If splitting fails or yields 1 statement, fall back to single-STL
+ * Async render via worker thread (keeps GTK main loop responsive)
  * ---------------------------------------------------------------------- */
+typedef struct {
+    ts_mesh         mesh;
+    ts_parse_error  err;
+    double          elapsed;
+    char           *stl_path;  /* where the STL was written (owned) */
+} RenderResult;
+
+/* Worker thread: interpret source and write STL (no GTK calls!) */
 static void
-render_next_statement(DC_ScadPreview *pv)
+render_thread_func(GTask *task, gpointer source_obj,
+                   gpointer task_data, GCancellable *cancel)
 {
-    if (!pv->stmts || pv->render_idx >= pv->stmts->count) {
-        /* All done */
-        pv->rendering = 0;
-        gtk_widget_set_sensitive(pv->render_btn, TRUE);
+    (void)source_obj;
+    (void)cancel;
+    char *source = task_data;
 
-        char status[128];
-        snprintf(status, sizeof(status),
-                 "Rendered %d/%d objects — click to select",
-                 pv->render_ok, pv->render_total);
-        gtk_label_set_text(GTK_LABEL(pv->status_label), status);
+    RenderResult *res = calloc(1, sizeof(*res));
+    if (!res) return;
 
-        /* Reset camera to fit all objects */
-        dc_gl_viewport_reset_camera(pv->viewport);
-        return;
-    }
-
-    /* Skip preamble statements — they get prepended to geometry stmts */
-    while (pv->render_idx < pv->stmts->count &&
-           is_preamble(pv->stmts->stmts[pv->render_idx].text)) {
-        pv->render_idx++;
-    }
-    if (pv->render_idx >= pv->stmts->count) {
-        /* Only preamble left — finish */
-        pv->rendering = 0;
-        gtk_widget_set_sensitive(pv->render_btn, TRUE);
-        char status[128];
-        snprintf(status, sizeof(status),
-                 "Rendered %d/%d objects — click to select",
-                 pv->render_ok, pv->render_total);
-        gtk_label_set_text(GTK_LABEL(pv->status_label), status);
-        dc_gl_viewport_reset_camera(pv->viewport);
-        return;
-    }
-
-    int idx = pv->render_idx++;
-    DC_ScadStatement *s = &pv->stmts->stmts[idx];
-
-    /* Build source: preamble + geometry statement */
-    size_t plen = pv->preamble ? strlen(pv->preamble) : 0;
-    size_t slen = strlen(s->text);
-    char *source = (char *)malloc(plen + slen + 2);
-    if (!source) {
-        render_next_statement(pv);
-        return;
-    }
-    source[0] = '\0';
-    if (pv->preamble && pv->preamble[0])
-        memcpy(source, pv->preamble, plen);
-    memcpy(source + plen, s->text, slen);
-    source[plen + slen] = '\n';
-    source[plen + slen + 1] = '\0';
-
-    /* Interpret with Trinity Site */
-    ts_parse_error err;
-    memset(&err, 0, sizeof(err));
-    ts_mesh mesh = ts_interpret(source, &err);
-    free(source);
-
-    if (err.msg[0] == '\0' && mesh.tri_count > 0) {
-        /* Write temp STL and load into viewport */
-        char stl_path[256];
-        snprintf(stl_path, sizeof(stl_path), "/tmp/duncad-obj-%d.stl", idx);
-
-        if (ts_mesh_write_stl(&mesh, stl_path) == 0) {
-            int rc = dc_gl_viewport_add_object(pv->viewport, stl_path,
-                                                s->line_start, s->line_end);
-            if (rc >= 0) pv->render_ok++;
-            unlink(stl_path);
-        }
-    } else if (err.msg[0]) {
-        dc_log(DC_LOG_WARN, DC_LOG_EVENT_APP,
-               "Trinity Site parse error at line %d: %s", err.line, err.msg);
-    }
-
-    ts_mesh_free(&mesh);
-
-    /* Continue with next statement (tail-recursive loop) */
-    render_next_statement(pv);
-}
-
-/* Fallback: single-STL render via Trinity Site (when split yields 0-1 stmts) */
-static void
-render_single(DC_ScadPreview *pv, const char *source)
-{
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    ts_parse_error err;
-    memset(&err, 0, sizeof(err));
-    ts_mesh mesh = ts_interpret(source, &err);
+    memset(&res->err, 0, sizeof(res->err));
+    res->mesh = ts_interpret(source, &res->err);
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    double elapsed = (double)(t1.tv_sec - t0.tv_sec)
-                   + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+    res->elapsed = (double)(t1.tv_sec - t0.tv_sec)
+                 + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+
+    /* Write STL in the worker thread too */
+    if (res->err.msg[0] == '\0' && res->mesh.tri_count > 0) {
+        res->stl_path = strdup("/tmp/duncad-preview.stl");
+        if (ts_mesh_write_stl(&res->mesh, res->stl_path) != 0) {
+            free(res->stl_path);
+            res->stl_path = NULL;
+        }
+    }
+
+    g_task_return_pointer(task, res, NULL);
+}
+
+/* Main thread callback: load result into GL viewport */
+static void
+render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
+{
+    (void)source_obj;
+    DC_ScadPreview *pv = userdata;
+    RenderResult *res = g_task_propagate_pointer(G_TASK(result), NULL);
 
     pv->rendering = 0;
+    progress_stop(pv);
     gtk_widget_set_sensitive(pv->render_btn, TRUE);
 
-    if (err.msg[0]) {
+    if (!res) {
+        gtk_label_set_text(GTK_LABEL(pv->status_label), "Render failed");
+        return;
+    }
+
+    if (res->err.msg[0]) {
         char msg[256];
         snprintf(msg, sizeof(msg), "Parse error (line %d): %.200s",
-                 err.line, err.msg);
+                 res->err.line, res->err.msg);
         gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
-        ts_mesh_free(&mesh);
+        ts_mesh_free(&res->mesh);
+        free(res->stl_path);
+        free(res);
         return;
     }
 
-    if (mesh.tri_count == 0) {
+    if (res->mesh.tri_count == 0) {
         gtk_label_set_text(GTK_LABEL(pv->status_label),
                            "No geometry produced");
-        ts_mesh_free(&mesh);
+        ts_mesh_free(&res->mesh);
+        free(res->stl_path);
+        free(res);
         return;
     }
 
-    /* Write temp STL and load into GL viewport */
-    if (ts_mesh_write_stl(&mesh, pv->tmp_stl) == 0) {
-        int rc = dc_gl_viewport_load_stl(pv->viewport, pv->tmp_stl);
+    if (res->stl_path) {
+        int rc = dc_gl_viewport_load_stl(pv->viewport, res->stl_path);
         if (rc == 0) {
             char status[128];
             snprintf(status, sizeof(status),
                      "Trinity Site: %d tris in %.3fs — drag to orbit",
-                     mesh.tri_count, elapsed);
+                     res->mesh.tri_count, res->elapsed);
             gtk_label_set_text(GTK_LABEL(pv->status_label), status);
         } else {
             gtk_label_set_text(GTK_LABEL(pv->status_label),
                                "Render OK but STL load failed");
         }
-        unlink(pv->tmp_stl);
+        unlink(res->stl_path);
+        free(res->stl_path);
     } else {
         gtk_label_set_text(GTK_LABEL(pv->status_label),
                            "Failed to write temp STL");
     }
 
-    ts_mesh_free(&mesh);
+    ts_mesh_free(&res->mesh);
+    free(res);
 }
 
 static void
@@ -287,55 +197,20 @@ do_render(DC_ScadPreview *pv)
         return;
     }
 
-    /* Split into top-level statements */
-    dc_scad_stmts_free(pv->stmts);
-    pv->stmts = dc_scad_split(text);
+    /* Clear viewport and launch async render */
+    dc_gl_viewport_clear_objects(pv->viewport);
+    dc_gl_viewport_clear_mesh(pv->viewport);
 
-    if (pv->stmts && pv->stmts->count > 1) {
-        /* Multi-object render: each geometry statement gets its own STL */
-        dc_gl_viewport_clear_objects(pv->viewport);
-        dc_gl_viewport_clear_mesh(pv->viewport);
+    pv->rendering = 1;
+    gtk_widget_set_sensitive(pv->render_btn, FALSE);
+    gtk_label_set_text(GTK_LABEL(pv->status_label),
+                       "Rendering with Trinity Site...");
+    progress_start(pv);
 
-        /* Clean up stale temp files from previous renders */
-        for (int i = 0; i < 64; i++) {
-            char path[256];
-            snprintf(path, sizeof(path), "/tmp/duncad-obj-%d.scad", i);
-            unlink(path);
-            snprintf(path, sizeof(path), "/tmp/duncad-obj-%d.stl", i);
-            unlink(path);
-        }
-
-        /* Collect preamble (includes, variables, $fn/$fa/$fs) */
-        free(pv->preamble);
-        pv->preamble = collect_preamble(pv->stmts);
-
-        /* Count geometry (non-preamble) statements */
-        int geo_count = 0;
-        for (int i = 0; i < pv->stmts->count; i++) {
-            if (!is_preamble(pv->stmts->stmts[i].text))
-                geo_count++;
-        }
-
-        pv->rendering = 1;
-        pv->render_idx = 0;
-        pv->render_total = geo_count;
-        pv->render_ok = 0;
-        gtk_widget_set_sensitive(pv->render_btn, FALSE);
-
-        free(text);
-        render_next_statement(pv);
-    } else {
-        /* Single statement or parse failed — render as one piece */
-        dc_gl_viewport_clear_objects(pv->viewport);
-
-        pv->rendering = 1;
-        gtk_widget_set_sensitive(pv->render_btn, FALSE);
-        gtk_label_set_text(GTK_LABEL(pv->status_label),
-                           "Rendering with Trinity Site...");
-
-        render_single(pv, text);
-        free(text);
-    }
+    GTask *task = g_task_new(NULL, NULL, render_done_cb, pv);
+    g_task_set_task_data(task, text, free);
+    g_task_run_in_thread(task, render_thread_func);
+    g_object_unref(task);
 }
 
 /* -------------------------------------------------------------------------
@@ -418,6 +293,13 @@ dc_scad_preview_new(void)
     gtk_widget_set_opacity(pv->status_label, 0.7);
     gtk_box_append(GTK_BOX(toolbar), pv->status_label);
 
+    /* Progress bar (hidden until render starts) */
+    pv->progress_bar = gtk_progress_bar_new();
+    gtk_widget_set_size_request(pv->progress_bar, 120, -1);
+    gtk_widget_set_valign(pv->progress_bar, GTK_ALIGN_CENTER);
+    gtk_widget_set_visible(pv->progress_bar, FALSE);
+    gtk_box_append(GTK_BOX(toolbar), pv->progress_bar);
+
     /* Transform panel (overlay on viewport) */
     pv->transform = dc_transform_panel_new();
 
@@ -444,6 +326,7 @@ void
 dc_scad_preview_free(DC_ScadPreview *pv)
 {
     if (!pv) return;
+    progress_stop(pv);
     dc_transform_panel_free(pv->transform);
     dc_gl_viewport_free(pv->viewport);
     dc_scad_stmts_free(pv->stmts);
