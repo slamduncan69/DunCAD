@@ -112,6 +112,12 @@ get_selected_line_range(ShapeMenuCtx *ctx, int *line_start, int *line_end)
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP,
            "shape_menu: viewport sel=%d lines=%d..%d rc=%d",
            sel, *line_start, *line_end, rc);
+    if (rc == 0) {
+        /* Capture so wrap_selected's line_end update persists across calls */
+        ctx->sel_obj = sel;
+        ctx->sel_line_start = *line_start;
+        ctx->sel_line_end = *line_end;
+    }
     return rc == 0;
 }
 
@@ -148,7 +154,7 @@ wrap_selected(ShapeMenuCtx *ctx, const char *prefix, const char *suffix)
 
     /* Indent the selected block */
     size_t sel_len = (size_t)(end_ptr - start_ptr);
-    char *indented = malloc(sel_len * 2 + 1);
+    char *indented = malloc(sel_len * 5 + 8);
     if (!indented) { free(text); return; }
 
     size_t j = 0;
