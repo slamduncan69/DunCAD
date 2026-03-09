@@ -185,17 +185,22 @@ wrap_selected(ShapeMenuCtx *ctx, const char *prefix, const char *suffix)
 
     dc_code_editor_set_text(ctx->code_ed, buf);
 
+    /* Count lines in the new statement to update the captured line range.
+     * This is critical: after wrapping, the statement spans more lines.
+     * Without this update, a second modify (e.g., translate after difference)
+     * would use the stale line range and only wrap the first line. */
+    int new_end = ls;
+    for (size_t k = before_len; k < pos - after_len; k++) {
+        if (buf[k] == '\n') new_end++;
+    }
+    /* Discount trailing newline that's part of the separator, not the statement */
+    if (pos > after_len && buf[pos - after_len - 1] == '\n')
+        new_end--;
+    ctx->sel_line_end = new_end;
+
     /* Show transform panel if we just added translate or rotate */
     if (ctx->transform &&
         (strstr(prefix, "translate") || strstr(prefix, "rotate"))) {
-        /* The new statement starts at the same line. Count lines in the
-         * replacement to determine the new line_end. */
-        int new_end = ls;
-        size_t buf_start = before_len;
-        for (size_t k = buf_start; k < pos; k++) {
-            if (buf[k] == '\n') new_end++;
-        }
-        /* Extract the new statement text */
         size_t stmt_len = pos - before_len - after_len;
         char *stmt = malloc(stmt_len + 1);
         if (stmt) {
