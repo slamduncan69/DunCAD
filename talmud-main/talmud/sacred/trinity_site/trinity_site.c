@@ -1148,47 +1148,226 @@ static void test_rands_range_red(void) {
 }
 
 /* ================================================================
- * SECTION 7: CSG STUB TESTS
- * Verify stubs return NOT_IMPLEMENTED correctly
+ * SECTION 7: CSG TESTS
+ * BSP-tree boolean ops, quickhull, Minkowski sum
  * Parallelism: documented in ts_csg.h headers
  * ================================================================ */
 
-static void test_csg_union_stub(void) {
+/* Helper: compute mesh volume via divergence theorem (signed) */
+static double mesh_signed_volume(const ts_mesh *m) {
+    double vol = 0.0;
+    for (int i = 0; i < m->tri_count; i++) {
+        double *a = m->verts[m->tris[i].idx[0]].pos;
+        double *b = m->verts[m->tris[i].idx[1]].pos;
+        double *c = m->verts[m->tris[i].idx[2]].pos;
+        /* V = (1/6) * sum of a . (b x c) for each triangle */
+        vol += a[0]*(b[1]*c[2] - b[2]*c[1])
+             + a[1]*(b[2]*c[0] - b[0]*c[2])
+             + a[2]*(b[0]*c[1] - b[1]*c[0]);
+    }
+    return vol / 6.0;
+}
+
+/* --- UNION --- */
+/* GREEN: union of two non-overlapping unit cubes = volume ~2.0 */
+static void test_csg_union_green(void) {
     ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);  /* centered at origin */
+    /* Translate b to [2,0,0] — no overlap */
+    ts_gen_cube(1, 1, 1, &b);
+    for (int i = 0; i < b.vert_count; i++) b.verts[i].pos[0] += 2.0;
+
     int ret = ts_csg_union(&a, &b, &out);
-    TS_ASSERT_EQ_INT(ret, TS_CSG_NOT_IMPLEMENTED);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    /* Non-overlapping union should have all triangles from both */
+    TS_ASSERT_TRUE(out.tri_count >= 24); /* 12 + 12 */
+
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_NEAR(vol, 2.0, 0.1);
+
     ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
     TS_PASS();
 }
 
-static void test_csg_difference_stub(void) {
+/* RED: union should NOT have zero triangles */
+static void test_csg_union_red(void) {
     ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(1, 1, 1, &b);
+    for (int i = 0; i < b.vert_count; i++) b.verts[i].pos[0] += 2.0;
+
+    int ret = ts_csg_union(&a, &b, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0); /* Must NOT be empty */
+
+    ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* --- UNION OVERLAPPING --- */
+/* GREEN: overlapping cubes should produce fewer tris than 24 */
+static void test_csg_union_overlap_green(void) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(2, 2, 2, &a);
+    ts_gen_cube(2, 2, 2, &b);
+    /* Offset b by 1 unit — they overlap in a 1x2x2 region */
+    for (int i = 0; i < b.vert_count; i++) b.verts[i].pos[0] += 1.0;
+
+    int ret = ts_csg_union(&a, &b, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    /* Volume should be less than 8+8=16 (since they overlap) */
+    /* Two 2x2x2 cubes offset by 1 = volume of 3x2x2 = 12 */
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_TRUE(vol > 10.0 && vol < 14.0);
+
+    ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* --- DIFFERENCE --- */
+/* GREEN: difference of two non-overlapping cubes = just cube A */
+static void test_csg_difference_green(void) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(1, 1, 1, &b);
+    for (int i = 0; i < b.vert_count; i++) b.verts[i].pos[0] += 5.0;
+
     int ret = ts_csg_difference(&a, &b, &out);
-    TS_ASSERT_EQ_INT(ret, TS_CSG_NOT_IMPLEMENTED);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_NEAR(vol, 1.0, 0.1);
+
     ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
     TS_PASS();
 }
 
-static void test_csg_intersection_stub(void) {
+/* RED: difference should not produce original volume when B overlaps A */
+static void test_csg_difference_red(void) {
     ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(2, 2, 2, &a);
+    ts_gen_cube(2, 2, 2, &b);
+    /* B overlaps A — result should be less than A's volume */
+    for (int i = 0; i < b.vert_count; i++) b.verts[i].pos[0] += 1.0;
+
+    int ret = ts_csg_difference(&a, &b, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    /* A=8, overlap region=1*2*2=4, so A-B should be ~4 */
+    TS_ASSERT_TRUE(vol < 7.0); /* Must be less than original 8 */
+
+    ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* --- INTERSECTION --- */
+/* GREEN: intersection of identical cubes = same cube */
+static void test_csg_intersection_green(void) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(1, 1, 1, &b);
+
     int ret = ts_csg_intersection(&a, &b, &out);
-    TS_ASSERT_EQ_INT(ret, TS_CSG_NOT_IMPLEMENTED);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_NEAR(vol, 1.0, 0.15);
+
     ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
     TS_PASS();
 }
 
-static void test_csg_hull_stub(void) {
-    ts_mesh a = ts_mesh_init(), out = ts_mesh_init();
-    int ret = ts_csg_hull(&a, &out);
-    TS_ASSERT_EQ_INT(ret, TS_CSG_NOT_IMPLEMENTED);
-    ts_mesh_free(&a); ts_mesh_free(&out);
+/* RED: intersection of non-overlapping cubes should be empty */
+static void test_csg_intersection_red(void) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(1, 1, 1, &b);
+    for (int i = 0; i < b.vert_count; i++) b.verts[i].pos[0] += 5.0;
+
+    int ret = ts_csg_intersection(&a, &b, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_TRUE(vol < 0.01); /* Should be ~0 */
+
+    ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
     TS_PASS();
 }
 
-static void test_csg_minkowski_stub(void) {
+/* --- HULL --- */
+/* GREEN: hull of a cube's vertices should still be a cube (volume=1) */
+static void test_csg_hull_green(void) {
+    ts_mesh input = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &input);
+
+    int ret = ts_csg_hull(&input, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_NEAR(vol, 1.0, 0.1);
+
+    ts_mesh_free(&input); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* RED: hull should produce a closed mesh (non-zero volume) */
+static void test_csg_hull_red(void) {
+    ts_mesh input = ts_mesh_init(), out = ts_mesh_init();
+    /* Add some scattered points as vertices */
+    ts_mesh_add_vertex(&input, 0,0,0, 0,0,0);
+    ts_mesh_add_vertex(&input, 1,0,0, 0,0,0);
+    ts_mesh_add_vertex(&input, 0,1,0, 0,0,0);
+    ts_mesh_add_vertex(&input, 0,0,1, 0,0,0);
+    ts_mesh_add_vertex(&input, 1,1,1, 0,0,0);
+
+    int ret = ts_csg_hull(&input, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count >= 4); /* At least a tetrahedron */
+
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_TRUE(vol > 0.01); /* Must have volume */
+
+    ts_mesh_free(&input); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* --- MINKOWSKI --- */
+/* GREEN: Minkowski of two unit cubes = 2x2x2 cube (vol=8) */
+static void test_csg_minkowski_green(void) {
     ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(1, 1, 1, &b);
+
     int ret = ts_csg_minkowski(&a, &b, &out);
-    TS_ASSERT_EQ_INT(ret, TS_CSG_NOT_IMPLEMENTED);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    /* Minkowski sum of two unit cubes centered at origin = 2x2x2 = 8 */
+    TS_ASSERT_NEAR(vol, 8.0, 0.5);
+
+    ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* RED: Minkowski result should be bigger than either input */
+static void test_csg_minkowski_red(void) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(1, 1, 1, &b);
+
+    int ret = ts_csg_minkowski(&a, &b, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_TRUE(vol > 1.0); /* Must be bigger than input cube */
+
     ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
     TS_PASS();
 }
@@ -1413,6 +1592,74 @@ static void bench_rand_single(int n) {
     for (int i = 0; i < n; i++) {
         g_bench_sink = ts_rand(42, (uint64_t)i, 0.0, 1.0);
     }
+}
+
+/* --- CSG benchmarks --- */
+static void bench_csg_union(int n) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(1, 1, 1, &b);
+    for (int i = 0; i < b.vert_count; i++) b.verts[i].pos[0] += 0.5;
+    for (int i = 0; i < n; i++) {
+        ts_mesh out = ts_mesh_init();
+        ts_csg_union(&a, &b, &out);
+        g_bench_sink = (double)out.tri_count;
+        ts_mesh_free(&out);
+    }
+    ts_mesh_free(&a); ts_mesh_free(&b);
+}
+
+static void bench_csg_difference(int n) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(1, 1, 1, &b);
+    for (int i = 0; i < b.vert_count; i++) b.verts[i].pos[0] += 0.5;
+    for (int i = 0; i < n; i++) {
+        ts_mesh out = ts_mesh_init();
+        ts_csg_difference(&a, &b, &out);
+        g_bench_sink = (double)out.tri_count;
+        ts_mesh_free(&out);
+    }
+    ts_mesh_free(&a); ts_mesh_free(&b);
+}
+
+static void bench_csg_intersection(int n) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(1, 1, 1, &b);
+    for (int i = 0; i < b.vert_count; i++) b.verts[i].pos[0] += 0.5;
+    for (int i = 0; i < n; i++) {
+        ts_mesh out = ts_mesh_init();
+        ts_csg_intersection(&a, &b, &out);
+        g_bench_sink = (double)out.tri_count;
+        ts_mesh_free(&out);
+    }
+    ts_mesh_free(&a); ts_mesh_free(&b);
+}
+
+static void bench_csg_hull(int n) {
+    ts_mesh input = ts_mesh_init();
+    ts_gen_sphere(1.0, 16, &input);
+    for (int i = 0; i < n; i++) {
+        ts_mesh out = ts_mesh_init();
+        ts_csg_hull(&input, &out);
+        g_bench_sink = (double)out.tri_count;
+        ts_mesh_free(&out);
+    }
+    ts_mesh_free(&input);
+}
+
+static void bench_csg_minkowski(int n) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(0.5, 0.5, 0.5, &b);
+    for (int i = 0; i < n; i++) {
+        ts_mesh out = ts_mesh_init();
+        ts_csg_minkowski(&a, &b, &out);
+        g_bench_sink = (double)out.tri_count;
+        ts_mesh_free(&out);
+    }
+    ts_mesh_free(&a); ts_mesh_free(&b);
 }
 
 /* ================================================================
@@ -1651,13 +1898,27 @@ static void run_all_tests(void) {
     ts_run_test("rands_range_green", test_rands_range_green);
     ts_run_test("rands_range_red", test_rands_range_red);
 
-    /* --- CSG stubs --- */
-    ts_section("CSG: stubs (not yet implemented)", TS_PAR_GPU);
-    ts_run_test("csg_union_stub", test_csg_union_stub);
-    ts_run_test("csg_difference_stub", test_csg_difference_stub);
-    ts_run_test("csg_intersection_stub", test_csg_intersection_stub);
-    ts_run_test("csg_hull_stub", test_csg_hull_stub);
-    ts_run_test("csg_minkowski_stub", test_csg_minkowski_stub);
+    /* --- CSG boolean operations --- */
+    ts_section("CSG: union (BSP-tree)", TS_PAR_GPU);
+    ts_run_test("csg_union_green", test_csg_union_green);
+    ts_run_test("csg_union_red", test_csg_union_red);
+    ts_run_test("csg_union_overlap_green", test_csg_union_overlap_green);
+
+    ts_section("CSG: difference (BSP-tree)", TS_PAR_GPU);
+    ts_run_test("csg_difference_green", test_csg_difference_green);
+    ts_run_test("csg_difference_red", test_csg_difference_red);
+
+    ts_section("CSG: intersection (BSP-tree)", TS_PAR_GPU);
+    ts_run_test("csg_intersection_green", test_csg_intersection_green);
+    ts_run_test("csg_intersection_red", test_csg_intersection_red);
+
+    ts_section("CSG: hull (Quickhull)", TS_PAR_GPU);
+    ts_run_test("csg_hull_green", test_csg_hull_green);
+    ts_run_test("csg_hull_red", test_csg_hull_red);
+
+    ts_section("CSG: minkowski (convex sum + hull)", TS_PAR_GPU);
+    ts_run_test("csg_minkowski_green", test_csg_minkowski_green);
+    ts_run_test("csg_minkowski_red", test_csg_minkowski_red);
 
     /* --- Extrusion stubs --- */
     ts_section("EXTRUDE: stubs (not yet implemented)", TS_PAR_GPU);
@@ -1722,6 +1983,13 @@ static void run_all_benchmarks(void) {
     printf("\n--- Random Number Generation ---\n");
     ts_run_bench("rands(1000)",  bench_rands_1000,  N/1000, TS_PAR_TRIVIAL);
     ts_run_bench("rand_single",  bench_rand_single, N,      TS_PAR_TRIVIAL);
+
+    printf("\n--- CSG Operations ---\n");
+    ts_run_bench("csg_union(cubes)",        bench_csg_union,        1000, TS_PAR_GPU);
+    ts_run_bench("csg_difference(cubes)",   bench_csg_difference,   1000, TS_PAR_GPU);
+    ts_run_bench("csg_intersection(cubes)", bench_csg_intersection, 1000, TS_PAR_GPU);
+    ts_run_bench("csg_hull(sphere16)",      bench_csg_hull,         1000, TS_PAR_GPU);
+    ts_run_bench("csg_minkowski(cubes)",    bench_csg_minkowski,    100,  TS_PAR_GPU);
 
     printf("\n============================================================\n");
     printf("  %d benchmarks completed\n", g_ts_bench_count);

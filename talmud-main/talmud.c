@@ -2748,9 +2748,9 @@ static const char HELP_TOOLS_TRINITY_SITE[] =
 "in pure C for GPU parallelization.\n"
 "\n"
 "USAGE:\n"
-"  trinity_site              Run all 109 tests\n"
+"  trinity_site              Run all 115 tests\n"
 "  trinity_site --test       Run tests only\n"
-"  trinity_site --bench      Run 35 benchmarks\n"
+"  trinity_site --bench      Run 40 benchmarks\n"
 "  trinity_site --all        Run tests + benchmarks\n"
 "  trinity_site --help       Show usage\n"
 "\n"
@@ -2771,7 +2771,7 @@ static const char HELP_TOOLS_TRINITY_SITE[] =
 "  talmud tools trinity_site vec      Vector operations (norm,cross,dot)\n"
 "  talmud tools trinity_site mat      Matrix operations (translate,rotate,...)\n"
 "  talmud tools trinity_site geo      Geometry generation (cube,sphere,...)\n"
-"  talmud tools trinity_site csg      CSG boolean ops (stubs)\n"
+"  talmud tools trinity_site csg      CSG boolean ops (BSP-tree)\n"
 "  talmud tools trinity_site random   Parallel RNG (counter-based)\n";
 
 static const char HELP_TOOLS_TRINITY_SITE_SCALAR[] =
@@ -2923,36 +2923,6 @@ static const char HELP_TOOLS_TRINITY_SITE_GEO[] =
 "PARALLELISM: GPU — vertex positions are independent.\n"
 "Sphere fn=100: ~158us/op. Cube: ~196ns/op.\n";
 
-static const char HELP_TOOLS_TRINITY_SITE_CSG[] =
-"CSG Boolean Operations (Stubs)\n"
-"\n"
-"CSG Boolean Operations — ts_csg.h (STUBS)\n"
-"\n"
-"STATUS: Interface locked, implementation pending.\n"
-"Returns TS_CSG_NOT_IMPLEMENTED (-99) for all operations.\n"
-"\n"
-"PLANNED FUNCTIONS (OpenSCAD equivalent):\n"
-"  ts_csg_union(a,b,out)         (union)\n"
-"  ts_csg_difference(a,b,out)    (difference)\n"
-"  ts_csg_intersection(a,b,out)  (intersection)\n"
-"  ts_csg_hull(input,out)        (hull)\n"
-"  ts_csg_minkowski(a,b,out)     (minkowski)\n"
-"\n"
-"GPU PARALLELIZATION STRATEGY:\n"
-"  1. BSP-tree based: each node split independent\n"
-"  2. Voxel SDF on GPU: embarrassingly parallel evaluation\n"
-"  3. Hybrid: coarse voxel GPU pass, refined BSP on CPU\n"
-"\n"
-"CSG is the hardest part. OpenSCAD uses CGAL Nef polyhedra\n"
-"(inherently sequential, very slow). Our approach:\n"
-"  Phase 1: Classify triangles against BSP (parallel per-tri)\n"
-"  Phase 2: Split intersecting triangles (parallel per-edge)\n"
-"  Phase 3: Select by operation (parallel per-tri)\n"
-"  Phase 4: Merge/dedup vertices (parallel sort + reduce)\n"
-"\n"
-"Estimated GPU speedup: 10-50x for >10k triangle meshes.\n"
-"Minkowski sum: 50-200x (most expensive operation).\n";
-
 static const char HELP_TOOLS_TRINITY_SITE_RANDOM[] =
 "Parallel Random Number Generation\n"
 "\n"
@@ -2979,6 +2949,30 @@ static const char HELP_TOOLS_TRINITY_SITE_RANDOM[] =
 "\n"
 "PARALLELISM: TRIVIAL — each element is a pure function of its index.\n"
 "Benchmark: 6.5 ns/op single, 6.6 us for 1000 elements.\n";
+
+static const char HELP_TOOLS_TRINITY_SITE_CSG[] =
+"CSG Boolean Operations\n"
+"\n"
+"CSG Boolean Operations — ts_csg.h (IMPLEMENTED)\n"
+"\n"
+"STATUS: Fully implemented. BSP-tree based CSG engine.\n"
+"\n"
+"FUNCTIONS (OpenSCAD equivalent):\n"
+"  ts_csg_union(a,b,out)         ~25us/op\n"
+"  ts_csg_difference(a,b,out)    ~19us/op\n"
+"  ts_csg_intersection(a,b,out)  ~19us/op\n"
+"  ts_csg_hull(input,out)        ~832us/op (Quickhull)\n"
+"  ts_csg_minkowski(a,b,out)     ~75us/op (convex sum + hull)\n"
+"\n"
+"ALGORITHM: Classic Laidlaw/Trumbore BSP-tree CSG.\n"
+"  Mesh->polygon, BSP build, clip/invert, fan triangulation.\n"
+"  Quickhull: initial tetrahedron + iterative expansion.\n"
+"  Minkowski: vertex sum of AxB + convex hull.\n"
+"\n"
+"KEY TYPES: ts_csg_vertex, ts_csg_poly, ts_csg_polylist, ts_csg_bsp\n"
+"\n"
+"GPU PLAN (future): per-tri classify, per-edge split, parallel select.\n"
+"Estimated GPU speedup: 10-50x (>10k tris), 50-200x (Minkowski).\n";
 
 static const char HELP_TOOLS_YOTZER[] =
 "The Build System\n"
@@ -3223,6 +3217,34 @@ static const char HELP_MEMORY_ACTIVE_SESSION_S012[] =
 "  injected as preamble for all renders.\n"
 "\n"
 "See: talmud reference architecture scad ordering\n";
+
+static const char HELP_MEMORY_ACTIVE_SESSION_S013[] =
+"Session s013 (Trinity Site + .dcad)\n"
+"\n"
+"Session s013 — Trinity Site + .dcad File Format\n"
+"\n"
+"Date: 2026-03-08 | Agent: Claude Opus 4.6 | Status: COMPLETE\n"
+"\n"
+"TRINITY SITE (sacred/trinity_site/):\n"
+"  Complete reimplementation of OpenSCAD math in pure C for GPU.\n"
+"  10 headers, 109 tests (green+red TDD), 35 benchmarks.\n"
+"  Scalar, trig (degree-based), vec3, mat4, mesh, geometry\n"
+"  generation (cube/sphere/cylinder/circle/square/polyhedron),\n"
+"  CSG stubs, extrusion stubs, counter-based parallel RNG.\n"
+"  Every function annotated with parallelism classification.\n"
+"  Built as yotzer target with -lm flag.\n"
+"\n"
+".DCAD FILE FORMAT:\n"
+"  DunCAD now saves as .dcad (superset of .scad). Language spec\n"
+"  recognizes both. File dialogs default to .dcad. Temp files\n"
+"  for OpenSCAD CLI remain .scad. Bezier export strips both\n"
+"  extensions. Documented in talmud architecture.\n"
+"\n"
+"BUILD SYSTEM:\n"
+"  yotzer gains per-target extra flags. 5 targets total.\n"
+"  Fixed pre-existing s012 overlength string (4655 > 4095).\n"
+"\n"
+"Commit: e412b0d\n";
 static const struct help_node TREE[] = {
     /* root */
     { "", HELP_ROOT },
@@ -3237,8 +3259,8 @@ static const struct help_node TREE[] = {
     { "tools.trinity_site.vec", HELP_TOOLS_TRINITY_SITE_VEC },
     { "tools.trinity_site.mat", HELP_TOOLS_TRINITY_SITE_MAT },
     { "tools.trinity_site.geo", HELP_TOOLS_TRINITY_SITE_GEO },
-    { "tools.trinity_site.csg", HELP_TOOLS_TRINITY_SITE_CSG },
     { "tools.trinity_site.random", HELP_TOOLS_TRINITY_SITE_RANDOM },
+    { "tools.trinity_site.csg", HELP_TOOLS_TRINITY_SITE_CSG },
     { "tools.yotzer", HELP_TOOLS_YOTZER },
 
     /* ---- REFERENCE -- Core knowledge ---- */
@@ -3348,6 +3370,7 @@ static const struct help_node TREE[] = {
     { "memory.active.3d-print-params", HELP_MEMORY_ACTIVE_3D_PRINT_PARAMS },
     { "memory.active.session-s011", HELP_MEMORY_ACTIVE_SESSION_S011 },
     { "memory.active.session-s012", HELP_MEMORY_ACTIVE_SESSION_S012 },
+    { "memory.active.session-s013", HELP_MEMORY_ACTIVE_SESSION_S013 },
     { NULL, NULL }
 };
 
