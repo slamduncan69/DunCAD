@@ -2748,9 +2748,9 @@ static const char HELP_TOOLS_TRINITY_SITE[] =
 "in pure C for GPU parallelization.\n"
 "\n"
 "USAGE:\n"
-"  trinity_site              Run all 122 tests\n"
+"  trinity_site              Run all 129 tests\n"
 "  trinity_site --test       Run tests only\n"
-"  trinity_site --bench      Run 43 benchmarks\n"
+"  trinity_site --bench      Run 51 benchmarks\n"
 "  trinity_site --all        Run tests + benchmarks\n"
 "  trinity_site --help       Show usage\n"
 "\n"
@@ -2773,7 +2773,8 @@ static const char HELP_TOOLS_TRINITY_SITE[] =
 "  talmud tools trinity_site geo      Geometry generation (cube,sphere,...)\n"
 "  talmud tools trinity_site csg      CSG boolean ops (BSP-tree)\n"
 "  talmud tools trinity_site random   Parallel RNG (counter-based)\n"
-"  talmud tools trinity_site extrude  Extrusion (linear + rotate)\n";
+"  talmud tools trinity_site extrude  Extrusion (linear + rotate)\n"
+"  talmud tools trinity_site opencl   OpenCL GPU acceleration\n";
 
 static const char HELP_TOOLS_TRINITY_SITE_SCALAR[] =
 "Scalar Math Functions\n"
@@ -3002,6 +3003,41 @@ static const char HELP_TOOLS_TRINITY_SITE_EXTRUDE[] =
 "\n"
 "GPU: per-slice/per-step vertex gen is embarrassingly parallel.\n"
 "Cap triangulation is sequential but O(n^2) on small n.\n";
+
+static const char HELP_TOOLS_TRINITY_SITE_OPENCL[] =
+"OpenCL GPU Acceleration\n"
+"\n"
+"OpenCL GPU Acceleration (ts_opencl.h)\n"
+"\n"
+"Batch operations offloaded to GPU via OpenCL when available.\n"
+"Falls back to CPU loops transparently — always safe to include.\n"
+"\n"
+"HARDWARE: NVIDIA RTX 3080 Ti (CUDA/OpenCL 1.2, fp64 required)\n"
+"BUILD: -I/opt/cuda/include -lOpenCL (yotzer target extra flags)\n"
+"THRESHOLD: TS_GPU_MIN_BATCH=256 (below this, CPU wins)\n"
+"DISABLE: #define TS_NO_OPENCL before including ts_opencl.h\n"
+"\n"
+"CONTEXT: ts_gpu_ctx\n"
+"  ts_gpu_init()      — discover platform/device, compile kernels\n"
+"  ts_gpu_shutdown()   — release all OpenCL resources\n"
+"  Fields: platform, device, context, queue, program, 12 cl_kernel\n"
+"\n"
+"EMBEDDED KERNELS (12 total, split into K1+K2 for 4095 limit):\n"
+"  vec3_add, vec3_scale, vec3_normalize, vec3_cross, vec3_dot\n"
+"  mat4_transform_points, scalar_sqrt, scalar_sin, scalar_cos,\n"
+"  scalar_pow, mesh_transform, rng_uniform\n"
+"\n"
+"BATCH API (all have CPU fallback):\n"
+"  ts_gpu_vec3_add(ctx, a, b, out, n)\n"
+"  ts_gpu_vec3_normalize(ctx, a, out, n)\n"
+"  ts_gpu_vec3_cross(ctx, a, b, out, n)\n"
+"  ts_gpu_vec3_dot(ctx, a, b, out, n)\n"
+"  ts_gpu_mat4_transform(ctx, mat, pts, out, n)\n"
+"  ts_gpu_scalar_sqrt/sin/cos(ctx, a, out, n)\n"
+"  ts_gpu_rng_uniform(ctx, seed, lo, hi, out, n)\n"
+"\n"
+"TESTS: 7 (init, vec3_add green+red, normalize, mat4, sin, rng)\n"
+"BENCHMARKS: 8 (5 GPU + 3 CPU comparison at 100k batch)\n";
 
 static const char HELP_TOOLS_YOTZER[] =
 "The Build System\n"
@@ -3315,6 +3351,7 @@ static const struct help_node TREE[] = {
     { "tools.trinity_site.random", HELP_TOOLS_TRINITY_SITE_RANDOM },
     { "tools.trinity_site.csg", HELP_TOOLS_TRINITY_SITE_CSG },
     { "tools.trinity_site.extrude", HELP_TOOLS_TRINITY_SITE_EXTRUDE },
+    { "tools.trinity_site.opencl", HELP_TOOLS_TRINITY_SITE_OPENCL },
     { "tools.yotzer", HELP_TOOLS_YOTZER },
 
     /* ---- REFERENCE -- Core knowledge ---- */
