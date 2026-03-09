@@ -222,6 +222,7 @@ static const struct target {
     { "darshan",       "profane/darshan/darshan.c",                "profane/darshan/darshan",             1, NULL },
     { "sofer",         "narthex/sofer/sofer.c",                    "narthex/sofer/sofer",                 1, NULL },
     { "trinity_site",  "sacred/trinity_site/trinity_site.c",       "sacred/trinity_site/trinity_site",    0, "-lm -I/opt/cuda/include -lOpenCL" },
+    { "ts_interp",     "sacred/trinity_site/ts_interp.c",          "sacred/trinity_site/ts_interp",       0, "-lm" },
 };
 #define N_TARGETS (int)(sizeof(targets) / sizeof(targets[0]))
 
