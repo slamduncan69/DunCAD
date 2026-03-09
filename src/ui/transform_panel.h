@@ -36,4 +36,10 @@ void dc_transform_panel_show(DC_TransformPanel *tp,
 /* Hide the panel (object deselected). */
 void dc_transform_panel_hide(DC_TransformPanel *tp);
 
+/* Set a callback to invoke when Enter is pressed in an entry field. */
+typedef void (*DC_TransformEnterCb)(void *userdata);
+void dc_transform_panel_set_enter_callback(DC_TransformPanel *tp,
+                                            DC_TransformEnterCb cb,
+                                            void *userdata);
+
 #endif /* DC_TRANSFORM_PANEL_H */

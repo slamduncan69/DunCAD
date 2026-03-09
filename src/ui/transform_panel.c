@@ -34,6 +34,8 @@ struct DC_TransformPanel {
     int            has_rotate;
     int            updating;       /* suppress re-entry during code update */
     char          *orig_stmt;      /* original statement text (owned) */
+    DC_TransformEnterCb enter_cb;  /* called on Enter in entry */
+    void          *enter_cb_data;
 };
 
 /* ---- SCAD transform parsing ---- */
@@ -215,6 +217,17 @@ build_transformed_text(DC_TransformPanel *tp, const char *orig_text)
     return result;
 }
 
+/* ---- Entry activate handler (Enter key) ---- */
+
+static void
+on_entry_activate(GtkEntry *entry, gpointer data)
+{
+    (void)entry;
+    DC_TransformPanel *tp = data;
+    if (tp->enter_cb)
+        tp->enter_cb(tp->enter_cb_data);
+}
+
 /* ---- Entry change handler ---- */
 
 static void
@@ -354,6 +367,8 @@ dc_transform_panel_new(void)
         gtk_editable_set_text(GTK_EDITABLE(tp->trans_entries[i]), "0");
         g_signal_connect(tp->trans_entries[i], "changed",
                          G_CALLBACK(on_entry_changed), tp);
+        g_signal_connect(tp->trans_entries[i], "activate",
+                         G_CALLBACK(on_entry_activate), tp);
         gtk_grid_attach(GTK_GRID(tp->grid), tp->trans_entries[i], 1, i + 1, 1, 1);
     }
 
@@ -379,6 +394,8 @@ dc_transform_panel_new(void)
         gtk_editable_set_text(GTK_EDITABLE(tp->rot_entries[i]), "0");
         g_signal_connect(tp->rot_entries[i], "changed",
                          G_CALLBACK(on_entry_changed), tp);
+        g_signal_connect(tp->rot_entries[i], "activate",
+                         G_CALLBACK(on_entry_activate), tp);
         gtk_grid_attach(GTK_GRID(tp->grid), tp->rot_entries[i], 3, i + 1, 1, 1);
     }
 
@@ -470,4 +487,13 @@ dc_transform_panel_hide(DC_TransformPanel *tp)
 {
     if (!tp) return;
     gtk_widget_set_visible(tp->container, FALSE);
+}
+
+void
+dc_transform_panel_set_enter_callback(DC_TransformPanel *tp,
+                                       DC_TransformEnterCb cb, void *userdata)
+{
+    if (!tp) return;
+    tp->enter_cb = cb;
+    tp->enter_cb_data = userdata;
 }

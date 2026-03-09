@@ -884,6 +884,20 @@ dispatch(const char *cmd)
     if (strcmp(name, "window_status") == 0) return cmd_window_status(args);
     if (strcmp(name, "window_size")   == 0) return cmd_window_size();
 
+    /* Shape menu test */
+    if (strcmp(name, "shape_action") == 0) {
+        DC_GlViewport *vp = get_viewport();
+        if (!vp) return strdup("{\"error\":\"no viewport\"}\n");
+        GtkWidget *gl_w = dc_gl_viewport_widget(vp);
+        GActionGroup *sg = g_object_get_data(G_OBJECT(gl_w), "dc-shape-action-group");
+        if (!sg) return strdup("{\"error\":\"no shape action group\"}\n");
+        if (!args || !*args) return strdup("{\"error\":\"usage: shape_action <name>\"}\n");
+        g_action_group_activate_action(sg, args, NULL);
+        char *r = malloc(128);
+        snprintf(r, 128, "{\"ok\":true,\"action\":\"%s\"}\n", args);
+        return r;
+    }
+
     /* Meta */
     if (strcmp(name, "help") == 0) return cmd_help();
 

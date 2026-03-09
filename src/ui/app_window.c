@@ -2,6 +2,7 @@
 #include "ui/code_editor.h"
 #include "ui/scad_preview.h"
 #include "ui/transform_panel.h"
+#include "ui/shape_menu.h"
 #include "gl/gl_viewport.h"
 #include "bezier/bezier_editor.h"
 #include "core/log.h"
@@ -53,6 +54,11 @@ build_menu_model(void)
     g_menu_append(view_menu, "Toggle Right Panel",  "win.toggle-right");
     g_menu_append_submenu(menu_bar, "View", G_MENU_MODEL(view_menu));
     g_object_unref(view_menu);
+
+    /* Insert menu — shape insertion from menu bar */
+    GMenuModel *insert_menu = dc_shape_menu_build_insert_menu();
+    g_menu_append_submenu(menu_bar, "Insert", insert_menu);
+    g_object_unref(insert_menu);
 
     /* Tools menu */
     GMenu *tools_menu = g_menu_new();
@@ -139,6 +145,16 @@ on_object_picked(int obj_idx, int line_start, int line_end, void *userdata)
     } else if (ctx->transform) {
         dc_transform_panel_hide(ctx->transform);
     }
+}
+
+/* -------------------------------------------------------------------------
+ * Transform panel Enter callback — triggers preview render
+ * ---------------------------------------------------------------------- */
+static void
+on_transform_enter(void *userdata)
+{
+    DC_ScadPreview *pv = userdata;
+    if (pv) dc_scad_preview_render(pv);
 }
 
 /* -------------------------------------------------------------------------
@@ -332,6 +348,24 @@ dc_app_window_create(GtkApplication *app)
         pick_ctx->transform = dc_scad_preview_get_transform(preview);
         dc_gl_viewport_set_pick_callback(gl_vp, on_object_picked, pick_ctx);
         g_object_set_data_full(G_OBJECT(window), "dc-pick-ctx", pick_ctx, free);
+
+        /* Enter in transform panel entries → trigger render */
+        dc_transform_panel_set_enter_callback(
+            dc_scad_preview_get_transform(preview),
+            on_transform_enter, preview);
+    }
+
+    /* Shape context menu: right-click on GL viewport + menu bar "Insert" */
+    if (gl_vp) {
+        GtkWidget *gl_widget = dc_gl_viewport_widget(gl_vp);
+        dc_shape_menu_attach(gl_widget, code_ed, gl_vp,
+                             dc_scad_preview_get_transform(preview),
+                             preview);
+
+        /* Install shape actions on window so menu bar "Insert" can find them */
+        GActionGroup *sg = g_object_get_data(G_OBJECT(gl_widget),
+                                              "dc-shape-action-group");
+        if (sg) gtk_widget_insert_action_group(window, "shape", sg);
     }
 
     /* F5 = Render preview (window-level shortcut) */

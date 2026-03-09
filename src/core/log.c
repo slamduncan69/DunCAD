@@ -153,6 +153,7 @@ dc_log(DC_LogLevel level, DC_LogEventType event, const char *fmt, ...)
 
     /* Human-readable stderr output */
     fprintf(stderr, "[%s] [%s] [%s] %s\n", ts, lvl_str, event_str, msg);
+    fflush(stderr);
 
     /* JSON structured log — one object per line */
     if (g_log.log_file) {
