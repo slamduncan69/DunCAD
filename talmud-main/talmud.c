@@ -2748,9 +2748,9 @@ static const char HELP_TOOLS_TRINITY_SITE[] =
 "in pure C for GPU parallelization.\n"
 "\n"
 "USAGE:\n"
-"  trinity_site              Run all 115 tests\n"
+"  trinity_site              Run all 122 tests\n"
 "  trinity_site --test       Run tests only\n"
-"  trinity_site --bench      Run 40 benchmarks\n"
+"  trinity_site --bench      Run 43 benchmarks\n"
 "  trinity_site --all        Run tests + benchmarks\n"
 "  trinity_site --help       Show usage\n"
 "\n"
@@ -2772,7 +2772,8 @@ static const char HELP_TOOLS_TRINITY_SITE[] =
 "  talmud tools trinity_site mat      Matrix operations (translate,rotate,...)\n"
 "  talmud tools trinity_site geo      Geometry generation (cube,sphere,...)\n"
 "  talmud tools trinity_site csg      CSG boolean ops (BSP-tree)\n"
-"  talmud tools trinity_site random   Parallel RNG (counter-based)\n";
+"  talmud tools trinity_site random   Parallel RNG (counter-based)\n"
+"  talmud tools trinity_site extrude  Extrusion (linear + rotate)\n";
 
 static const char HELP_TOOLS_TRINITY_SITE_SCALAR[] =
 "Scalar Math Functions\n"
@@ -2973,6 +2974,34 @@ static const char HELP_TOOLS_TRINITY_SITE_CSG[] =
 "\n"
 "GPU PLAN (future): per-tri classify, per-edge split, parallel select.\n"
 "Estimated GPU speedup: 10-50x (>10k tris), 50-200x (Minkowski).\n";
+
+static const char HELP_TOOLS_TRINITY_SITE_EXTRUDE[] =
+"Extrusion Operations\n"
+"\n"
+"Extrusion Operations — ts_extrude.h (IMPLEMENTED)\n"
+"\n"
+"STATUS: Fully implemented with ear-clipping triangulation.\n"
+"\n"
+"FUNCTIONS:\n"
+"  ts_linear_extrude(profile,n,height,twist,slices,scale,center,out)\n"
+"    Extrudes 2D closed polygon along Z axis.\n"
+"    Supports twist (degrees), taper (scale_top), centering.\n"
+"    ~686ns/op (no twist), ~12us/op (32 slices + twist)\n"
+"\n"
+"  ts_rotate_extrude(profile,n,angle,fn,out)\n"
+"    Revolves 2D closed polygon around Y axis.\n"
+"    Supports partial revolution with end caps.\n"
+"    ~11.7us/op (fn=32)\n"
+"\n"
+"INTERNALS:\n"
+"  ts_ext_triangulate() — ear-clipping O(n^2) for cap triangulation\n"
+"  ts_ext_tri_area2() — signed 2D triangle area\n"
+"  ts_ext_point_in_tri() — point-in-triangle test\n"
+"  Profile treated as closed polygon (last edge connects back to first).\n"
+"  Normals recomputed via ts_mesh_compute_normals() after generation.\n"
+"\n"
+"GPU: per-slice/per-step vertex gen is embarrassingly parallel.\n"
+"Cap triangulation is sequential but O(n^2) on small n.\n";
 
 static const char HELP_TOOLS_YOTZER[] =
 "The Build System\n"
@@ -3284,6 +3313,7 @@ static const struct help_node TREE[] = {
     { "tools.trinity_site.geo", HELP_TOOLS_TRINITY_SITE_GEO },
     { "tools.trinity_site.random", HELP_TOOLS_TRINITY_SITE_RANDOM },
     { "tools.trinity_site.csg", HELP_TOOLS_TRINITY_SITE_CSG },
+    { "tools.trinity_site.extrude", HELP_TOOLS_TRINITY_SITE_EXTRUDE },
     { "tools.yotzer", HELP_TOOLS_YOTZER },
 
     /* ---- REFERENCE -- Core knowledge ---- */

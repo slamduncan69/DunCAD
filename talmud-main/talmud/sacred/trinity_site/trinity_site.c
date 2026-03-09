@@ -1373,23 +1373,174 @@ static void test_csg_minkowski_red(void) {
 }
 
 /* ================================================================
- * SECTION 8: EXTRUSION STUB TESTS
+ * SECTION 8: EXTRUSION TESTS
+ * Linear extrude + rotate extrude
+ * Parallelism: per-slice / per-step vertex gen (GPU)
  * ================================================================ */
 
-static void test_linear_extrude_stub(void) {
+/* --- LINEAR EXTRUDE --- */
+/* GREEN: extrude a unit square 10 units high = volume 10 */
+static void test_linear_extrude_green(void) {
     ts_mesh out = ts_mesh_init();
-    double profile[] = { 0,0, 1,0, 0.5,1 };
-    int ret = ts_linear_extrude(profile, 3, 10.0, 0.0, 1, 1.0, 1, &out);
-    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_NOT_IMPLEMENTED);
+    /* Unit square profile: (0,0) (1,0) (1,1) (0,1) */
+    double profile[] = { 0,0, 1,0, 1,1, 0,1 };
+    int ret = ts_linear_extrude(profile, 4, 10.0, 0.0, 1, 1.0, 0, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_NEAR(vol, 10.0, 0.5);
+
     ts_mesh_free(&out);
     TS_PASS();
 }
 
-static void test_rotate_extrude_stub(void) {
+/* RED: extrude must produce non-zero volume */
+static void test_linear_extrude_red(void) {
+    ts_mesh out = ts_mesh_init();
+    double profile[] = { 0,0, 1,0, 1,1, 0,1 };
+    int ret = ts_linear_extrude(profile, 4, 5.0, 0.0, 1, 1.0, 0, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_OK);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_TRUE(vol > 0.1); /* Must have volume */
+
+    ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: extrude triangle with twist */
+static void test_linear_extrude_twist_green(void) {
+    ts_mesh out = ts_mesh_init();
+    double profile[] = { 0,0, 2,0, 1,2 };
+    /* 90 degree twist over 10 units, 10 slices */
+    int ret = ts_linear_extrude(profile, 3, 10.0, 90.0, 10, 1.0, 1, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+    /* More slices = more triangles: 10 slices * 3 edges * 2 + caps */
+    TS_ASSERT_TRUE(out.tri_count >= 60);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    /* Triangle area = 0.5*2*2 = 2, height 10, vol ~ 20 */
+    TS_ASSERT_TRUE(vol > 15.0 && vol < 25.0);
+
+    ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: extrude with taper (scale_top = 0.5) */
+static void test_linear_extrude_taper_green(void) {
+    ts_mesh out = ts_mesh_init();
+    double profile[] = { 0,0, 2,0, 2,2, 0,2 };
+    /* scale_top=0.5 means top is half the size */
+    int ret = ts_linear_extrude(profile, 4, 6.0, 0.0, 1, 0.5, 0, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    /* Frustum: V = h/3 * (A1 + A2 + sqrt(A1*A2))
+     * A1 = 4 (2x2), A2 = 1 (1x1), h = 6
+     * V = 6/3 * (4 + 1 + 2) = 14 */
+    TS_ASSERT_TRUE(vol > 10.0 && vol < 18.0);
+
+    ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: centered extrude should span from -h/2 to +h/2 */
+static void test_linear_extrude_center_green(void) {
+    ts_mesh out = ts_mesh_init();
+    double profile[] = { 0,0, 1,0, 1,1, 0,1 };
+    int ret = ts_linear_extrude(profile, 4, 10.0, 0.0, 1, 1.0, 1, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_OK);
+
+    /* Check Z bounds: should be centered around 0 */
+    double zmin = 1e30, zmax = -1e30;
+    for (int i = 0; i < out.vert_count; i++) {
+        if (out.verts[i].pos[2] < zmin) zmin = out.verts[i].pos[2];
+        if (out.verts[i].pos[2] > zmax) zmax = out.verts[i].pos[2];
+    }
+    TS_ASSERT_NEAR(zmin, -5.0, 0.01);
+    TS_ASSERT_NEAR(zmax, 5.0, 0.01);
+
+    ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* --- ROTATE EXTRUDE --- */
+/* GREEN: revolve a small rectangle around Y axis = torus-like shape */
+static void test_rotate_extrude_green(void) {
+    ts_mesh out = ts_mesh_init();
+    /* Rectangular profile at radius 5: 2 units wide, 3 units tall */
+    double profile[] = { 4,0, 6,0, 6,3, 4,3 };
+    int ret = ts_rotate_extrude(profile, 4, 360.0, 32, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    /* Pappus theorem: V = 2*pi*R*A where R=5 (centroid), A=2*3=6
+     * V = 2*pi*5*6 = 188.5 */
+    TS_ASSERT_TRUE(vol > 150.0 && vol < 220.0);
+
+    ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* RED: rotate extrude must produce triangles */
+static void test_rotate_extrude_red(void) {
     ts_mesh out = ts_mesh_init();
     double profile[] = { 5,0, 5,10, 3,10, 3,0 };
-    int ret = ts_rotate_extrude(profile, 4, 360.0, 32, &out);
-    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_NOT_IMPLEMENTED);
+    int ret = ts_rotate_extrude(profile, 4, 360.0, 16, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_TRUE(vol > 0.1);
+
+    ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: partial revolution (180 degrees) = half the volume */
+static void test_rotate_extrude_partial_green(void) {
+    ts_mesh out_full = ts_mesh_init(), out_half = ts_mesh_init();
+    double profile[] = { 4,0, 6,0, 6,3, 4,3 };
+
+    ts_rotate_extrude(profile, 4, 360.0, 32, &out_full);
+    ts_rotate_extrude(profile, 4, 180.0, 16, &out_half);
+
+    double vol_full = fabs(mesh_signed_volume(&out_full));
+    double vol_half = fabs(mesh_signed_volume(&out_half));
+
+    /* Half revolution should be roughly half the volume */
+    double ratio = vol_half / vol_full;
+    TS_ASSERT_TRUE(ratio > 0.35 && ratio < 0.65);
+
+    ts_mesh_free(&out_full); ts_mesh_free(&out_half);
+    TS_PASS();
+}
+
+/* GREEN: error on invalid input */
+static void test_extrude_error_green(void) {
+    ts_mesh out = ts_mesh_init();
+    /* Too few points */
+    double profile[] = { 0,0, 1,0 };
+    int ret = ts_linear_extrude(profile, 2, 10.0, 0.0, 1, 1.0, 0, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_ERROR);
+
+    /* NULL profile */
+    ret = ts_linear_extrude(NULL, 4, 10.0, 0.0, 1, 1.0, 0, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_ERROR);
+
+    /* Zero height */
+    double profile2[] = { 0,0, 1,0, 0.5,1 };
+    ret = ts_linear_extrude(profile2, 3, 0.0, 0.0, 1, 1.0, 0, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_ERROR);
+
+    /* Rotate: too few points */
+    ret = ts_rotate_extrude(profile, 1, 360.0, 16, &out);
+    TS_ASSERT_EQ_INT(ret, TS_EXTRUDE_ERROR);
+
     ts_mesh_free(&out);
     TS_PASS();
 }
@@ -1662,6 +1813,37 @@ static void bench_csg_minkowski(int n) {
     ts_mesh_free(&a); ts_mesh_free(&b);
 }
 
+/* --- Extrusion benchmarks --- */
+static void bench_linear_extrude(int n) {
+    double profile[] = { 0,0, 1,0, 1,1, 0,1 };
+    for (int i = 0; i < n; i++) {
+        ts_mesh out = ts_mesh_init();
+        ts_linear_extrude(profile, 4, 10.0, 0.0, 1, 1.0, 0, &out);
+        g_bench_sink = (double)out.tri_count;
+        ts_mesh_free(&out);
+    }
+}
+
+static void bench_linear_extrude_twist(int n) {
+    double profile[] = { 0,0, 1,0, 1,1, 0,1 };
+    for (int i = 0; i < n; i++) {
+        ts_mesh out = ts_mesh_init();
+        ts_linear_extrude(profile, 4, 10.0, 360.0, 32, 1.0, 1, &out);
+        g_bench_sink = (double)out.tri_count;
+        ts_mesh_free(&out);
+    }
+}
+
+static void bench_rotate_extrude(int n) {
+    double profile[] = { 4,0, 6,0, 6,3, 4,3 };
+    for (int i = 0; i < n; i++) {
+        ts_mesh out = ts_mesh_init();
+        ts_rotate_extrude(profile, 4, 360.0, 32, &out);
+        g_bench_sink = (double)out.tri_count;
+        ts_mesh_free(&out);
+    }
+}
+
 /* ================================================================
  * MAIN
  * ================================================================ */
@@ -1920,10 +2102,21 @@ static void run_all_tests(void) {
     ts_run_test("csg_minkowski_green", test_csg_minkowski_green);
     ts_run_test("csg_minkowski_red", test_csg_minkowski_red);
 
-    /* --- Extrusion stubs --- */
-    ts_section("EXTRUDE: stubs (not yet implemented)", TS_PAR_GPU);
-    ts_run_test("linear_extrude_stub", test_linear_extrude_stub);
-    ts_run_test("rotate_extrude_stub", test_rotate_extrude_stub);
+    /* --- Extrusion --- */
+    ts_section("EXTRUDE: linear_extrude", TS_PAR_GPU);
+    ts_run_test("linear_extrude_green", test_linear_extrude_green);
+    ts_run_test("linear_extrude_red", test_linear_extrude_red);
+    ts_run_test("linear_extrude_twist_green", test_linear_extrude_twist_green);
+    ts_run_test("linear_extrude_taper_green", test_linear_extrude_taper_green);
+    ts_run_test("linear_extrude_center_green", test_linear_extrude_center_green);
+
+    ts_section("EXTRUDE: rotate_extrude", TS_PAR_GPU);
+    ts_run_test("rotate_extrude_green", test_rotate_extrude_green);
+    ts_run_test("rotate_extrude_red", test_rotate_extrude_red);
+    ts_run_test("rotate_extrude_partial_green", test_rotate_extrude_partial_green);
+
+    ts_section("EXTRUDE: error handling", TS_PAR_TRIVIAL);
+    ts_run_test("extrude_error_green", test_extrude_error_green);
 
     ts_summary();
 }
@@ -1990,6 +2183,11 @@ static void run_all_benchmarks(void) {
     ts_run_bench("csg_intersection(cubes)", bench_csg_intersection, 1000, TS_PAR_GPU);
     ts_run_bench("csg_hull(sphere16)",      bench_csg_hull,         1000, TS_PAR_GPU);
     ts_run_bench("csg_minkowski(cubes)",    bench_csg_minkowski,    100,  TS_PAR_GPU);
+
+    printf("\n--- Extrusion ---\n");
+    ts_run_bench("linear_extrude(square)",       bench_linear_extrude,       10000, TS_PAR_GPU);
+    ts_run_bench("linear_extrude(twist,32sl)",   bench_linear_extrude_twist, 10000, TS_PAR_GPU);
+    ts_run_bench("rotate_extrude(rect,fn=32)",   bench_rotate_extrude,       10000, TS_PAR_GPU);
 
     printf("\n============================================================\n");
     printf("  %d benchmarks completed\n", g_ts_bench_count);
