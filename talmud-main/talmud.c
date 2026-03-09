@@ -3245,6 +3245,29 @@ static const char HELP_MEMORY_ACTIVE_SESSION_S013[] =
 "  Fixed pre-existing s012 overlength string (4655 > 4095).\n"
 "\n"
 "Commit: e412b0d\n";
+
+static const char HELP_MEMORY_ACTIVE_SESSION_S014[] =
+"Session s014 (CSG Implementation)\n"
+"\n"
+"Session s014 — CSG Implementation\n"
+"\n"
+"DATE: 2026-03-08\n"
+"COMMIT: 62b3c90\n"
+"\n"
+"IMPLEMENTED:\n"
+"  - BSP-tree CSG engine in ts_csg.h (was stubs)\n"
+"  - Union, difference, intersection via Laidlaw/Trumbore algorithm\n"
+"  - Quickhull convex hull (initial tetrahedron + iterative expansion)\n"
+"  - Minkowski sum (vertex sum + convex hull, convex inputs)\n"
+"  - 12 new tests (GREEN+RED pairs for each operation)\n"
+"  - 5 new benchmarks (union ~25us, diff ~19us, inter ~19us, hull ~830us, mink ~75us)\n"
+"  - Volume verification via divergence theorem (mesh_signed_volume)\n"
+"  - Updated talmud docs from stubs to implemented\n"
+"  - Total: 115 tests, 40 benchmarks, all passing\n"
+"\n"
+"KEY TYPES: ts_csg_vertex, ts_csg_poly, ts_csg_polylist, ts_csg_bsp\n"
+"ALGORITHM: mesh->polygons, BSP build, clip/invert, fan triangulation back.\n"
+"REMAINING STUBS: ts_extrude.h (linear_extrude, rotate_extrude).\n";
 static const struct help_node TREE[] = {
     /* root */
     { "", HELP_ROOT },
@@ -3371,6 +3394,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s011", HELP_MEMORY_ACTIVE_SESSION_S011 },
     { "memory.active.session-s012", HELP_MEMORY_ACTIVE_SESSION_S012 },
     { "memory.active.session-s013", HELP_MEMORY_ACTIVE_SESSION_S013 },
+    { "memory.active.session-s014", HELP_MEMORY_ACTIVE_SESSION_S014 },
     { NULL, NULL }
 };
 
