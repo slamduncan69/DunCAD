@@ -3276,27 +3276,28 @@ static const char HELP_MEMORY_ACTIVE_SESSION_S013[] =
 "Commit: e412b0d\n";
 
 static const char HELP_MEMORY_ACTIVE_SESSION_S014[] =
-"Session s014 (CSG Implementation)\n"
+"Session s014 (CSG + Extrusion)\n"
 "\n"
-"Session s014 — CSG Implementation\n"
+"Session s014 — CSG + Extrusion Implementation\n"
 "\n"
 "DATE: 2026-03-08\n"
-"COMMIT: 62b3c90\n"
+"COMMITS: 62b3c90, 4bb92c9, 058f4bc\n"
 "\n"
-"IMPLEMENTED:\n"
-"  - BSP-tree CSG engine in ts_csg.h (was stubs)\n"
-"  - Union, difference, intersection via Laidlaw/Trumbore algorithm\n"
-"  - Quickhull convex hull (initial tetrahedron + iterative expansion)\n"
-"  - Minkowski sum (vertex sum + convex hull, convex inputs)\n"
-"  - 12 new tests (GREEN+RED pairs for each operation)\n"
-"  - 5 new benchmarks (union ~25us, diff ~19us, inter ~19us, hull ~830us, mink ~75us)\n"
-"  - Volume verification via divergence theorem (mesh_signed_volume)\n"
-"  - Updated talmud docs from stubs to implemented\n"
-"  - Total: 115 tests, 40 benchmarks, all passing\n"
+"CSG (ts_csg.h) — BSP-tree boolean engine:\n"
+"  union ~25us, difference ~19us, intersection ~19us\n"
+"  Quickhull convex hull ~830us, Minkowski sum ~75us\n"
+"  Key types: ts_csg_vertex, ts_csg_poly, ts_csg_polylist, ts_csg_bsp\n"
+"  12 tests (GREEN+RED), 5 benchmarks\n"
 "\n"
-"KEY TYPES: ts_csg_vertex, ts_csg_poly, ts_csg_polylist, ts_csg_bsp\n"
-"ALGORITHM: mesh->polygons, BSP build, clip/invert, fan triangulation back.\n"
-"REMAINING STUBS: ts_extrude.h (linear_extrude, rotate_extrude).\n";
+"EXTRUSION (ts_extrude.h) — profile extrusion:\n"
+"  linear_extrude: twist, taper, center. ~686ns simple, ~12us twisted\n"
+"  rotate_extrude: closed polygon revolution. ~11.7us (fn=32)\n"
+"  Ear-clipping triangulation for caps. Pappus volume verified.\n"
+"  9 tests, 3 benchmarks\n"
+"\n"
+"TOTALS: 122 tests, 43 benchmarks, ALL PASSING.\n"
+"ZERO STUBS REMAINING in trinity_site.\n"
+"All OpenSCAD math functions now have pure C implementations.\n";
 static const struct help_node TREE[] = {
     /* root */
     { "", HELP_ROOT },
