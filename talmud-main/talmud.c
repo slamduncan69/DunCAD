@@ -2774,7 +2774,8 @@ static const char HELP_TOOLS_TRINITY_SITE[] =
 "  talmud tools trinity_site csg      CSG boolean ops (BSP-tree)\n"
 "  talmud tools trinity_site random   Parallel RNG (counter-based)\n"
 "  talmud tools trinity_site extrude  Extrusion (linear + rotate)\n"
-"  talmud tools trinity_site opencl   OpenCL GPU acceleration\n";
+"  talmud tools trinity_site opencl   OpenCL GPU acceleration\n"
+"  talmud tools trinity_site interp   OpenSCAD interpreter\n";
 
 static const char HELP_TOOLS_TRINITY_SITE_SCALAR[] =
 "Scalar Math Functions\n"
@@ -3038,6 +3039,43 @@ static const char HELP_TOOLS_TRINITY_SITE_OPENCL[] =
 "\n"
 "TESTS: 7 (init, vec3_add green+red, normalize, mat4, sin, rng)\n"
 "BENCHMARKS: 8 (5 GPU + 3 CPU comparison at 100k batch)\n";
+
+static const char HELP_TOOLS_TRINITY_SITE_INTERP[] =
+"OpenSCAD Interpreter\n"
+"\n"
+"OpenSCAD Interpreter (ts_interp)\n"
+"\n"
+"Reads .scad/.dcad files and renders to binary STL using Trinity Site.\n"
+"No external dependencies — pure C, no OpenSCAD binary needed.\n"
+"\n"
+"USAGE:\n"
+"  ts_interp <file.scad>                Render to output.stl\n"
+"  ts_interp <file.scad> -o <out.stl>   Render to specified file\n"
+"\n"
+"ARCHITECTURE:\n"
+"  ts_lexer.h   Tokenizer — keywords, operators, strings, numbers, $-vars\n"
+"  ts_parser.h  Recursive-descent parser — produces AST\n"
+"  ts_eval.h    Tree-walking evaluator — calls ts_* functions, produces mesh\n"
+"  ts_interp.c  CLI driver binary\n"
+"\n"
+"SUPPORTED OPENSCAD FEATURES:\n"
+"  3D:        cube, sphere, cylinder (with d/r/r1/r2, center)\n"
+"  2D:        circle, square, polygon (for extrusion input)\n"
+"  Transform: translate, rotate, scale, mirror, multmatrix, color\n"
+"  CSG:       union, difference, intersection, hull, minkowski\n"
+"  Extrude:   linear_extrude (twist/taper/center), rotate_extrude\n"
+"  Control:   if/else, for loops, module/function definitions\n"
+"  Expr:      arithmetic, comparison, logical, ternary, vector math\n"
+"  Functions: all built-in math (sin,cos,abs,pow,sqrt,etc), len, norm\n"
+"  Variables: $fn, $fa, $fs, user variables, named parameters\n"
+"\n"
+"GEOMETRY MODEL:\n"
+"  Transforms compose via matrix stack (outside-in, OpenSCAD convention)\n"
+"  Implicit union for block children (mesh concatenation)\n"
+"  Explicit CSG via BSP-tree boolean operations\n"
+"  2D profiles extruded to 3D via ts_linear_extrude/ts_rotate_extrude\n"
+"\n"
+"NOT YET SUPPORTED: include/use, let expressions, text, surface, import\n";
 
 static const char HELP_TOOLS_YOTZER[] =
 "The Build System\n"
@@ -3352,6 +3390,7 @@ static const struct help_node TREE[] = {
     { "tools.trinity_site.csg", HELP_TOOLS_TRINITY_SITE_CSG },
     { "tools.trinity_site.extrude", HELP_TOOLS_TRINITY_SITE_EXTRUDE },
     { "tools.trinity_site.opencl", HELP_TOOLS_TRINITY_SITE_OPENCL },
+    { "tools.trinity_site.interp", HELP_TOOLS_TRINITY_SITE_INTERP },
     { "tools.yotzer", HELP_TOOLS_YOTZER },
 
     /* ---- REFERENCE -- Core knowledge ---- */
