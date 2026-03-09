@@ -23,7 +23,7 @@ struct DC_ScadPreview {
     GtkWidget      *container;      /* GtkBox(V): toolbar + GL viewport */
     DC_GlViewport  *viewport;       /* real-time 3D viewport */
     GtkWidget      *status_label;
-    GtkWidget      *progress_bar;   /* pulsing progress during render */
+    GtkWidget      *progress_bar;   /* determinate progress during render */
     GtkWidget      *render_btn;
     GtkWidget      *reset_btn;
     GtkWidget      *ortho_btn;
@@ -33,85 +33,156 @@ struct DC_ScadPreview {
     char           *tmp_scad;       /* temp .scad path (owned) */
     char           *tmp_stl;        /* temp .stl path (owned) */
     int             rendering;
-    guint           pulse_id;       /* timer source for progress pulse */
+    guint           progress_id;    /* timer source for progress polling */
 
-    /* Multi-object render state */
+    /* Multi-object render state (legacy, kept for preamble) */
     DC_ScadStatements *stmts;       /* current split (owned) */
-    int             render_idx;     /* which statement we're rendering next */
-    int             render_total;   /* total statements to render */
-    int             render_ok;      /* how many succeeded */
-
-    /* Preamble: includes, variables, $fn/$fa/$fs — prepended to each object */
-    char           *preamble;       /* owned, collected from non-geometry stmts */
+    int             render_idx;
+    int             render_total;
+    int             render_ok;
+    char           *preamble;       /* owned */
 
     /* Transform panel overlay */
     DC_TransformPanel *transform;
+
+    /* Progressive render state */
+    unsigned int    render_gen;     /* generation counter — incremented each render */
+    volatile int    hq_cancel;      /* cooperative cancel flag for HQ task */
+    int             hq_running;     /* is HQ task in flight? */
+    ts_progress     progress;       /* shared progress — worker writes, UI reads */
 };
 
 /* -------------------------------------------------------------------------
- * Progress bar pulse timer
+ * Progress bar — polls shared ts_progress from worker thread
  * ---------------------------------------------------------------------- */
 static gboolean
-pulse_progress(gpointer data)
+poll_progress(gpointer data)
 {
     DC_ScadPreview *pv = data;
-    gtk_progress_bar_pulse(GTK_PROGRESS_BAR(pv->progress_bar));
+    int done  = pv->progress.done;
+    int total = pv->progress.total;
+
+    if (total > 0) {
+        double frac = (double)done / (double)total;
+        if (frac > 1.0) frac = 1.0;
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(pv->progress_bar), frac);
+    } else {
+        /* Total not yet known — pulse */
+        gtk_progress_bar_pulse(GTK_PROGRESS_BAR(pv->progress_bar));
+    }
     return G_SOURCE_CONTINUE;
 }
 
 static void
 progress_start(DC_ScadPreview *pv)
 {
+    pv->progress.done  = 0;
+    pv->progress.total = 0;
     gtk_widget_set_visible(pv->progress_bar, TRUE);
     gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(pv->progress_bar), 0.0);
-    pv->pulse_id = g_timeout_add(80, pulse_progress, pv);
+    pv->progress_id = g_timeout_add(100, poll_progress, pv);
 }
 
 static void
 progress_stop(DC_ScadPreview *pv)
 {
-    if (pv->pulse_id) {
-        g_source_remove(pv->pulse_id);
-        pv->pulse_id = 0;
+    if (pv->progress_id) {
+        g_source_remove(pv->progress_id);
+        pv->progress_id = 0;
     }
     gtk_widget_set_visible(pv->progress_bar, FALSE);
 }
 
 /* -------------------------------------------------------------------------
- * Async render via worker thread (keeps GTK main loop responsive)
+ * Two-pass progressive render pipeline
+ *
+ * Pass 1 (preview): $fn=12, $fa=12, $fs=2.0  — instant low-poly
+ * Pass 2 (HQ):      $fn=100, $fa=1, $fs=0.4  — full quality, cancellable
+ *
+ * Generation counter prevents stale results from overwriting newer ones.
  * ---------------------------------------------------------------------- */
+
 typedef struct {
     ts_mesh         mesh;
     ts_parse_error  err;
     double          elapsed;
-    char           *stl_path;  /* where the STL was written (owned) */
+    char           *stl_path;       /* where the STL was written (owned) */
+    unsigned int    gen;            /* generation this result belongs to */
+    int             is_hq;          /* 0=preview, 1=high-quality */
 } RenderResult;
+
+typedef struct {
+    char           *source;         /* owned copy of SCAD source */
+    unsigned int    gen;            /* generation counter */
+    int             is_hq;          /* 0=preview, 1=high-quality */
+    volatile int   *cancel;         /* points to pv->hq_cancel (HQ only) */
+    ts_progress    *progress;       /* shared progress tracker */
+} RenderTaskData;
+
+static void
+render_task_data_free(gpointer p)
+{
+    RenderTaskData *td = p;
+    free(td->source);
+    free(td);
+}
 
 /* Worker thread: interpret source and write STL (no GTK calls!) */
 static void
 render_thread_func(GTask *task, gpointer source_obj,
-                   gpointer task_data, GCancellable *cancel)
+                   gpointer task_data, GCancellable *cancellable)
 {
     (void)source_obj;
-    (void)cancel;
-    char *source = task_data;
+    (void)cancellable;
+    RenderTaskData *td = task_data;
 
     RenderResult *res = calloc(1, sizeof(*res));
     if (!res) return;
+
+    res->gen   = td->gen;
+    res->is_hq = td->is_hq;
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
     memset(&res->err, 0, sizeof(res->err));
-    res->mesh = ts_interpret(source, &res->err);
+
+    ts_interpret_opts opts = {0};
+    if (td->is_hq) {
+        /* Full quality — 3D print parameters */
+        opts.fn_override = 100;
+        opts.fa_override = 1;
+        opts.fs_override = 0.4;
+        opts.force_quality = 0;  /* respect source $fn if set */
+        opts.cancel      = td->cancel;
+    } else {
+        /* Preview — fast low-poly, FORCE overrides source $fn */
+        opts.fn_override = 12;
+        opts.fa_override = 12;
+        opts.fs_override = 2.0;
+        opts.force_quality = 1;  /* ignore source $fn/$fa/$fs */
+        opts.cancel      = NULL; /* preview is fast, no cancel needed */
+    }
+    opts.progress = td->progress;
+    res->mesh = ts_interpret_ex(td->source, &res->err, &opts);
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
     res->elapsed = (double)(t1.tv_sec - t0.tv_sec)
                  + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
 
-    /* Write STL in the worker thread too */
+    /* Check if cancelled (HQ only) */
+    if (td->cancel && *td->cancel) {
+        ts_mesh_free(&res->mesh);
+        free(res);
+        g_task_return_pointer(task, NULL, NULL);
+        return;
+    }
+
+    /* Write STL in the worker thread */
     if (res->err.msg[0] == '\0' && res->mesh.tri_count > 0) {
-        res->stl_path = strdup("/tmp/duncad-preview.stl");
+        const char *path = td->is_hq ? "/tmp/duncad-preview-hq.stl"
+                                      : "/tmp/duncad-preview-lq.stl";
+        res->stl_path = strdup(path);
         if (ts_mesh_write_stl(&res->mesh, res->stl_path) != 0) {
             free(res->stl_path);
             res->stl_path = NULL;
@@ -121,7 +192,10 @@ render_thread_func(GTask *task, gpointer source_obj,
     g_task_return_pointer(task, res, NULL);
 }
 
-/* Main thread callback: load result into GL viewport */
+/* Forward declaration */
+static void launch_hq_render(DC_ScadPreview *pv, const char *source);
+
+/* Main thread callback for BOTH preview and HQ results */
 static void
 render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
 {
@@ -129,20 +203,39 @@ render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
     DC_ScadPreview *pv = userdata;
     RenderResult *res = g_task_propagate_pointer(G_TASK(result), NULL);
 
-    pv->rendering = 0;
-    progress_stop(pv);
-    gtk_widget_set_sensitive(pv->render_btn, TRUE);
-
+    /* NULL = cancelled */
     if (!res) {
-        gtk_label_set_text(GTK_LABEL(pv->status_label), "Render failed");
+        if (pv->hq_running) {
+            pv->hq_running = 0;
+        }
         return;
     }
 
+    /* Stale generation — discard */
+    if (res->gen != pv->render_gen) {
+        ts_mesh_free(&res->mesh);
+        free(res->stl_path);
+        free(res);
+        return;
+    }
+
+    if (res->is_hq) {
+        /* HQ pass completed */
+        pv->hq_running = 0;
+        progress_stop(pv);
+    } else {
+        /* Preview pass completed — re-enable render button */
+        pv->rendering = 0;
+        gtk_widget_set_sensitive(pv->render_btn, TRUE);
+    }
+
+    /* Handle errors */
     if (res->err.msg[0]) {
         char msg[256];
         snprintf(msg, sizeof(msg), "Parse error (line %d): %.200s",
                  res->err.line, res->err.msg);
         gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
+        if (!res->is_hq) progress_stop(pv);
         ts_mesh_free(&res->mesh);
         free(res->stl_path);
         free(res);
@@ -150,21 +243,30 @@ render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
     }
 
     if (res->mesh.tri_count == 0) {
-        gtk_label_set_text(GTK_LABEL(pv->status_label),
-                           "No geometry produced");
+        gtk_label_set_text(GTK_LABEL(pv->status_label), "No geometry produced");
+        if (!res->is_hq) progress_stop(pv);
         ts_mesh_free(&res->mesh);
         free(res->stl_path);
         free(res);
         return;
     }
 
+    /* Load mesh into viewport */
     if (res->stl_path) {
+        dc_gl_viewport_clear_objects(pv->viewport);
+        dc_gl_viewport_clear_mesh(pv->viewport);
         int rc = dc_gl_viewport_load_stl(pv->viewport, res->stl_path);
         if (rc == 0) {
-            char status[128];
-            snprintf(status, sizeof(status),
-                     "Trinity Site: %d tris in %.3fs — drag to orbit",
-                     res->mesh.tri_count, res->elapsed);
+            char status[192];
+            if (res->is_hq) {
+                snprintf(status, sizeof(status),
+                         "HQ: %d tris in %.3fs",
+                         res->mesh.tri_count, res->elapsed);
+            } else {
+                snprintf(status, sizeof(status),
+                         "Preview: %d tris in %.3fs — refining...",
+                         res->mesh.tri_count, res->elapsed);
+            }
             gtk_label_set_text(GTK_LABEL(pv->status_label), status);
         } else {
             gtk_label_set_text(GTK_LABEL(pv->status_label),
@@ -177,8 +279,45 @@ render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
                            "Failed to write temp STL");
     }
 
+    /* If preview just completed, launch HQ in background */
+    if (!res->is_hq && res->mesh.tri_count > 0) {
+        RenderTaskData *td = g_task_get_task_data(G_TASK(result));
+        if (td && td->source) {
+            launch_hq_render(pv, td->source);
+        }
+    }
+
     ts_mesh_free(&res->mesh);
     free(res);
+}
+
+static void
+launch_hq_render(DC_ScadPreview *pv, const char *source)
+{
+    /* Cancel any existing HQ render */
+    pv->hq_cancel = 1;
+    pv->hq_cancel = 0;  /* reset for new HQ task */
+
+    /* Reset progress for HQ pass */
+    pv->progress.done  = 0;
+    pv->progress.total = 0;
+
+    RenderTaskData *td = calloc(1, sizeof(*td));
+    td->source   = strdup(source);
+    td->gen      = pv->render_gen;
+    td->is_hq    = 1;
+    td->cancel   = &pv->hq_cancel;
+    td->progress = &pv->progress;
+
+    pv->hq_running = 1;
+
+    GTask *task = g_task_new(NULL, NULL, render_done_cb, pv);
+    g_task_set_task_data(task, td, render_task_data_free);
+    g_task_run_in_thread(task, render_thread_func);
+    g_object_unref(task);
+
+    dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "HQ render launched (gen %u)",
+           pv->render_gen);
 }
 
 static void
@@ -197,20 +336,36 @@ do_render(DC_ScadPreview *pv)
         return;
     }
 
-    /* Clear viewport and launch async render */
+    /* Cancel any in-flight HQ render */
+    pv->hq_cancel = 1;
+
+    /* Increment generation — all older results will be discarded */
+    pv->render_gen++;
+
+    /* Clear viewport and launch preview render */
     dc_gl_viewport_clear_objects(pv->viewport);
     dc_gl_viewport_clear_mesh(pv->viewport);
 
     pv->rendering = 1;
     gtk_widget_set_sensitive(pv->render_btn, FALSE);
     gtk_label_set_text(GTK_LABEL(pv->status_label),
-                       "Rendering with Trinity Site...");
+                       "Preview rendering...");
     progress_start(pv);
 
+    RenderTaskData *td = calloc(1, sizeof(*td));
+    td->source   = text;  /* takes ownership */
+    td->gen      = pv->render_gen;
+    td->is_hq    = 0;
+    td->cancel   = NULL;
+    td->progress = &pv->progress;
+
     GTask *task = g_task_new(NULL, NULL, render_done_cb, pv);
-    g_task_set_task_data(task, text, free);
+    g_task_set_task_data(task, td, render_task_data_free);
     g_task_run_in_thread(task, render_thread_func);
     g_object_unref(task);
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "progressive render started (gen %u)",
+           pv->render_gen);
 }
 
 /* -------------------------------------------------------------------------
@@ -326,6 +481,7 @@ void
 dc_scad_preview_free(DC_ScadPreview *pv)
 {
     if (!pv) return;
+    pv->hq_cancel = 1;  /* signal any in-flight HQ to stop */
     progress_stop(pv);
     dc_transform_panel_free(pv->transform);
     dc_gl_viewport_free(pv->viewport);

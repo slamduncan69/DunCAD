@@ -104,8 +104,16 @@ static inline double ts_val_vec_get(ts_val v, int idx) {
 #define TS_ENV_MAX 256
 
 typedef struct ts_env ts_env;
+/* Shared progress tracking — written by worker thread, read by UI thread */
+typedef struct {
+    volatile int done;      /* statements completed so far */
+    volatile int total;     /* total geometry statements to process */
+} ts_progress;
+
 struct ts_env {
     ts_env *parent;
+    volatile int *cancel;   /* cooperative cancellation flag */
+    ts_progress  *progress; /* shared progress (root env only, inherited) */
     char   *names[TS_ENV_MAX];
     ts_val  values[TS_ENV_MAX];
     int     count;
@@ -118,12 +126,29 @@ struct ts_env {
     char   *func_names[TS_ENV_MAX];
     ts_ast *func_defs[TS_ENV_MAX];
     int     func_count;
+
+    /* Forced quality overrides — bypass source $fn/$fa/$fs assignments */
+    double  force_fn;   /* >0 = override any $fn from source */
+    double  force_fa;   /* >0 = override any $fa from source */
+    double  force_fs;   /* >0 = override any $fs from source */
 };
 
 static inline ts_env *ts_env_new(ts_env *parent) {
     ts_env *e = (ts_env *)calloc(1, sizeof(ts_env));
     e->parent = parent;
+    e->cancel = parent ? parent->cancel : NULL;
+    e->progress = parent ? parent->progress : NULL;
+    /* Inherit forced quality overrides */
+    if (parent) {
+        e->force_fn = parent->force_fn;
+        e->force_fa = parent->force_fa;
+        e->force_fs = parent->force_fs;
+    }
     return e;
+}
+
+static inline int ts_env_cancelled(ts_env *e) {
+    return e->cancel && *e->cancel;
 }
 
 static inline void ts_env_free(ts_env *e) {
@@ -188,6 +213,8 @@ static inline double ts_env_get_special(ts_env *e, const char *name,
 }
 
 static inline int ts_resolve_fn(ts_env *e) {
+    /* Forced override takes absolute precedence */
+    if (e->force_fn > 0) return (int)e->force_fn;
     double fn = ts_env_get_special(e, "$fn", 0);
     if (fn > 0) return (int)fn;
     /* Default: use $fa and $fs to compute */
@@ -542,6 +569,7 @@ static inline void ts_apply_xform(ts_mesh *m, ts_mat4 xform) {
 static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
     ts_mesh result = ts_mesh_init();
     if (!node) return result;
+    if (ts_env_cancelled(env)) return result;
 
     switch (node->type) {
 
@@ -568,6 +596,20 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             }
         }
         /* Second pass: evaluate geometry */
+        /* Count geometry statements for progress (root block only) */
+        int is_root = (env->progress && env->progress->total == 0);
+        if (is_root) {
+            int geo_count = 0;
+            for (int i = 0; i < node->child_count; i++) {
+                ts_ast *c = node->children[i];
+                if (c->type != TS_AST_ASSIGN && c->type != TS_AST_MODULE_DEF &&
+                    c->type != TS_AST_FUNCTION_DEF && c->type != TS_AST_INCLUDE &&
+                    c->type != TS_AST_USE && c->type != TS_AST_ECHO)
+                    geo_count++;
+            }
+            env->progress->total = geo_count;
+            env->progress->done = 0;
+        }
         for (int i = 0; i < node->child_count; i++) {
             ts_ast *c = node->children[i];
             if (c->type == TS_AST_ASSIGN || c->type == TS_AST_MODULE_DEF ||
@@ -577,6 +619,9 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             ts_mesh child = ts_eval_geometry(c, env, xform);
             ts_mesh_append(&result, &child);
             ts_mesh_free(&child);
+            if (is_root && env->progress)
+                env->progress->done++;
+            if (ts_env_cancelled(env)) return result;
         }
         return result;
     }
@@ -639,6 +684,7 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             for (double i = start;
                  step > 0 ? i <= end + 1e-10 : i >= end - 1e-10;
                  i += step) {
+                if (ts_env_cancelled(env)) break;
                 ts_env_set(loop_env, node->iter_var, ts_val_num(i));
                 ts_mesh child = ts_eval_geometry(node->body, loop_env, xform);
                 ts_mesh_append(&result, &child);
@@ -646,6 +692,7 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             }
         } else if (range.type == TS_VAL_VECTOR) {
             for (int i = 0; i < range.count; i++) {
+                if (ts_env_cancelled(env)) break;
                 ts_env_set(loop_env, node->iter_var, range.items[i]);
                 ts_mesh child = ts_eval_geometry(node->body, loop_env, xform);
                 ts_mesh_append(&result, &child);
@@ -1097,8 +1144,20 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
  * TOP-LEVEL INTERPRETER
  * ================================================================ */
 
-/* Interpret source code, produce mesh */
-static inline ts_mesh ts_interpret(const char *source, ts_parse_error *err) {
+/* Options for ts_interpret_ex — quality overrides + cancellation + progress */
+typedef struct {
+    double fn_override;    /* >0 = override default $fn */
+    double fa_override;    /* >0 = override default $fa */
+    double fs_override;    /* >0 = override default $fs */
+    int    force_quality;  /* if true, overrides CANNOT be overridden by source */
+    volatile int *cancel;  /* if non-NULL, checked for cooperative abort */
+    ts_progress  *progress; /* if non-NULL, updated with statement progress */
+} ts_interpret_opts;
+
+/* Interpret source code with options, produce mesh */
+static inline ts_mesh ts_interpret_ex(const char *source,
+                                       ts_parse_error *err,
+                                       const ts_interpret_opts *opts) {
     ts_ast *root = ts_parse(source, err);
     if (err && err->msg[0]) {
         ts_ast_free(root);
@@ -1106,10 +1165,20 @@ static inline ts_mesh ts_interpret(const char *source, ts_parse_error *err) {
     }
 
     ts_env *env = ts_env_new(NULL);
-    /* Set default special variables (God's ordained 3D print parameters) */
-    ts_env_set(env, "$fn", ts_val_num(100));
-    ts_env_set(env, "$fa", ts_val_num(1));
-    ts_env_set(env, "$fs", ts_val_num(0.4));
+    double fn = (opts && opts->fn_override > 0) ? opts->fn_override : 100;
+    double fa = (opts && opts->fa_override > 0) ? opts->fa_override : 1;
+    double fs = (opts && opts->fs_override > 0) ? opts->fs_override : 0.4;
+    ts_env_set(env, "$fn", ts_val_num(fn));
+    ts_env_set(env, "$fa", ts_val_num(fa));
+    ts_env_set(env, "$fs", ts_val_num(fs));
+    /* Force mode: source $fn/$fa/$fs assignments are ignored */
+    if (opts && opts->force_quality) {
+        env->force_fn = fn;
+        env->force_fa = fa;
+        env->force_fs = fs;
+    }
+    if (opts && opts->cancel) env->cancel = opts->cancel;
+    if (opts && opts->progress) env->progress = opts->progress;
 
     ts_mat4 identity = ts_mat4_identity();
     ts_mesh result = ts_eval_geometry(root, env, identity);
@@ -1117,6 +1186,11 @@ static inline ts_mesh ts_interpret(const char *source, ts_parse_error *err) {
     ts_env_free(env);
     ts_ast_free(root);
     return result;
+}
+
+/* Interpret source code, produce mesh (convenience wrapper) */
+static inline ts_mesh ts_interpret(const char *source, ts_parse_error *err) {
+    return ts_interpret_ex(source, err, NULL);
 }
 
 /* Read file, interpret, write STL */
