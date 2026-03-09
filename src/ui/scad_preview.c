@@ -7,10 +7,14 @@
 #include "ui/transform_panel.h"
 #include "core/log.h"
 
+/* Trinity Site — native OpenSCAD interpreter (replaces OpenSCAD subprocess) */
+#include "ts_eval.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 /* -------------------------------------------------------------------------
  * Internal structure
@@ -128,33 +132,6 @@ collect_preamble(DC_ScadStatements *stmts)
  * 4. Load each STL as a separate GL object with line range
  * 5. If splitting fails or yields 1 statement, fall back to single-STL
  * ---------------------------------------------------------------------- */
-static void render_next_statement(DC_ScadPreview *pv);
-
-static void
-on_stmt_render_done(DC_ScadResult *result, void *userdata)
-{
-    DC_ScadPreview *pv = userdata;
-    int idx = pv->render_idx - 1; /* render_idx was incremented before launch */
-
-    if (result && result->exit_code == 0 && pv->stmts && idx < pv->stmts->count) {
-        /* Load this statement's STL as an object */
-        char stl_path[256];
-        snprintf(stl_path, sizeof(stl_path), "/tmp/duncad-obj-%d.stl", idx);
-
-        DC_ScadStatement *s = &pv->stmts->stmts[idx];
-        int rc = dc_gl_viewport_add_object(pv->viewport, stl_path,
-                                            s->line_start, s->line_end);
-        if (rc >= 0) pv->render_ok++;
-
-        unlink(stl_path);
-    }
-
-    if (result) dc_scad_result_free(result);
-
-    /* Continue with next statement */
-    render_next_statement(pv);
-}
-
 static void
 render_next_statement(DC_ScadPreview *pv)
 {
@@ -195,62 +172,103 @@ render_next_statement(DC_ScadPreview *pv)
     int idx = pv->render_idx++;
     DC_ScadStatement *s = &pv->stmts->stmts[idx];
 
-    /* Write preamble + this geometry statement to a temp SCAD file */
-    char scad_path[256];
-    snprintf(scad_path, sizeof(scad_path), "/tmp/duncad-obj-%d.scad", idx);
-    char stl_path[256];
-    snprintf(stl_path, sizeof(stl_path), "/tmp/duncad-obj-%d.stl", idx);
-
-    FILE *f = fopen(scad_path, "w");
-    if (!f) {
+    /* Build source: preamble + geometry statement */
+    size_t plen = pv->preamble ? strlen(pv->preamble) : 0;
+    size_t slen = strlen(s->text);
+    char *source = (char *)malloc(plen + slen + 2);
+    if (!source) {
         render_next_statement(pv);
         return;
     }
+    source[0] = '\0';
     if (pv->preamble && pv->preamble[0])
-        fputs(pv->preamble, f);
-    fputs(s->text, f);
-    fclose(f);
+        memcpy(source, pv->preamble, plen);
+    memcpy(source + plen, s->text, slen);
+    source[plen + slen] = '\n';
+    source[plen + slen + 1] = '\0';
 
-    char msg[128];
-    snprintf(msg, sizeof(msg), "Rendering object %d/%d...", idx + 1, pv->render_total);
-    gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
+    /* Interpret with Trinity Site */
+    ts_parse_error err;
+    memset(&err, 0, sizeof(err));
+    ts_mesh mesh = ts_interpret(source, &err);
+    free(source);
 
-    dc_scad_run_export(scad_path, stl_path, on_stmt_render_done, pv);
+    if (err.msg[0] == '\0' && mesh.tri_count > 0) {
+        /* Write temp STL and load into viewport */
+        char stl_path[256];
+        snprintf(stl_path, sizeof(stl_path), "/tmp/duncad-obj-%d.stl", idx);
+
+        if (ts_mesh_write_stl(&mesh, stl_path) == 0) {
+            int rc = dc_gl_viewport_add_object(pv->viewport, stl_path,
+                                                s->line_start, s->line_end);
+            if (rc >= 0) pv->render_ok++;
+            unlink(stl_path);
+        }
+    } else if (err.msg[0]) {
+        dc_log(DC_LOG_WARN, DC_LOG_EVENT_APP,
+               "Trinity Site parse error at line %d: %s", err.line, err.msg);
+    }
+
+    ts_mesh_free(&mesh);
+
+    /* Continue with next statement (tail-recursive loop) */
+    render_next_statement(pv);
 }
 
-/* Fallback: single-STL render (when split yields 0 or 1 statement) */
+/* Fallback: single-STL render via Trinity Site (when split yields 0-1 stmts) */
 static void
-on_single_render_done(DC_ScadResult *result, void *userdata)
+render_single(DC_ScadPreview *pv, const char *source)
 {
-    DC_ScadPreview *pv = userdata;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    ts_parse_error err;
+    memset(&err, 0, sizeof(err));
+    ts_mesh mesh = ts_interpret(source, &err);
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double elapsed = (double)(t1.tv_sec - t0.tv_sec)
+                   + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+
     pv->rendering = 0;
     gtk_widget_set_sensitive(pv->render_btn, TRUE);
 
-    if (!result) {
-        gtk_label_set_text(GTK_LABEL(pv->status_label), "Render failed: no result");
+    if (err.msg[0]) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Parse error (line %d): %.200s",
+                 err.line, err.msg);
+        gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
+        ts_mesh_free(&mesh);
         return;
     }
 
-    if (result->exit_code == 0) {
+    if (mesh.tri_count == 0) {
+        gtk_label_set_text(GTK_LABEL(pv->status_label),
+                           "No geometry produced");
+        ts_mesh_free(&mesh);
+        return;
+    }
+
+    /* Write temp STL and load into GL viewport */
+    if (ts_mesh_write_stl(&mesh, pv->tmp_stl) == 0) {
         int rc = dc_gl_viewport_load_stl(pv->viewport, pv->tmp_stl);
         if (rc == 0) {
             char status[128];
-            snprintf(status, sizeof(status), "Rendered in %.1fs — drag to orbit, scroll to zoom",
-                     result->elapsed_secs);
+            snprintf(status, sizeof(status),
+                     "Trinity Site: %d tris in %.3fs — drag to orbit",
+                     mesh.tri_count, elapsed);
             gtk_label_set_text(GTK_LABEL(pv->status_label), status);
         } else {
-            gtk_label_set_text(GTK_LABEL(pv->status_label), "Render OK but STL load failed");
+            gtk_label_set_text(GTK_LABEL(pv->status_label),
+                               "Render OK but STL load failed");
         }
+        unlink(pv->tmp_stl);
     } else {
-        const char *err = result->stderr_text ? result->stderr_text : "unknown error";
-        char msg[256];
-        snprintf(msg, sizeof(msg), "Error (exit %d): %.200s", result->exit_code, err);
-        char *nl = strchr(msg, '\n');
-        if (nl) *nl = '\0';
-        gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
+        gtk_label_set_text(GTK_LABEL(pv->status_label),
+                           "Failed to write temp STL");
     }
 
-    dc_scad_result_free(result);
+    ts_mesh_free(&mesh);
 }
 
 static void
@@ -307,24 +325,16 @@ do_render(DC_ScadPreview *pv)
         free(text);
         render_next_statement(pv);
     } else {
-        /* Single statement or parse failed — use legacy single-STL path */
+        /* Single statement or parse failed — render as one piece */
         dc_gl_viewport_clear_objects(pv->viewport);
-
-        FILE *f = fopen(pv->tmp_scad, "w");
-        if (!f) {
-            gtk_label_set_text(GTK_LABEL(pv->status_label), "Cannot write temp file");
-            free(text);
-            return;
-        }
-        fputs(text, f);
-        fclose(f);
-        free(text);
 
         pv->rendering = 1;
         gtk_widget_set_sensitive(pv->render_btn, FALSE);
-        gtk_label_set_text(GTK_LABEL(pv->status_label), "Rendering STL...");
+        gtk_label_set_text(GTK_LABEL(pv->status_label),
+                           "Rendering with Trinity Site...");
 
-        dc_scad_run_export(pv->tmp_scad, pv->tmp_stl, on_single_render_done, pv);
+        render_single(pv, text);
+        free(text);
     }
 }
 

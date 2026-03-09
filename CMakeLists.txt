@@ -97,7 +97,10 @@ add_executable(duncad
     src/inspect/inspect.c
     src/scad/scad_runner.c
 )
-target_include_directories(duncad PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_include_directories(duncad PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/talmud-main/talmud/sacred/trinity_site"
+)
 target_compile_definitions(duncad PRIVATE DC_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(duncad
     PRIVATE dc_core
@@ -163,7 +166,10 @@ add_executable(test_bezier_canvas
     src/gl/stl_loader.c
     src/scad/scad_runner.c
 )
-target_include_directories(test_bezier_canvas PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_include_directories(test_bezier_canvas PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/talmud-main/talmud/sacred/trinity_site"
+)
 target_compile_definitions(test_bezier_canvas PRIVATE DC_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_bezier_canvas
     PRIVATE dc_core
@@ -195,7 +201,10 @@ add_executable(test_bezier_editor
     src/gl/stl_loader.c
     src/scad/scad_runner.c
 )
-target_include_directories(test_bezier_editor PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_include_directories(test_bezier_editor PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/talmud-main/talmud/sacred/trinity_site"
+)
 target_compile_definitions(test_bezier_editor PRIVATE DC_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_bezier_editor
     PRIVATE dc_core
