@@ -8,7 +8,7 @@
 
   <metadata>
     <property name="mimetypes">text/x-openscad</property>
-    <property name="globs">*.scad</property>
+    <property name="globs">*.scad;*.dcad</property>
     <property name="line-comment-start">//</property>
     <property name="block-comment-start">/*</property>
     <property name="block-comment-end">*/</property>

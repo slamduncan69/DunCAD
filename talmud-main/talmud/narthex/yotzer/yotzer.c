@@ -216,10 +216,12 @@ static const struct target {
     const char *src_rel;
     const char *bin_rel;
     int needs_src_dir;
+    const char *extra;   /* additional compiler/linker flags (e.g. "-lm") */
 } targets[] = {
-    { "talmud",  "../talmud.c",                  "talmud",                     1 },
-    { "darshan", "profane/darshan/darshan.c",     "profane/darshan/darshan",    1 },
-    { "sofer",   "narthex/sofer/sofer.c",         "narthex/sofer/sofer",        1 },
+    { "talmud",        "../talmud.c",                              "talmud",                              1, NULL },
+    { "darshan",       "profane/darshan/darshan.c",                "profane/darshan/darshan",             1, NULL },
+    { "sofer",         "narthex/sofer/sofer.c",                    "narthex/sofer/sofer",                 1, NULL },
+    { "trinity_site",  "sacred/trinity_site/trinity_site.c",       "sacred/trinity_site/trinity_site",    0, "-lm" },
 };
 #define N_TARGETS (int)(sizeof(targets) / sizeof(targets[0]))
 
@@ -227,10 +229,15 @@ static int build_target(const struct target *t) {
     char src[8192], bin[8192], defs[8192];
     snprintf(src, sizeof(src), "%s/%s", g_talmud_dir, t->src_rel);
     snprintf(bin, sizeof(bin), "%s/%s", g_talmud_dir, t->bin_rel);
+    defs[0] = '\0';
+    int off = 0;
     if (t->needs_src_dir)
-        snprintf(defs, sizeof(defs), "-DTALMUD_SRC_DIR='\"%s\"'", g_talmud_dir);
-    else
-        defs[0] = '\0';
+        off += snprintf(defs + off, sizeof(defs) - (size_t)off,
+                        "-DTALMUD_SRC_DIR='\"%s\"'", g_talmud_dir);
+    if (t->extra) {
+        if (off > 0) defs[off++] = ' ';
+        snprintf(defs + off, sizeof(defs) - (size_t)off, "%s", t->extra);
+    }
     return build_one(t->label, src, bin, defs[0] ? defs : NULL);
 }
 

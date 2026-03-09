@@ -899,18 +899,26 @@ trigger_export(DC_BezierEditor *ed)
     }
 
     GtkFileDialog *dialog = gtk_file_dialog_new();
-    gtk_file_dialog_set_title(dialog, "Export SCAD");
+    gtk_file_dialog_set_title(dialog, "Export Shape");
 
     /* Default filename */
-    gtk_file_dialog_set_initial_name(dialog, "shape.scad");
+    gtk_file_dialog_set_initial_name(dialog, "shape.dcad");
 
-    /* File filter for .scad */
+    /* File filters: .dcad primary, .scad secondary */
     GListStore *filters = g_list_store_new(GTK_TYPE_FILE_FILTER);
-    GtkFileFilter *filter = gtk_file_filter_new();
-    gtk_file_filter_set_name(filter, "OpenSCAD files (*.scad)");
-    gtk_file_filter_add_pattern(filter, "*.scad");
-    g_list_store_append(filters, filter);
-    g_object_unref(filter);
+
+    GtkFileFilter *dcad_filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(dcad_filter, "DunCAD files (*.dcad)");
+    gtk_file_filter_add_pattern(dcad_filter, "*.dcad");
+    g_list_store_append(filters, dcad_filter);
+    g_object_unref(dcad_filter);
+
+    GtkFileFilter *scad_filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(scad_filter, "OpenSCAD files (*.scad)");
+    gtk_file_filter_add_pattern(scad_filter, "*.scad");
+    g_list_store_append(filters, scad_filter);
+    g_object_unref(scad_filter);
+
     gtk_file_dialog_set_filters(dialog, G_LIST_MODEL(filters));
     g_object_unref(filters);
 
@@ -1383,11 +1391,12 @@ dc_bezier_editor_export_scad(DC_BezierEditor *editor,
         return -1;
     }
 
-    /* Copy base, strip .scad, sanitize */
+    /* Copy base, strip .dcad or .scad extension, sanitize */
     size_t nlen = 0;
     for (size_t i = 0; i < blen; i++) {
-        if (base[i] == '.' && i + 5 == blen &&
-            strcmp(base + i, ".scad") == 0)
+        if (base[i] == '.' &&
+            ((i + 5 == blen && strcmp(base + i, ".scad") == 0) ||
+             (i + 5 == blen && strcmp(base + i, ".dcad") == 0)))
             break;
         char c = base[i];
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||

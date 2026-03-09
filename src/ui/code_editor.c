@@ -123,14 +123,21 @@ on_open_clicked(GtkButton *btn, gpointer data)
     DC_CodeEditor *ed = data;
 
     GtkFileDialog *dialog = gtk_file_dialog_new();
-    gtk_file_dialog_set_title(dialog, "Open SCAD File");
+    gtk_file_dialog_set_title(dialog, "Open File");
 
     GListStore *filters = g_list_store_new(GTK_TYPE_FILE_FILTER);
-    GtkFileFilter *filter = gtk_file_filter_new();
-    gtk_file_filter_set_name(filter, "OpenSCAD files (*.scad)");
-    gtk_file_filter_add_pattern(filter, "*.scad");
-    g_list_store_append(filters, filter);
-    g_object_unref(filter);
+
+    GtkFileFilter *dcad_filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(dcad_filter, "DunCAD files (*.dcad)");
+    gtk_file_filter_add_pattern(dcad_filter, "*.dcad");
+    g_list_store_append(filters, dcad_filter);
+    g_object_unref(dcad_filter);
+
+    GtkFileFilter *scad_filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(scad_filter, "OpenSCAD files (*.scad)");
+    gtk_file_filter_add_pattern(scad_filter, "*.scad");
+    g_list_store_append(filters, scad_filter);
+    g_object_unref(scad_filter);
 
     GtkFileFilter *all = gtk_file_filter_new();
     gtk_file_filter_set_name(all, "All files");
@@ -157,8 +164,8 @@ on_save_clicked(GtkButton *btn, gpointer data)
     } else {
         /* No path yet — trigger Save As */
         GtkFileDialog *dialog = gtk_file_dialog_new();
-        gtk_file_dialog_set_title(dialog, "Save SCAD File");
-        gtk_file_dialog_set_initial_name(dialog, "untitled.scad");
+        gtk_file_dialog_set_title(dialog, "Save File");
+        gtk_file_dialog_set_initial_name(dialog, "untitled.dcad");
 
         GtkWindow *win = ed->window ? GTK_WINDOW(ed->window) : NULL;
         gtk_file_dialog_save(dialog, win, NULL,
@@ -195,13 +202,13 @@ on_save_as_clicked(GtkButton *btn, gpointer data)
     DC_CodeEditor *ed = data;
 
     GtkFileDialog *dialog = gtk_file_dialog_new();
-    gtk_file_dialog_set_title(dialog, "Save SCAD File As");
+    gtk_file_dialog_set_title(dialog, "Save File As");
     if (ed->file_path) {
         const char *base = strrchr(ed->file_path, '/');
         base = base ? base + 1 : ed->file_path;
         gtk_file_dialog_set_initial_name(dialog, base);
     } else {
-        gtk_file_dialog_set_initial_name(dialog, "untitled.scad");
+        gtk_file_dialog_set_initial_name(dialog, "untitled.dcad");
     }
 
     GtkWindow *win = ed->window ? GTK_WINDOW(ed->window) : NULL;
@@ -221,7 +228,7 @@ update_path_label(DC_CodeEditor *ed)
         base = base ? base + 1 : ed->file_path;
         gtk_label_set_text(GTK_LABEL(ed->path_label), base);
     } else {
-        gtk_label_set_text(GTK_LABEL(ed->path_label), "untitled.scad");
+        gtk_label_set_text(GTK_LABEL(ed->path_label), "untitled.dcad");
     }
 }
 
@@ -298,7 +305,7 @@ dc_code_editor_new(void)
     GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
     gtk_box_append(GTK_BOX(toolbar), sep);
 
-    ed->path_label = gtk_label_new("untitled.scad");
+    ed->path_label = gtk_label_new("untitled.dcad");
     gtk_label_set_xalign(GTK_LABEL(ed->path_label), 0.0f);
     gtk_widget_set_hexpand(ed->path_label, TRUE);
     gtk_widget_set_opacity(ed->path_label, 0.7);
