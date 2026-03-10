@@ -3070,6 +3070,7 @@ static const char HELP_TOOLS_TRINITY_SITE_INTERP[] =
 "  Expr:      arithmetic, comparison, logical, ternary, vector math\n"
 "  Functions: all built-in math (sin,cos,abs,pow,sqrt,etc), len, norm\n"
 "  Variables: $fn, $fa, $fs, user variables, named parameters\n"
+"  Advanced:  include/use, let(), children(), list comprehensions\n"
 "\n"
 "GEOMETRY MODEL:\n"
 "  Transforms compose via matrix stack (outside-in, OpenSCAD convention)\n"
@@ -3077,7 +3078,7 @@ static const char HELP_TOOLS_TRINITY_SITE_INTERP[] =
 "  Explicit CSG via BSP-tree boolean operations\n"
 "  2D profiles extruded to 3D via ts_linear_extrude/ts_rotate_extrude\n"
 "\n"
-"NOT YET SUPPORTED: include/use, let expressions, text, surface, import\n";
+"NOT YET SUPPORTED: text, surface, import\n";
 
 static const char HELP_TOOLS_YOTZER[] =
 "The Build System\n"

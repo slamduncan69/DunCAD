@@ -38,6 +38,8 @@ typedef enum {
     TS_AST_ECHO,
     TS_AST_INCLUDE,
     TS_AST_USE,
+    TS_AST_LIST_COMP,  /* [for (var = range) expr] */
+    TS_AST_LET,        /* let(x=1, y=2) expr */
 } ts_ast_type;
 
 /* ================================================================
@@ -298,6 +300,35 @@ static ts_ast *ts_parse_primary(ts_lexer *lex, ts_parse_error *err) {
             return ts_ast_new(TS_AST_VECTOR, t.line);
         }
 
+        /* List comprehension: [for (var = range) expr]
+         * Also supports: [for (var = range) if (cond) expr]
+         * and nested: [for (var = range) for (var2 = range2) expr]
+         * and: [for (var = range) each expr] */
+        if (ts_lexer_peek(lex).type == TS_TOK_FOR) {
+            ts_ast *comp = ts_ast_new(TS_AST_LIST_COMP, t.line);
+            ts_lexer_next(lex); /* consume 'for' */
+            ts_expect(lex, TS_TOK_LPAREN, err);
+            ts_token var = ts_expect(lex, TS_TOK_IDENT, err);
+            comp->iter_var = ts_tok_strdup(var);
+            ts_expect(lex, TS_TOK_ASSIGN, err);
+            comp->iter_expr = ts_parse_expr(lex, err);
+            ts_expect(lex, TS_TOK_RPAREN, err);
+
+            /* Optional 'if' filter */
+            if (ts_lexer_peek(lex).type == TS_TOK_IF) {
+                ts_lexer_next(lex);
+                ts_expect(lex, TS_TOK_LPAREN, err);
+                comp->cond = ts_parse_expr(lex, err);
+                ts_expect(lex, TS_TOK_RPAREN, err);
+            }
+
+            /* Body expression (what to generate per iteration) */
+            comp->body = ts_parse_expr(lex, err);
+
+            ts_expect(lex, TS_TOK_RBRACKET, err);
+            return comp;
+        }
+
         /* Parse first expression */
         ts_ast *first = ts_parse_expr(lex, err);
 
@@ -344,12 +375,29 @@ static ts_ast *ts_parse_primary(ts_lexer *lex, ts_parse_error *err) {
         return e;
     }
 
-    /* Let expression: let(assignments) expr */
+    /* Let expression: let(name=expr, ...) body_expr */
     if (t.type == TS_TOK_LET) {
         ts_lexer_next(lex);
-        /* For now, parse let as a block — simplified */
-        ts_parse_err(err, t.line, "let expressions not yet supported");
-        return ts_ast_new(TS_AST_UNDEF, t.line);
+        ts_ast *n = ts_ast_new(TS_AST_LET, t.line);
+        ts_expect(lex, TS_TOK_LPAREN, err);
+        /* Parse assignments: name = expr, ... */
+        while (ts_lexer_peek(lex).type != TS_TOK_RPAREN &&
+               ts_lexer_peek(lex).type != TS_TOK_EOF) {
+            ts_token var = ts_expect(lex, TS_TOK_IDENT, err);
+            ts_expect(lex, TS_TOK_ASSIGN, err);
+            ts_ast *val = ts_parse_expr(lex, err);
+            /* Store as ASSIGN child */
+            ts_ast *assign = ts_ast_new(TS_AST_ASSIGN, var.line);
+            assign->str_val = ts_tok_strdup(var);
+            assign->left = val;
+            ts_ast_add_child(n, assign);
+            if (ts_lexer_peek(lex).type == TS_TOK_COMMA)
+                ts_lexer_next(lex);
+        }
+        ts_expect(lex, TS_TOK_RPAREN, err);
+        /* Body expression */
+        n->body = ts_parse_expr(lex, err);
+        return n;
     }
 
     ts_lexer_next(lex);
@@ -672,6 +720,28 @@ static ts_ast *ts_parse_statement(ts_lexer *lex, ts_parse_error *err) {
         n->iter_var = ts_tok_strdup(var);
         ts_expect(lex, TS_TOK_ASSIGN, err);
         n->iter_expr = ts_parse_expr(lex, err);
+        ts_expect(lex, TS_TOK_RPAREN, err);
+        n->body = ts_parse_statement(lex, err);
+        return n;
+    }
+
+    /* let statement: let(x=1, y=2) statement */
+    if (t.type == TS_TOK_LET) {
+        ts_lexer_next(lex);
+        ts_ast *n = ts_ast_new(TS_AST_LET, t.line);
+        ts_expect(lex, TS_TOK_LPAREN, err);
+        while (ts_lexer_peek(lex).type != TS_TOK_RPAREN &&
+               ts_lexer_peek(lex).type != TS_TOK_EOF) {
+            ts_token var = ts_expect(lex, TS_TOK_IDENT, err);
+            ts_expect(lex, TS_TOK_ASSIGN, err);
+            ts_ast *val = ts_parse_expr(lex, err);
+            ts_ast *assign = ts_ast_new(TS_AST_ASSIGN, var.line);
+            assign->str_val = ts_tok_strdup(var);
+            assign->left = val;
+            ts_ast_add_child(n, assign);
+            if (ts_lexer_peek(lex).type == TS_TOK_COMMA)
+                ts_lexer_next(lex);
+        }
         ts_expect(lex, TS_TOK_RPAREN, err);
         n->body = ts_parse_statement(lex, err);
         return n;

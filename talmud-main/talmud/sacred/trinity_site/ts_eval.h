@@ -131,6 +131,18 @@ struct ts_env {
     double  force_fn;   /* >0 = override any $fn from source */
     double  force_fa;   /* >0 = override any $fa from source */
     double  force_fs;   /* >0 = override any $fs from source */
+
+    /* children() support: caller's geometry children */
+    ts_ast **caller_children;
+    int      caller_child_count;
+
+    /* Base directory for resolving include/use paths */
+    char   *base_dir;   /* heap-owned, NULL = cwd */
+
+    /* Included AST nodes (owned, freed with env) */
+    ts_ast **included_asts;
+    int      included_count;
+    int      included_cap;
 };
 
 static inline ts_env *ts_env_new(ts_env *parent) {
@@ -156,6 +168,10 @@ static inline void ts_env_free(ts_env *e) {
         free(e->names[i]);
         ts_val_free(&e->values[i]);
     }
+    free(e->base_dir);
+    for (int i = 0; i < e->included_count; i++)
+        ts_ast_free(e->included_asts[i]);
+    free(e->included_asts);
     free(e);
 }
 
@@ -293,6 +309,57 @@ static ts_val ts_eval_expr(ts_ast *node, ts_env *env) {
         return v;
     }
 
+    case TS_AST_LIST_COMP: {
+        /* [for (var = range/vector) [if (cond)] expr] */
+        ts_val iter = ts_eval_expr(node->iter_expr, env);
+        int cap = 16, count = 0;
+        ts_val *items = (ts_val *)malloc((size_t)cap * sizeof(ts_val));
+        ts_env *cenv = ts_env_new(env);
+
+        if (iter.type == TS_VAL_RANGE) {
+            double start = iter.range_start;
+            double step = iter.range_step;
+            double end = iter.range_end;
+            if (step == 0) step = 1;
+            for (double v = start;
+                 step > 0 ? v <= end + 1e-10 : v >= end - 1e-10;
+                 v += step) {
+                ts_env_set(cenv, node->iter_var, ts_val_num(v));
+                if (node->cond) {
+                    ts_val c = ts_eval_expr(node->cond, cenv);
+                    if (!ts_val_is_true(c)) continue;
+                }
+                ts_val elem = ts_eval_expr(node->body, cenv);
+                if (count >= cap) {
+                    cap *= 2;
+                    items = (ts_val *)realloc(items, (size_t)cap * sizeof(ts_val));
+                }
+                items[count++] = elem;
+            }
+        } else if (iter.type == TS_VAL_VECTOR) {
+            for (int i = 0; i < iter.count; i++) {
+                ts_env_set(cenv, node->iter_var, iter.items[i]);
+                if (node->cond) {
+                    ts_val c = ts_eval_expr(node->cond, cenv);
+                    if (!ts_val_is_true(c)) continue;
+                }
+                ts_val elem = ts_eval_expr(node->body, cenv);
+                if (count >= cap) {
+                    cap *= 2;
+                    items = (ts_val *)realloc(items, (size_t)cap * sizeof(ts_val));
+                }
+                items[count++] = elem;
+            }
+        }
+        ts_env_free(cenv);
+
+        ts_val result; memset(&result, 0, sizeof(result));
+        result.type = TS_VAL_VECTOR;
+        result.count = count;
+        result.items = items;
+        return result;
+    }
+
     case TS_AST_RANGE: {
         ts_val v; memset(&v, 0, sizeof(v));
         v.type = TS_VAL_RANGE;
@@ -394,6 +461,19 @@ static ts_val ts_eval_expr(ts_ast *node, ts_env *env) {
     case TS_AST_TERNARY: {
         ts_val c = ts_eval_expr(node->cond, env);
         return ts_eval_expr(ts_val_is_true(c) ? node->left : node->right, env);
+    }
+
+    case TS_AST_LET: {
+        /* let(x=1, y=2) expr — create child scope with bindings */
+        ts_env *lenv = ts_env_new(env);
+        for (int i = 0; i < node->child_count; i++) {
+            ts_ast *assign = node->children[i];
+            ts_val v = ts_eval_expr(assign->left, lenv);
+            ts_env_set(lenv, assign->str_val, v);
+        }
+        ts_val result = ts_eval_expr(node->body, lenv);
+        ts_env_free(lenv);
+        return result;
     }
 
     case TS_AST_FUNC_CALL: {
@@ -566,6 +646,113 @@ static inline void ts_apply_xform(ts_mesh *m, ts_mat4 xform) {
         ts_mesh_transform(m, xform.m);
 }
 
+/* Resolve and load an include/use file.
+ * include = import definitions + variables + geometry
+ * use = import module/function definitions only
+ * Returns mesh (geometry from include; empty for use). */
+static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform);
+
+static inline ts_mesh ts_load_include(const char *path, ts_env *env,
+                                       ts_mat4 xform, int use_only) {
+    ts_mesh result = ts_mesh_init();
+
+    /* Resolve path relative to base_dir */
+    char resolved[4096];
+    if (path[0] == '/') {
+        snprintf(resolved, sizeof(resolved), "%s", path);
+    } else if (env->base_dir) {
+        snprintf(resolved, sizeof(resolved), "%s/%s", env->base_dir, path);
+    } else {
+        snprintf(resolved, sizeof(resolved), "%s", path);
+    }
+
+    /* Read file */
+    FILE *fp = fopen(resolved, "r");
+    if (!fp) {
+        fprintf(stderr, "Warning: cannot open '%s'\n", resolved);
+        return result;
+    }
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    char *source = (char *)malloc((size_t)size + 1);
+    size_t nread = fread(source, 1, (size_t)size, fp);
+    source[nread] = '\0';
+    fclose(fp);
+
+    /* Parse */
+    ts_parse_error err; memset(&err, 0, sizeof(err));
+    ts_ast *root = ts_parse(source, &err);
+    free(source);
+    if (err.msg[0]) {
+        fprintf(stderr, "Parse error in '%s' line %d: %s\n",
+                resolved, err.line, err.msg);
+        ts_ast_free(root);
+        return result;
+    }
+
+    /* Store AST ownership in env so it lives until env is freed
+     * (module defs reference into the AST) */
+    if (env->included_count >= env->included_cap) {
+        int newcap = env->included_cap ? env->included_cap * 2 : 4;
+        env->included_asts = (ts_ast **)realloc(env->included_asts,
+                                                  (size_t)newcap * sizeof(ts_ast *));
+        env->included_cap = newcap;
+    }
+    env->included_asts[env->included_count++] = root;
+
+    /* Extract base_dir of the included file for nested includes */
+    char *inc_base = strdup(resolved);
+    char *last_slash = strrchr(inc_base, '/');
+    if (last_slash) *last_slash = '\0';
+    else { free(inc_base); inc_base = NULL; }
+
+    char *old_base = env->base_dir;
+    env->base_dir = inc_base;
+
+    /* Process the included file's AST */
+    if (root && root->type == TS_AST_BLOCK) {
+        for (int i = 0; i < root->child_count; i++) {
+            ts_ast *c = root->children[i];
+            /* Always import module/function definitions */
+            if (c->type == TS_AST_MODULE_DEF) {
+                if (env->mod_count < TS_ENV_MAX) {
+                    env->mod_names[env->mod_count] = c->str_val;
+                    env->mod_defs[env->mod_count] = c;
+                    env->mod_count++;
+                }
+            } else if (c->type == TS_AST_FUNCTION_DEF) {
+                if (env->func_count < TS_ENV_MAX) {
+                    env->func_names[env->func_count] = c->str_val;
+                    env->func_defs[env->func_count] = c;
+                    env->func_count++;
+                }
+            } else if (!use_only) {
+                /* include: also import variables and geometry */
+                if (c->type == TS_AST_ASSIGN) {
+                    ts_val v = ts_eval_expr(c->left, env);
+                    ts_env_set(env, c->str_val, v);
+                } else if (c->type == TS_AST_INCLUDE) {
+                    ts_mesh sub = ts_load_include(c->path, env, xform, 0);
+                    ts_mesh_append(&result, &sub);
+                    ts_mesh_free(&sub);
+                } else if (c->type == TS_AST_USE) {
+                    ts_mesh sub = ts_load_include(c->path, env, xform, 1);
+                    ts_mesh_free(&sub);
+                } else if (c->type != TS_AST_ECHO) {
+                    ts_mesh child = ts_eval_geometry(c, env, xform);
+                    ts_mesh_append(&result, &child);
+                    ts_mesh_free(&child);
+                }
+            }
+        }
+    }
+
+    env->base_dir = old_base;
+    free(inc_base);
+    return result;
+}
+
 static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
     ts_mesh result = ts_mesh_init();
     if (!node) return result;
@@ -575,7 +762,7 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
 
     /* ---- Block / implicit union ---- */
     case TS_AST_BLOCK: {
-        /* First pass: collect definitions and assignments */
+        /* First pass: collect definitions, assignments, and includes */
         for (int i = 0; i < node->child_count; i++) {
             ts_ast *c = node->children[i];
             if (c->type == TS_AST_ASSIGN) {
@@ -593,6 +780,14 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
                     env->func_defs[env->func_count] = c;
                     env->func_count++;
                 }
+            } else if (c->type == TS_AST_INCLUDE || c->type == TS_AST_USE) {
+                /* Load include/use: import definitions (+ geometry for include) */
+                int use_only = (c->type == TS_AST_USE);
+                ts_mesh inc_geo = ts_load_include(c->path, env, xform, use_only);
+                if (!use_only) {
+                    ts_mesh_append(&result, &inc_geo);
+                }
+                ts_mesh_free(&inc_geo);
             }
         }
         /* Second pass: evaluate geometry */
@@ -668,6 +863,20 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             if (node->else_body)
                 return ts_eval_geometry(node->else_body, env, xform);
         }
+        return result;
+    }
+
+    /* ---- Let (geometry context) ---- */
+    case TS_AST_LET: {
+        ts_env *lenv = ts_env_new(env);
+        for (int i = 0; i < node->child_count; i++) {
+            ts_ast *assign = node->children[i];
+            ts_val v = ts_eval_expr(assign->left, lenv);
+            ts_env_set(lenv, assign->str_val, v);
+        }
+        if (node->body)
+            result = ts_eval_geometry(node->body, lenv, xform);
+        ts_env_free(lenv);
         return result;
     }
 
@@ -1121,10 +1330,37 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             return result;
         }
 
+        /* --- children() — evaluate caller's geometry children --- */
+        if (strcmp(name, "children") == 0) {
+            if (env->caller_children && env->caller_child_count > 0) {
+                /* children(i) = specific child, children() = all */
+                if (node->arg_count > 0) {
+                    ts_val idx = ts_eval_expr(node->args[0].value, env);
+                    int i = (int)ts_val_to_num(idx);
+                    if (i >= 0 && i < env->caller_child_count) {
+                        result = ts_eval_geometry(env->caller_children[i],
+                                                   env, xform);
+                    }
+                } else {
+                    for (int i = 0; i < env->caller_child_count; i++) {
+                        ts_mesh child = ts_eval_geometry(
+                            env->caller_children[i], env, xform);
+                        ts_mesh_append(&result, &child);
+                        ts_mesh_free(&child);
+                    }
+                }
+            }
+            return result;
+        }
+
         /* --- User-defined modules --- */
         ts_ast *mdef = ts_env_get_module(env, name);
         if (mdef) {
             ts_env *menv = ts_env_new(env);
+            /* Pass caller's children for children() access */
+            menv->caller_children = node->children;
+            menv->caller_child_count = node->child_count;
+            ts_env_set(menv, "$children", ts_val_num((double)node->child_count));
             for (int i = 0; i < mdef->def_param_count; i++) {
                 ts_val arg = ts_arg_get(node, env, mdef->def_params[i], i,
                     mdef->def_defaults[i] ?
@@ -1162,6 +1398,7 @@ typedef struct {
     int    force_quality;  /* if true, overrides CANNOT be overridden by source */
     volatile int *cancel;  /* if non-NULL, checked for cooperative abort */
     ts_progress  *progress; /* if non-NULL, updated with statement progress */
+    const char   *base_dir; /* directory for resolving include/use paths */
 } ts_interpret_opts;
 
 /* Interpret source code with options, produce mesh */
@@ -1189,6 +1426,7 @@ static inline ts_mesh ts_interpret_ex(const char *source,
     }
     if (opts && opts->cancel) env->cancel = opts->cancel;
     if (opts && opts->progress) env->progress = opts->progress;
+    if (opts && opts->base_dir) env->base_dir = strdup(opts->base_dir);
 
     ts_mat4 identity = ts_mat4_identity();
     ts_mesh result = ts_eval_geometry(root, env, identity);
@@ -1219,9 +1457,17 @@ static inline int ts_interpret_file(const char *scad_path,
     source[nread] = '\0';
     fclose(fp);
 
-    ts_parse_error err;
-    ts_mesh mesh = ts_interpret(source, &err);
+    /* Extract directory from file path for include/use resolution */
+    ts_interpret_opts opts; memset(&opts, 0, sizeof(opts));
+    char *dir = strdup(scad_path);
+    char *slash = strrchr(dir, '/');
+    if (slash) { *slash = '\0'; opts.base_dir = dir; }
+    else { free(dir); dir = NULL; }
+
+    ts_parse_error err; memset(&err, 0, sizeof(err));
+    ts_mesh mesh = ts_interpret_ex(source, &err, &opts);
     free(source);
+    free(dir);
 
     if (err.msg[0]) {
         fprintf(stderr, "Parse error at line %d: %s\n", err.line, err.msg);
