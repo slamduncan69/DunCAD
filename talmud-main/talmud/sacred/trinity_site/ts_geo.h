@@ -296,4 +296,143 @@ static inline int ts_gen_polyhedron(const double *points, int n_points,
     return 0;
 }
 
+/* ================================================================
+ * SURFACE (heightmap)
+ *
+ * Generates a solid mesh from a 2D grid of heights.
+ * Grid has cols × rows values. Each cell becomes 2 triangles on top.
+ * Bottom face is a flat plane at z=0. Side walls close the solid.
+ * center=1 shifts origin to center of XY extent.
+ * ================================================================ */
+static inline int ts_gen_surface(const double *heights, int cols, int rows,
+                                  int center, ts_mesh *m) {
+    if (cols < 2 || rows < 2 || !heights) return -1;
+
+    /* Allocate: top grid + bottom grid + side walls */
+    int top_verts = cols * rows;
+    int top_tris = (cols - 1) * (rows - 1) * 2;
+    int bot_tris = (cols - 1) * (rows - 1) * 2;
+    int side_tris = 2 * ((cols - 1) + (rows - 1)) * 2;
+    ts_mesh_reserve(m, m->vert_count + top_verts * 2 + (cols + rows) * 4,
+                    m->tri_count + top_tris + bot_tris + side_tris);
+
+    double ox = center ? -(cols - 1) * 0.5 : 0;
+    double oy = center ? -(rows - 1) * 0.5 : 0;
+
+    /* Top surface vertices */
+    int base_top = m->vert_count;
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            ts_mesh_add_vertex(m, ox + c, oy + r, heights[r * cols + c],
+                               0, 0, 1);
+
+    /* Top surface triangles */
+    for (int r = 0; r < rows - 1; r++) {
+        for (int c = 0; c < cols - 1; c++) {
+            int i00 = base_top + r * cols + c;
+            int i10 = i00 + 1;
+            int i01 = i00 + cols;
+            int i11 = i01 + 1;
+            ts_mesh_add_triangle(m, i00, i10, i11);
+            ts_mesh_add_triangle(m, i00, i11, i01);
+        }
+    }
+
+    /* Bottom face at z=0 */
+    int base_bot = m->vert_count;
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            ts_mesh_add_vertex(m, ox + c, oy + r, 0, 0, 0, -1);
+
+    for (int r = 0; r < rows - 1; r++) {
+        for (int c = 0; c < cols - 1; c++) {
+            int i00 = base_bot + r * cols + c;
+            int i10 = i00 + 1;
+            int i01 = i00 + cols;
+            int i11 = i01 + 1;
+            ts_mesh_add_triangle(m, i00, i11, i10);
+            ts_mesh_add_triangle(m, i00, i01, i11);
+        }
+    }
+
+    /* Side walls: connect top edge to bottom at z=0 */
+    /* Front edge (r=0) */
+    for (int c = 0; c < cols - 1; c++) {
+        int t0 = base_top + c, t1 = base_top + c + 1;
+        int b0 = base_bot + c, b1 = base_bot + c + 1;
+        ts_mesh_add_triangle(m, b0, b1, t1);
+        ts_mesh_add_triangle(m, b0, t1, t0);
+    }
+    /* Back edge (r=rows-1) */
+    for (int c = 0; c < cols - 1; c++) {
+        int t0 = base_top + (rows-1)*cols + c;
+        int t1 = t0 + 1;
+        int b0 = base_bot + (rows-1)*cols + c;
+        int b1 = b0 + 1;
+        ts_mesh_add_triangle(m, t0, t1, b1);
+        ts_mesh_add_triangle(m, t0, b1, b0);
+    }
+    /* Left edge (c=0) */
+    for (int r = 0; r < rows - 1; r++) {
+        int t0 = base_top + r*cols, t1 = base_top + (r+1)*cols;
+        int b0 = base_bot + r*cols, b1 = base_bot + (r+1)*cols;
+        ts_mesh_add_triangle(m, t0, t1, b1);
+        ts_mesh_add_triangle(m, t0, b1, b0);
+    }
+    /* Right edge (c=cols-1) */
+    for (int c2 = cols-1, r = 0; r < rows - 1; r++) {
+        int t0 = base_top + r*cols + c2, t1 = base_top + (r+1)*cols + c2;
+        int b0 = base_bot + r*cols + c2, b1 = base_bot + (r+1)*cols + c2;
+        ts_mesh_add_triangle(m, b0, b1, t1);
+        ts_mesh_add_triangle(m, b0, t1, t0);
+    }
+
+    ts_mesh_compute_normals(m);
+    return 0;
+}
+
+/* Parse a .dat heightmap file (space/tab-separated numbers, # comments).
+ * Returns heap-allocated array, sets *out_cols and *out_rows. */
+static inline double *ts_parse_dat(const char *path, int *out_cols, int *out_rows) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) return NULL;
+
+    int cap = 256, count = 0, cols = 0, rows = 0, cur_col = 0;
+    double *data = (double *)malloc((size_t)cap * sizeof(double));
+    char line[8192];
+
+    while (fgets(line, (int)sizeof(line), fp)) {
+        /* Skip comments */
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || *p == '\r' || *p == '\0') continue;
+
+        cur_col = 0;
+        while (*p) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '\n' || *p == '\r' || *p == '\0') break;
+            char *end;
+            double val = strtod(p, &end);
+            if (end == p) break;
+            p = end;
+            if (count >= cap) {
+                cap *= 2;
+                data = (double *)realloc(data, (size_t)cap * sizeof(double));
+            }
+            data[count++] = val;
+            cur_col++;
+        }
+        if (cur_col > 0) {
+            if (cols == 0) cols = cur_col;
+            rows++;
+        }
+    }
+    fclose(fp);
+
+    if (cols < 2 || rows < 2) { free(data); return NULL; }
+    *out_cols = cols;
+    *out_rows = rows;
+    return data;
+}
+
 #endif /* TS_GEO_H */

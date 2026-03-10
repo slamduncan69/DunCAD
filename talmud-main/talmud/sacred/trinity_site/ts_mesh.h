@@ -304,4 +304,68 @@ static inline int ts_mesh_read_stl(ts_mesh *m, const char *path) {
     return 0;
 }
 
+/* --- Extrude a 2D mesh (z=0 triangles) to a solid of given height --- */
+/* Duplicates bottom face at z=height (reversed winding), finds boundary
+ * edges, and creates side walls. Simple and correct for any 2D mesh. */
+static inline void ts_mesh_extrude_z(const ts_mesh *flat, double height,
+                                      int center, ts_mesh *out) {
+    if (flat->tri_count == 0) return;
+    double z_bot = center ? -height * 0.5 : 0;
+    double z_top = center ? height * 0.5 : height;
+
+    int base_bot = out->vert_count;
+
+    /* Bottom face: copy all verts at z_bot, same winding (facing down) */
+    for (int i = 0; i < flat->vert_count; i++)
+        ts_mesh_add_vertex(out, flat->verts[i].pos[0], flat->verts[i].pos[1],
+                           z_bot, 0, 0, -1);
+    for (int i = 0; i < flat->tri_count; i++)
+        ts_mesh_add_triangle(out,
+            base_bot + flat->tris[i].idx[0],
+            base_bot + flat->tris[i].idx[2],
+            base_bot + flat->tris[i].idx[1]); /* reversed for downward normal */
+
+    int base_top = out->vert_count;
+
+    /* Top face: copy all verts at z_top, same winding (facing up) */
+    for (int i = 0; i < flat->vert_count; i++)
+        ts_mesh_add_vertex(out, flat->verts[i].pos[0], flat->verts[i].pos[1],
+                           z_top, 0, 0, 1);
+    for (int i = 0; i < flat->tri_count; i++)
+        ts_mesh_add_triangle(out,
+            base_top + flat->tris[i].idx[0],
+            base_top + flat->tris[i].idx[1],
+            base_top + flat->tris[i].idx[2]);
+
+    /* Side walls: find boundary edges (edges that appear in only 1 triangle).
+     * Use edge hash: for each tri edge (a,b), check if (b,a) also exists. */
+    int nedges = flat->tri_count * 3;
+    /* Simple O(n^2) boundary detection for moderate meshes */
+    for (int i = 0; i < flat->tri_count; i++) {
+        for (int e = 0; e < 3; e++) {
+            int a = flat->tris[i].idx[e];
+            int b = flat->tris[i].idx[(e+1) % 3];
+            /* Check if reverse edge (b,a) exists in any triangle */
+            int found = 0;
+            for (int j = 0; j < flat->tri_count && !found; j++) {
+                for (int f = 0; f < 3; f++) {
+                    if (flat->tris[j].idx[f] == b &&
+                        flat->tris[j].idx[(f+1) % 3] == a) {
+                        found = 1; break;
+                    }
+                }
+            }
+            if (!found) {
+                /* Boundary edge: create 2 triangles connecting bot and top */
+                int ba = base_bot + a, bb = base_bot + b;
+                int ta = base_top + a, tb = base_top + b;
+                ts_mesh_add_triangle(out, ba, bb, tb);
+                ts_mesh_add_triangle(out, ba, tb, ta);
+            }
+        }
+    }
+    (void)nedges;
+    ts_mesh_compute_normals(out);
+}
+
 #endif /* TS_MESH_H */

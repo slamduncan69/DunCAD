@@ -22,6 +22,7 @@
 #include "ts_scalar.h"
 #include "ts_trig.h"
 #include "ts_random.h"
+#include "ts_text.h"
 
 #include <stdio.h>
 #include <math.h>
@@ -1141,6 +1142,53 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             return result;
         }
 
+        /* --- surface() — heightmap from .dat file --- */
+        if (strcmp(name, "surface") == 0) {
+            ts_val file_v = ts_arg_get(node, env, "file", 0, ts_val_undef());
+            int center = ts_val_is_true(ts_arg_get(node, env, "center", -1, ts_val_bool(0)));
+            if (file_v.type == TS_VAL_STRING && file_v.str) {
+                char resolved[4096];
+                if (file_v.str[0] == '/') {
+                    snprintf(resolved, sizeof(resolved), "%s", file_v.str);
+                } else if (env->base_dir) {
+                    snprintf(resolved, sizeof(resolved), "%s/%s",
+                             env->base_dir, file_v.str);
+                } else {
+                    snprintf(resolved, sizeof(resolved), "%s", file_v.str);
+                }
+                int cols = 0, rows = 0;
+                double *heights = ts_parse_dat(resolved, &cols, &rows);
+                if (heights) {
+                    ts_gen_surface(heights, cols, rows, center, &result);
+                    free(heights);
+                    ts_apply_xform(&result, xform);
+                } else {
+                    fprintf(stderr, "Warning: cannot read surface file '%s'\n", resolved);
+                }
+            }
+            return result;
+        }
+
+        /* --- text() — 2D text via Hershey font --- */
+        if (strcmp(name, "text") == 0) {
+            ts_val t_v = ts_arg_get(node, env, "t", 0, ts_val_undef());
+            if (t_v.type != TS_VAL_STRING && node->arg_count > 0) {
+                /* First positional arg might be the text */
+                t_v = ts_eval_expr(node->args[0].value, env);
+            }
+            if (t_v.type == TS_VAL_STRING && t_v.str) {
+                double size = ts_val_to_num(ts_arg_get(node, env, "size", 1, ts_val_num(10)));
+                ts_val ha = ts_arg_get(node, env, "halign", -1, ts_val_undef());
+                ts_val va = ts_arg_get(node, env, "valign", -1, ts_val_undef());
+                double spacing = ts_val_to_num(ts_arg_get(node, env, "spacing", -1, ts_val_num(1)));
+                const char *halign_s = (ha.type == TS_VAL_STRING) ? ha.str : "left";
+                const char *valign_s = (va.type == TS_VAL_STRING) ? va.str : "baseline";
+                ts_gen_text(t_v.str, size, halign_s, valign_s, spacing, &result);
+                ts_apply_xform(&result, xform);
+            }
+            return result;
+        }
+
         /* --- CSG operations --- */
         if (strcmp(name, "union") == 0) {
             /* Explicit union: concatenate children */
@@ -1316,6 +1364,19 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
                             pts[p*2+1] = ts_val_vec_get(pv.items[p], 1);
                         }
                     }
+                }
+
+                /* text() child: extrude the 2D text mesh directly */
+                if (strcmp(cname, "text") == 0) {
+                    ts_mat4 id = ts_mat4_identity();
+                    ts_mesh flat = ts_eval_geometry(c, env, id);
+                    if (flat.tri_count > 0) {
+                        ts_mesh_extrude_z(&flat, height, center, &result);
+                        ts_mesh_free(&flat);
+                        ts_apply_xform(&result, xform);
+                        return result;
+                    }
+                    ts_mesh_free(&flat);
                 }
 
                 if (pts && npts >= 3) {
