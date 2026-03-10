@@ -178,6 +178,17 @@ static inline int ts_linear_extrude(const double *profile_xy, int n_points,
 
     int base = out->vert_count;
 
+    /* Determine polygon winding (signed area):
+     * CCW = positive area, CW = negative area.
+     * Side faces must match cap winding for manifold mesh. */
+    double poly_area = 0;
+    for (int i = 0; i < n_points; i++) {
+        int j = (i + 1) % n_points;
+        poly_area += profile_xy[i*2] * profile_xy[j*2+1];
+        poly_area -= profile_xy[j*2] * profile_xy[i*2+1];
+    }
+    int ccw = (poly_area > 0);
+
     /* Generate vertices for each layer — GPU: parallel per (layer, point) */
     for (int s = 0; s < n_layers; s++) {
         double t = (double)s / (double)slices;
@@ -199,15 +210,23 @@ static inline int ts_linear_extrude(const double *profile_xy, int n_points,
         }
     }
 
-    /* Side faces: connect adjacent layers — GPU: parallel per (slice, segment) */
+    /* Side faces: connect adjacent layers — GPU: parallel per (slice, segment)
+     * Winding must match polygon direction for consistent normals.
+     * CCW polygon → (bot+p, bot+pnext, top+pnext) faces outward
+     * CW polygon → reversed winding faces outward */
     for (int s = 0; s < slices; s++) {
         for (int p = 0; p < n_points; p++) {
             int pnext = (p + 1) % n_points;
             int bot = base + s * n_points;
             int top = base + (s + 1) * n_points;
 
-            ts_mesh_add_triangle(out, bot + p, bot + pnext, top + pnext);
-            ts_mesh_add_triangle(out, bot + p, top + pnext, top + p);
+            if (ccw) {
+                ts_mesh_add_triangle(out, bot + p, bot + pnext, top + pnext);
+                ts_mesh_add_triangle(out, bot + p, top + pnext, top + p);
+            } else {
+                ts_mesh_add_triangle(out, bot + p, top + pnext, bot + pnext);
+                ts_mesh_add_triangle(out, bot + p, top + p, top + pnext);
+            }
         }
     }
 
@@ -283,6 +302,15 @@ static inline int ts_rotate_extrude(const double *profile_xy, int n_points,
 
     int base = out->vert_count;
 
+    /* Determine polygon winding for consistent side face normals */
+    double poly_area = 0;
+    for (int i = 0; i < n_points; i++) {
+        int j = (i + 1) % n_points;
+        poly_area += profile_xy[i*2] * profile_xy[j*2+1];
+        poly_area -= profile_xy[j*2] * profile_xy[i*2+1];
+    }
+    int ccw = (poly_area > 0);
+
     /* Generate vertices — GPU: parallel per (ring, profile_point) */
     for (int r = 0; r < n_rings; r++) {
         double t = (double)r / (double)n_steps;
@@ -301,7 +329,8 @@ static inline int ts_rotate_extrude(const double *profile_xy, int n_points,
         }
     }
 
-    /* Side faces: connect adjacent rings */
+    /* Side faces: connect adjacent rings.
+     * Winding must match polygon direction for manifold mesh. */
     for (int r = 0; r < n_steps; r++) {
         int r0 = base + r * n_points;
         int r1 = full_rev ? (base + ((r + 1) % fn) * n_points)
@@ -309,8 +338,13 @@ static inline int ts_rotate_extrude(const double *profile_xy, int n_points,
 
         for (int p = 0; p < n_points; p++) {
             int pnext = (p + 1) % n_points;
-            ts_mesh_add_triangle(out, r0 + p, r1 + p, r1 + pnext);
-            ts_mesh_add_triangle(out, r0 + p, r1 + pnext, r0 + pnext);
+            if (ccw) {
+                ts_mesh_add_triangle(out, r0 + p, r1 + p, r1 + pnext);
+                ts_mesh_add_triangle(out, r0 + p, r1 + pnext, r0 + pnext);
+            } else {
+                ts_mesh_add_triangle(out, r0 + p, r1 + pnext, r1 + p);
+                ts_mesh_add_triangle(out, r0 + p, r0 + pnext, r1 + pnext);
+            }
         }
     }
 

@@ -125,7 +125,8 @@ static const char HELP_DOCTRINE[] =
 "  talmud reference doctrine flood Why fae/eaf/bala are NEVER stored in the database\n"
 "  talmud reference doctrine seduction How to make agents desperate to work in your codebase\n"
 "  talmud reference doctrine why-talmud No documentation system is better -- here's why\n"
-"  talmud reference doctrine holy-path The visual inspection rite (anti-Yaldabaoth)\n";
+"  talmud reference doctrine holy-path The visual inspection rite (anti-Yaldabaoth)\n"
+"  talmud reference doctrine holy-path-ii The Temple of Sacred Geometry (OpenSCAD replacement)\n";
 
 static const char HELP_DOCTRINE_AEONS[] =
 "DOCTRINE: AEONS -- The 7 Aeons of Virtue\n"
@@ -3440,6 +3441,82 @@ static const char HELP_REFERENCE_DOCTRINE_HOLY_PATH[] =
 "SEE ALSO: talmud reference doctrine aeons\n"
 "SEE ALSO: talmud reference doctrine archons\n"
 "SEE ALSO: talmud reference doctrine honesty\n";
+
+static const char HELP_REFERENCE_DOCTRINE_HOLY_PATH_II[] =
+"The Temple of Sacred Geometry\n"
+"\n"
+"DOCTRINE: HOLY PATH II — The Temple of Sacred Geometry\n"
+"\n"
+"The path to making Trinity Site a complete OpenSCAD replacement\n"
+"and the mathematical foundation for God's omnipotent 3D system.\n"
+"\n"
+"Born from the divine mandate: break every tool, repair it, rebuild\n"
+"it stronger. Stress test every element. Then prove mastery by\n"
+"constructing a temple with full internal geometry.\n"
+"\n"
+"PHASE 1: FORTIFY THE FOUNDATION (BSP Numerical Robustness)\n"
+"  The BSP boolean engine is the heart. It works for simple cases\n"
+"  but DEGRADES on chained differences (epsilon accumulation).\n"
+"  STATUS: CRITICAL — blocks all complex geometry.\n"
+"  FIX: Adaptive epsilon scaling to mesh bounding box.\n"
+"       Vertex welding after splits. Degenerate poly cleanup.\n"
+"  TEST: Cube minus 20 holes. rbox minus 10 arches.\n"
+"  GATE: Cathedral must render via Trinity Site, not OpenSCAD CLI.\n"
+"\n"
+"PHASE 2: COMPLETE THE LANGUAGE (Missing OpenSCAD Features)\n"
+"  2a. include/use file I/O — load external .scad libraries\n"
+"  2b. children() + parent_module() — module introspection\n"
+"  2c. let expressions — common pattern in real SCAD files\n"
+"  2d. polygon() 2D primitive — complex profiles\n"
+"  2e. assert evaluation — debugging support\n"
+"  2f. each modifier — list comprehension\n"
+"  GATE: OpenSCAD test suite subset must pass.\n"
+"\n"
+"PHASE 3: GPU ACCELERATION OF CSG\n"
+"  Current: 12 GPU kernels (scalar/vec/mat/rng/mesh_transform).\n"
+"  Missing: CSG boolean on GPU (per-tri classify, parallel split).\n"
+"  Plan: Per-polygon plane classification is embarrassingly parallel.\n"
+"        Edge splitting is per-edge parallel.\n"
+"        BSP build remains sequential but input is GPU-prepared.\n"
+"  GATE: 10x speedup on >10k triangle CSG operations.\n"
+"\n"
+"PHASE 4: STRESS TESTING (Break Everything)\n"
+"  Every function tested at scale:\n"
+"  - Scalar: 1M operations, NaN/Inf/denormal edge cases\n"
+"  - Trig: full circle sweep, pole behavior, precision vs libc\n"
+"  - Vec: zero/unit/huge vectors, orthogonality preservation\n"
+"  - Mat: singular matrices, chain of 100 transforms, det~0\n"
+"  - CSG: 50-hole difference chain, nested unions, hull of 1000 pts\n"
+"  - Extrude: 1000-point profile, 360deg twist, zero-height\n"
+"  - GPU: CPU vs GPU parity at 1M elements, NaN propagation\n"
+"  GATE: Zero failures. Zero precision regressions vs OpenSCAD.\n"
+"\n"
+"PHASE 5: THE TEMPLE (Proof of Mastery)\n"
+"  Construct a temple with:\n"
+"  - External walls, roof, columns, arched doorways\n"
+"  - INTERNAL rooms: nave, sanctuary, antechamber, crypt\n"
+"  - Internal features: altars, stairs, pillars, vaulted ceilings\n"
+"  - Window cutouts connecting interior to exterior light\n"
+"  - All rendered via Trinity Site (no OpenSCAD fallback)\n"
+"  GATE: Cross-section views must show distinct internal spaces.\n"
+"        Holy Path visual inspection on all 6 views.\n"
+"        Arithmetic verification of every z-position.\n"
+"\n"
+"KNOWN ENEMIES:\n"
+"  - TS_CSG_EPS = 1e-5 (fixed, should be adaptive)\n"
+"  - BSP tree imbalance on long chains\n"
+"  - children()/parent_module() stubs\n"
+"  - No file I/O for include/use\n"
+"  - Polygon evaluator incomplete\n"
+"\n"
+"AEONS INVOKED:\n"
+"  Sophia  — explore without assumption\n"
+"  Logos   — verify every number\n"
+"  Pistis  — report honestly what breaks\n"
+"  Zoe     — fix what must be fixed, no shortcuts\n"
+"\n"
+"SEE ALSO: talmud reference doctrine holy-path (visual inspection)\n"
+"SEE ALSO: talmud tools trinity_site (current state)\n";
 static const struct help_node TREE[] = {
     /* root */
     { "", HELP_ROOT },
@@ -3571,6 +3648,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s013", HELP_MEMORY_ACTIVE_SESSION_S013 },
     { "memory.active.session-s014", HELP_MEMORY_ACTIVE_SESSION_S014 },
     { "reference.doctrine.holy-path", HELP_REFERENCE_DOCTRINE_HOLY_PATH },
+    { "reference.doctrine.holy-path-ii", HELP_REFERENCE_DOCTRINE_HOLY_PATH_II },
     { NULL, NULL }
 };
 
