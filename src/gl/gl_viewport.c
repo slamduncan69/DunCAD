@@ -9,6 +9,7 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+#include <cairo.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -235,6 +236,10 @@ struct DC_GlViewport {
     float        drag_theta, drag_phi;
     float        drag_center[3];    /* cam_center at drag start */
     int          dragging;  /* 0=none, 1=orbit, 2=pan */
+
+    /* Screenshot capture (set path, render reads pixels after drawing) */
+    char        *capture_path;      /* non-NULL = capture on next render */
+    int          capture_result;    /* 0=success after capture */
 };
 
 /* =========================================================================
@@ -587,6 +592,45 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
 
     glBindVertexArray(0);
     glUseProgram(0);
+
+    /* Capture screenshot if requested */
+    if (vp->capture_path) {
+        int fw = w * scale, fh = h * scale;
+        unsigned char *pixels = malloc((size_t)fw * (size_t)fh * 4);
+        vp->capture_result = -1;
+        if (pixels) {
+            glReadPixels(0, 0, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+            cairo_surface_t *surf = cairo_image_surface_create(
+                CAIRO_FORMAT_ARGB32, fw, fh);
+            unsigned char *dst = cairo_image_surface_get_data(surf);
+            int stride = cairo_image_surface_get_stride(surf);
+
+            for (int y = 0; y < fh; y++) {
+                unsigned char *src_row = pixels + (size_t)(fh - 1 - y) * (size_t)fw * 4;
+                unsigned char *dst_row = dst + (size_t)y * stride;
+                for (int x = 0; x < fw; x++) {
+                    dst_row[x*4+0] = src_row[x*4+2]; /* B */
+                    dst_row[x*4+1] = src_row[x*4+1]; /* G */
+                    dst_row[x*4+2] = src_row[x*4+0]; /* R */
+                    dst_row[x*4+3] = 255;             /* A */
+                }
+            }
+            cairo_surface_mark_dirty(surf);
+
+            cairo_status_t st = cairo_surface_write_to_png(surf, vp->capture_path);
+            cairo_surface_destroy(surf);
+            free(pixels);
+
+            if (st == CAIRO_STATUS_SUCCESS) {
+                dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+                       "gl_viewport: captured %dx%d to %s", fw, fh, vp->capture_path);
+                vp->capture_result = 0;
+            }
+        }
+        free(vp->capture_path);
+        vp->capture_path = NULL;
+    }
 
     return TRUE;
 }
@@ -1221,4 +1265,27 @@ int
 dc_gl_viewport_get_axes(DC_GlViewport *vp)
 {
     return vp ? vp->show_axes : 0;
+}
+
+int
+dc_gl_viewport_capture_png(DC_GlViewport *vp, const char *path)
+{
+    if (!vp || !vp->gl_ready || !path) return -1;
+
+    /* Set capture flag — on_render will do the actual pixel readback */
+    free(vp->capture_path);
+    vp->capture_path = strdup(path);
+    vp->capture_result = -1;
+
+    /* Queue a render and process the GTK event loop until it fires */
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+
+    /* Spin the main loop until capture completes (capture_path set to NULL) */
+    int spins = 0;
+    while (vp->capture_path && spins < 200) {
+        g_main_context_iteration(NULL, TRUE);
+        spins++;
+    }
+
+    return vp->capture_result;
 }

@@ -526,9 +526,7 @@ static inline int ts_csg_polys_to_mesh(const ts_csg_polylist *pl, ts_mesh *out) 
  *   a.clipTo(b), b.clipTo(a), b.invert(), b.clipTo(a), b.invert()
  *   result = a.allPolys + b.allPolys
  *
- * difference(A, B):
- *   a.invert(), union(a, b), result.invert()
- *   Or equivalently:
+ * difference(A, B) = invert(union(invert(A), B)):
  *   a.invert(), a.clipTo(b), b.clipTo(a), b.invert(), b.clipTo(a),
  *   b.invert(), a.addPolys(b), a.invert()
  *
@@ -578,7 +576,9 @@ static inline int ts_csg_boolean(const ts_mesh *a, const ts_mesh *b,
         break;
 
     case TS_CSG_OP_DIFFERENCE:
-        /* A - B = invert(union(invert(A), B)) */
+        /* A - B = invert(union(invert(A), B))
+         * csg.js reference: a.invert(), a.clipTo(b), b.clipTo(a),
+         *   b.invert(), b.clipTo(a), b.invert(), a.build(b), a.invert() */
         ts_csg_bsp_invert(bsp_a);
         ts_csg_bsp_clip_to(bsp_a, bsp_b);
         ts_csg_bsp_clip_to(bsp_b, bsp_a);

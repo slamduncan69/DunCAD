@@ -652,6 +652,26 @@ cmd_gl_clear(void)
     return strdup("{\"ok\":true}\n");
 }
 
+static char *
+cmd_gl_capture(const char *args)
+{
+    DC_GlViewport *vp = get_viewport();
+    if (!vp) return strdup("{\"error\":\"no gl viewport\"}\n");
+
+    char path[512];
+    if (!args || sscanf(args, "%511s", path) != 1)
+        return strdup("{\"error\":\"usage: gl_capture <png_path>\"}\n");
+
+    int rc = dc_gl_viewport_capture_png(vp, path);
+    char *resp = malloc(640);
+    if (!resp) return NULL;
+    if (rc == 0)
+        snprintf(resp, 640, "{\"ok\":true,\"path\":\"%s\"}\n", path);
+    else
+        snprintf(resp, 640, "{\"ok\":false,\"error\":\"capture failed\"}\n");
+    return resp;
+}
+
 /* =========================================================================
  * TRANSFORM PANEL COMMANDS — NEW
  * ========================================================================= */
@@ -797,7 +817,8 @@ cmd_help(void)
         "\"gl_axes\","
         "\"gl_select <index>\","
         "\"gl_load <stl_path>\","
-        "\"gl_clear\""
+        "\"gl_clear\","
+        "\"gl_capture <png_path>\""
         "],"
 
         "\"transform\":["
@@ -874,6 +895,7 @@ dispatch(const char *cmd)
     if (strcmp(name, "gl_select") == 0) return cmd_gl_select(args);
     if (strcmp(name, "gl_load")   == 0) return cmd_gl_load(args);
     if (strcmp(name, "gl_clear")  == 0) return cmd_gl_clear();
+    if (strcmp(name, "gl_capture") == 0) return cmd_gl_capture(args);
 
     /* Transform panel */
     if (strcmp(name, "transform_show") == 0) return cmd_transform_show(args);

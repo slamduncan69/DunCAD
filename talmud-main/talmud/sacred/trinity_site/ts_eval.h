@@ -859,14 +859,24 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
 
         if (strcmp(name, "difference") == 0) {
             if (node->child_count == 0) return result;
-            /* First child is the base, rest are subtracted */
-            ts_ast *body = node->children[0];
-            ts_mesh base = ts_eval_geometry(body, env, xform);
+            /* Handle block child containing multiple geometry */
+            ts_ast *first_child = node->children[0];
+            ts_mesh base;
+            int nchildren;
+            ts_ast **children;
 
-            for (int i = 1; i < node->child_count; i++) {
-                /* For blocks, iterate children */
-                ts_ast *c = node->children[i];
-                ts_mesh tool = ts_eval_geometry(c, env, xform);
+            if (first_child->type == TS_AST_BLOCK && first_child->child_count >= 2) {
+                /* Block with multiple children: first is base, rest subtracted */
+                children = first_child->children;
+                nchildren = first_child->child_count;
+            } else {
+                children = node->children;
+                nchildren = node->child_count;
+            }
+
+            base = ts_eval_geometry(children[0], env, xform);
+            for (int i = 1; i < nchildren; i++) {
+                ts_mesh tool = ts_eval_geometry(children[i], env, xform);
                 if (tool.tri_count > 0 && base.tri_count > 0) {
                     ts_mesh diff = ts_mesh_init();
                     ts_csg_boolean(&base, &tool, TS_CSG_OP_DIFFERENCE, &diff);

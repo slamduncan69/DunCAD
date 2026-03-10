@@ -98,4 +98,8 @@ typedef void (*DC_GlPickCb)(int obj_idx, int line_start, int line_end,
 void dc_gl_viewport_set_pick_callback(DC_GlViewport *vp,
                                        DC_GlPickCb cb, void *userdata);
 
+/* Capture the current viewport to a PNG file. Returns 0 on success.
+ * Must be called from the GTK main thread. */
+int dc_gl_viewport_capture_png(DC_GlViewport *vp, const char *path);
+
 #endif /* DC_GL_VIEWPORT_H */
