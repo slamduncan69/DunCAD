@@ -95,12 +95,18 @@ load_binary(const unsigned char *data, size_t size)
         ptr += 12;
 
         for (int v = 0; v < 3; v++) {
-            /* Normal */
+            /* Normal: Z-up to Y-up (-90° around X) */
             out[0] = normal[0];
-            out[1] = normal[1];
-            out[2] = normal[2];
-            /* Vertex */
-            memcpy(out + 3, ptr, 12);
+            out[1] = normal[2];
+            out[2] = -normal[1];
+            /* Vertex: Z-up to Y-up (-90° around X) */
+            float vx, vy, vz;
+            memcpy(&vx, ptr,     4);
+            memcpy(&vy, ptr + 4, 4);
+            memcpy(&vz, ptr + 8, 4);
+            out[3] = vx;
+            out[4] = vz;
+            out[5] = -vy;
             ptr += 12;
             out += 6;
         }
@@ -150,10 +156,16 @@ load_ascii(const char *text, size_t size)
             sscanf(line, "facet normal %f %f %f", &normal[0], &normal[1], &normal[2]);
             in_facet = 1;
         } else if (in_facet && memcmp(line, "vertex", 6) == 0) {
+            /* Normal: Z-up to Y-up (-90° around X) */
             out[0] = normal[0];
-            out[1] = normal[1];
-            out[2] = normal[2];
-            sscanf(line, "vertex %f %f %f", &out[3], &out[4], &out[5]);
+            out[1] = normal[2];
+            out[2] = -normal[1];
+            /* Vertex: Z-up to Y-up (-90° around X) */
+            float vx, vy, vz;
+            sscanf(line, "vertex %f %f %f", &vx, &vy, &vz);
+            out[3] = vx;
+            out[4] = vz;
+            out[5] = -vy;
             out += 6;
         } else if (in_facet && memcmp(line, "endfacet", 8) == 0) {
             in_facet = 0;

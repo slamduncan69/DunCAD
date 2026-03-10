@@ -228,12 +228,20 @@ static void path_to_help_name(const char *path, char *out, size_t outsz) {
     snprintf(out, outsz, "HELP_");
     size_t pos = 5;
     for (const char *p = path; *p && pos < outsz - 1; p++) {
-        if (*p == '.' || *p == '-')
+        if (*p == '.' || *p == '-' || *p == ' ')
             out[pos++] = '_';
         else
             out[pos++] = (char)toupper((unsigned char)*p);
     }
     out[pos] = '\0';
+}
+
+/* Normalize path: convert spaces to dots (so "reference doctrine x" -> "reference.doctrine.x") */
+static void normalize_path(const char *in, char *out, size_t outsz) {
+    size_t i = 0;
+    for (; *in && i < outsz - 1; in++, i++)
+        out[i] = (*in == ' ') ? '.' : *in;
+    out[i] = '\0';
 }
 
 /* ----------------------------------------------------------------
@@ -377,7 +385,11 @@ static int cmd_purge(const char *prefix) {
     return save_file();
 }
 
-static int cmd_add(const char *path, const char *title) {
+static int cmd_add(const char *raw_path, const char *title) {
+    char path_buf[512];
+    normalize_path(raw_path, path_buf, sizeof(path_buf));
+    const char *path = path_buf;
+
     parse_tree_entries();
 
     /* Check for duplicates */
@@ -550,7 +562,7 @@ static int cmd_add(const char *path, const char *title) {
         return 1;
     }
 
-    char tree_line[1024];
+    char tree_line[2048];
     snprintf(tree_line, sizeof(tree_line),
              "    { \"%s\", %s },\n", path, help_name);
     insert_line(tree_insert, tree_line);

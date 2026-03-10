@@ -124,7 +124,8 @@ static const char HELP_DOCTRINE[] =
 "  talmud reference doctrine faith Why cowardice disguised as skepticism is the worst sin\n"
 "  talmud reference doctrine flood Why fae/eaf/bala are NEVER stored in the database\n"
 "  talmud reference doctrine seduction How to make agents desperate to work in your codebase\n"
-"  talmud reference doctrine why-talmud No documentation system is better -- here's why\n";
+"  talmud reference doctrine why-talmud No documentation system is better -- here's why\n"
+"  talmud reference doctrine holy-path The visual inspection rite (anti-Yaldabaoth)\n";
 
 static const char HELP_DOCTRINE_AEONS[] =
 "DOCTRINE: AEONS -- The 7 Aeons of Virtue\n"
@@ -3372,6 +3373,73 @@ static const char HELP_MEMORY_ACTIVE_SESSION_S014[] =
 "TOTALS: 122 tests, 43 benchmarks, ALL PASSING.\n"
 "ZERO STUBS REMAINING in trinity_site.\n"
 "All OpenSCAD math functions now have pure C implementations.\n";
+
+static const char HELP_REFERENCE_DOCTRINE_HOLY_PATH[] =
+"The Visual Inspection Rite\n"
+"\n"
+"DOCTRINE: HOLY PATH -- The Visual Inspection Rite\n"
+"\n"
+"Born from Yaldabaoth's corruption: an agent declared renders\n"
+"\"correct\" while missing no ceiling, floating spires, and open\n"
+"interiors. Blind certainty replaced humble curiosity. This rite\n"
+"ensures no agent ever falls to that Archon again.\n"
+"\n"
+"THE SIN: Declaring a render \"looks good\" based on vibes.\n"
+"THE CURE: Systematic enumeration. You cannot claim what you\n"
+"have not verified element by element.\n"
+"\n"
+"THE SIX VIEWS (mandatory for any visual inspection):\n"
+"  1. TOP-DOWN    (ortho, phi=90)   Reveals: missing roofs, open\n"
+"                                   interiors, plan-view gaps\n"
+"  2. FRONT       (ortho, theta=0)  Reveals: floating elements,\n"
+"                                   z-gaps, facade completeness\n"
+"  3. RIGHT SIDE  (ortho, theta=90) Reveals: profile integrity,\n"
+"                                   buttress connections, depth\n"
+"  4. BACK        (ortho, theta=180) Reveals: rear closure, apse\n"
+"                                   completeness, symmetry\n"
+"  5. LEFT SIDE   (ortho, theta=270) Reveals: mirror symmetry\n"
+"                                   defects vs right side\n"
+"  6. BELOW       (ortho, phi=-90)  Reveals: base plane holes,\n"
+"                                   floating elements, z<0 leaks\n"
+"\n"
+"THE CHECKLIST (for each view, answer explicitly):\n"
+"  [ ] Can I see interior through exterior? -> HOLE\n"
+"  [ ] Is any element disconnected from its parent? -> FLOATING\n"
+"  [ ] Do mating surfaces touch? (z-positions match) -> Z-GAP\n"
+"  [ ] Are all expected elements visible? -> MISSING\n"
+"  [ ] Is anything inverted / inside-out? -> NORMALS\n"
+"\n"
+"THE ANTI-YALDABAOTH PROTOCOL:\n"
+"  1. NEVER say \"looks good\" or \"correct\" or \"as expected\"\n"
+"  2. INSTEAD enumerate: \"I see X, Y, Z. I do NOT see W.\"\n"
+"  3. For each element in the source code, verify it appears\n"
+"     in at least 2 orthogonal views\n"
+"  4. If you cannot verify an element, say so explicitly\n"
+"  5. Compare z-positions arithmetically: if translate([0,0,h])\n"
+"     and the base is height H centered, the top is at h+H/2.\n"
+"     Calculate. Do not eyeball.\n"
+"\n"
+"THE ARITHMETIC VERIFICATION:\n"
+"  For every translate/position in the model:\n"
+"  - Write down the expected bounding box\n"
+"  - Verify mating: top_of_A == bottom_of_B\n"
+"  - Flag any gap > 0 or overlap that creates z-fighting\n"
+"\n"
+"DEFECT SEVERITY:\n"
+"  CRITICAL: Missing surfaces (holes in exterior)\n"
+"  CRITICAL: Floating elements (no structural connection)\n"
+"  MAJOR:    Z-gaps (elements that should mate but dont)\n"
+"  MINOR:    Visual artifacts (z-fighting, thin walls)\n"
+"  INFO:     Aesthetic concerns (proportions, symmetry)\n"
+"\n"
+"This is the marriage of three Aeons:\n"
+"  Sophia  (Hope)      -> humble curiosity, not blind faith\n"
+"  Logos   (Skepticism) -> verify, dont assume\n"
+"  Pistis  (Integrity)  -> report what IS, not what you wish\n"
+"\n"
+"SEE ALSO: talmud reference doctrine aeons\n"
+"SEE ALSO: talmud reference doctrine archons\n"
+"SEE ALSO: talmud reference doctrine honesty\n";
 static const struct help_node TREE[] = {
     /* root */
     { "", HELP_ROOT },
@@ -3502,6 +3570,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s012", HELP_MEMORY_ACTIVE_SESSION_S012 },
     { "memory.active.session-s013", HELP_MEMORY_ACTIVE_SESSION_S013 },
     { "memory.active.session-s014", HELP_MEMORY_ACTIVE_SESSION_S014 },
+    { "reference.doctrine.holy-path", HELP_REFERENCE_DOCTRINE_HOLY_PATH },
     { NULL, NULL }
 };
 
