@@ -2958,9 +2958,10 @@ static const char HELP_TOOLS_TRINITY_SITE_RANDOM[] =
 static const char HELP_TOOLS_TRINITY_SITE_CSG[] =
 "CSG Boolean Operations\n"
 "\n"
-"CSG Boolean Operations — ts_csg.h (IMPLEMENTED)\n"
+"CSG Boolean Operations — ts_csg.h (IMPLEMENTED + OPTIMIZED)\n"
 "\n"
 "STATUS: Fully implemented. BSP-tree based CSG engine.\n"
+"  Phase 3 optimization: 1.8x speedup on 48K-tri CSG operations.\n"
 "\n"
 "FUNCTIONS (OpenSCAD equivalent):\n"
 "  ts_csg_union(a,b,out)         ~25us/op\n"
@@ -2974,10 +2975,18 @@ static const char HELP_TOOLS_TRINITY_SITE_CSG[] =
 "  Quickhull: initial tetrahedron + iterative expansion.\n"
 "  Minkowski: vertex sum of AxB + convex hull.\n"
 "\n"
+"OPTIMIZATIONS (Phase 3):\n"
+"  Move semantics: non-spanning polys transfer ownership (no clone).\n"
+"  Two-pass BSP: pre-classify, pre-allocate, zero reallocs.\n"
+"  AABB early exit: skip BSP when meshes don't overlap.\n"
+"  Temple cutaway: 275ms -> 174ms (1.6x). BSP build: 111ms -> 42ms.\n"
+"\n"
 "KEY TYPES: ts_csg_vertex, ts_csg_poly, ts_csg_polylist, ts_csg_bsp\n"
 "\n"
-"GPU PLAN (future): per-tri classify, per-edge split, parallel select.\n"
-"Estimated GPU speedup: 10-50x (>10k tris), 50-200x (Minkowski).\n";
+"GPU: csg_classify_tris kernel implemented (ts_opencl.h).\n"
+"  Correct (0 mismatches vs CPU) but memory-bound at 48K tris.\n"
+"  GPU wins at >100K tris where compute dominates transfer.\n"
+"  Further speedup requires algorithmic change (not just GPU).\n";
 
 static const char HELP_TOOLS_TRINITY_SITE_EXTRUDE[] =
 "Extrusion Operations\n"

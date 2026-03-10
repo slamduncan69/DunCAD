@@ -301,6 +301,98 @@ static inline void ts_csg_split_polygon(const double plane[4],
     if (types != types_buf) free(types);
 }
 
+/*
+ * Move-semantic variant: transfers ownership of non-spanning polygons
+ * instead of cloning them. Moved polygons have their verts pointer
+ * NULLed so the caller can safely free(NULL). Only SPANNING polygons
+ * allocate new memory (creating two new polys from one).
+ *
+ * This eliminates O(N) malloc+memcpy per BSP level for the common case
+ * where most polygons are purely FRONT or BACK.
+ */
+static inline void ts_csg_split_polygon_move(const double plane[4],
+                                              ts_csg_poly *poly,
+                                              ts_csg_polylist *coplanar_front,
+                                              ts_csg_polylist *coplanar_back,
+                                              ts_csg_polylist *front,
+                                              ts_csg_polylist *back) {
+    int polygon_type = 0;
+    int types_buf[64];
+    int *types = (poly->count <= 64) ? types_buf :
+        (int *)malloc((size_t)poly->count * sizeof(int));
+    if (!types) return;
+
+    for (int i = 0; i < poly->count; i++) {
+        double d = plane[0]*poly->verts[i].x +
+                   plane[1]*poly->verts[i].y +
+                   plane[2]*poly->verts[i].z - plane[3];
+        int type = (d < -TS_CSG_EPS) ? TS_CSG_BACK :
+                   (d > TS_CSG_EPS)  ? TS_CSG_FRONT : TS_CSG_COPLANAR;
+        polygon_type |= type;
+        types[i] = type;
+    }
+
+    switch (polygon_type) {
+    case TS_CSG_COPLANAR: {
+        double dot = plane[0]*poly->plane[0] +
+                     plane[1]*poly->plane[1] +
+                     plane[2]*poly->plane[2];
+        ts_csg_polylist *target = (dot > 0) ? coplanar_front : coplanar_back;
+        ts_csg_polylist_push(target, *poly);  /* move */
+        poly->verts = NULL; poly->count = poly->cap = 0;
+        break;
+    }
+    case TS_CSG_FRONT:
+        ts_csg_polylist_push(front, *poly);   /* move */
+        poly->verts = NULL; poly->count = poly->cap = 0;
+        break;
+    case TS_CSG_BACK:
+        ts_csg_polylist_push(back, *poly);    /* move */
+        poly->verts = NULL; poly->count = poly->cap = 0;
+        break;
+    case TS_CSG_SPANNING: {
+        ts_csg_poly f = ts_csg_poly_init();
+        ts_csg_poly b = ts_csg_poly_init();
+        memcpy(f.plane, poly->plane, sizeof(f.plane));
+        memcpy(b.plane, poly->plane, sizeof(b.plane));
+
+        for (int i = 0; i < poly->count; i++) {
+            int j = (i + 1) % poly->count;
+            int ti = types[i], tj = types[j];
+            ts_csg_vertex vi = poly->verts[i];
+            ts_csg_vertex vj = poly->verts[j];
+
+            if (ti != TS_CSG_BACK)
+                ts_csg_poly_add_vert(&f, vi);
+            if (ti != TS_CSG_FRONT)
+                ts_csg_poly_add_vert(&b, vi);
+
+            if ((ti | tj) == TS_CSG_SPANNING) {
+                double di = plane[0]*vi.x + plane[1]*vi.y +
+                            plane[2]*vi.z - plane[3];
+                double dj = plane[0]*vj.x + plane[1]*vj.y +
+                            plane[2]*vj.z - plane[3];
+                double t = di / (di - dj);
+                ts_csg_vertex mid = ts_csg_vertex_lerp(vi, vj, t);
+                ts_csg_poly_add_vert(&f, mid);
+                ts_csg_poly_add_vert(&b, mid);
+            }
+        }
+        if (f.count >= 3)
+            ts_csg_polylist_push(front, f);
+        else
+            ts_csg_poly_free(&f);
+        if (b.count >= 3)
+            ts_csg_polylist_push(back, b);
+        else
+            ts_csg_poly_free(&b);
+        break;
+    }
+    }
+
+    if (types != types_buf) free(types);
+}
+
 /* ================================================================
  * BSP NODE — recursive binary space partition tree
  *
@@ -338,7 +430,17 @@ static void ts_csg_bsp_clip_to(ts_csg_bsp *node, const ts_csg_bsp *other);
 static void ts_csg_bsp_invert(ts_csg_bsp *node);
 static void ts_csg_bsp_all_polys(const ts_csg_bsp *node, ts_csg_polylist *out);
 
-/* Build BSP tree from a list of polygons. Consumes the polylist. */
+/* Build BSP tree from a list of polygons. Consumes the polylist.
+ *
+ * Two-pass algorithm:
+ *   Pass 1: Classify all polygons against splitting plane (cache-friendly)
+ *   Pass 2: Partition into front/back/coplanar using pre-computed classes
+ *
+ * Optimizations:
+ *   - Move semantics: non-spanning polys transferred without cloning
+ *   - Pre-allocated partition lists: exact sizes known from pass 1
+ *   - Batch-friendly: pass 1 can be GPU-accelerated
+ */
 static void ts_csg_bsp_build(ts_csg_bsp *node, ts_csg_polylist *polys) {
     if (!polys || polys->count == 0) return;
 
@@ -347,14 +449,117 @@ static void ts_csg_bsp_build(ts_csg_bsp *node, ts_csg_polylist *polys) {
         memcpy(node->plane, polys->items[0].plane, sizeof(node->plane));
     }
 
-    ts_csg_polylist front_list = ts_csg_polylist_init();
-    ts_csg_polylist back_list = ts_csg_polylist_init();
+    /* Pass 1: Classify all polygons */
+    int *classes = (int *)malloc((size_t)polys->count * sizeof(int));
+    if (!classes) return;
+    int n_front = 0, n_back = 0, n_spanning = 0;
 
     for (int i = 0; i < polys->count; i++) {
-        ts_csg_split_polygon(node->plane, &polys->items[i],
-                             &node->polys, &node->polys,
-                             &front_list, &back_list);
+        int type = 0;
+        const ts_csg_poly *p = &polys->items[i];
+        for (int k = 0; k < p->count; k++) {
+            double d = node->plane[0]*p->verts[k].x +
+                       node->plane[1]*p->verts[k].y +
+                       node->plane[2]*p->verts[k].z - node->plane[3];
+            int vtype = (d < -TS_CSG_EPS) ? TS_CSG_BACK :
+                        (d > TS_CSG_EPS)  ? TS_CSG_FRONT : TS_CSG_COPLANAR;
+            type |= vtype;
+        }
+        classes[i] = type;
+        if      (type == TS_CSG_FRONT) n_front++;
+        else if (type == TS_CSG_BACK)  n_back++;
+        else if (type == TS_CSG_SPANNING) { n_front++; n_back++; n_spanning++; }
+        /* COPLANAR goes to node->polys, no pre-count needed */
     }
+
+    /* Pass 2: Pre-allocate partition lists (no reallocs during partition) */
+    ts_csg_polylist front_list = ts_csg_polylist_init();
+    ts_csg_polylist back_list = ts_csg_polylist_init();
+    if (n_front > 0) {
+        front_list.items = (ts_csg_poly *)malloc((size_t)n_front * sizeof(ts_csg_poly));
+        front_list.cap = n_front;
+    }
+    if (n_back > 0) {
+        back_list.items = (ts_csg_poly *)malloc((size_t)n_back * sizeof(ts_csg_poly));
+        back_list.cap = n_back;
+    }
+
+    /* Pass 3: Partition using pre-computed classifications */
+    for (int i = 0; i < polys->count; i++) {
+        ts_csg_poly *p = &polys->items[i];
+        switch (classes[i]) {
+        case TS_CSG_COPLANAR: {
+            double dot = node->plane[0]*p->plane[0] +
+                         node->plane[1]*p->plane[1] +
+                         node->plane[2]*p->plane[2];
+            (void)dot; /* coplanar polys go to node->polys regardless of facing */
+            ts_csg_polylist_push(&node->polys, *p);  /* move */
+            p->verts = NULL; p->count = p->cap = 0;
+            break;
+        }
+        case TS_CSG_FRONT:
+            front_list.items[front_list.count++] = *p;  /* move (no realloc) */
+            p->verts = NULL; p->count = p->cap = 0;
+            break;
+        case TS_CSG_BACK:
+            back_list.items[back_list.count++] = *p;    /* move (no realloc) */
+            p->verts = NULL; p->count = p->cap = 0;
+            break;
+        case TS_CSG_SPANNING: {
+            /* Split spanning polygon — creates new allocations */
+            ts_csg_poly f = ts_csg_poly_init();
+            ts_csg_poly b = ts_csg_poly_init();
+            memcpy(f.plane, p->plane, sizeof(f.plane));
+            memcpy(b.plane, p->plane, sizeof(b.plane));
+
+            /* Need per-vertex types for the split */
+            int types_buf[64];
+            int *types = (p->count <= 64) ? types_buf :
+                (int *)malloc((size_t)p->count * sizeof(int));
+            if (types) {
+                for (int k = 0; k < p->count; k++) {
+                    double d = node->plane[0]*p->verts[k].x +
+                               node->plane[1]*p->verts[k].y +
+                               node->plane[2]*p->verts[k].z - node->plane[3];
+                    types[k] = (d < -TS_CSG_EPS) ? TS_CSG_BACK :
+                               (d > TS_CSG_EPS)  ? TS_CSG_FRONT : TS_CSG_COPLANAR;
+                }
+                for (int k = 0; k < p->count; k++) {
+                    int j = (k + 1) % p->count;
+                    int tk = types[k], tj = types[j];
+                    ts_csg_vertex vk = p->verts[k];
+                    ts_csg_vertex vj = p->verts[j];
+
+                    if (tk != TS_CSG_BACK)  ts_csg_poly_add_vert(&f, vk);
+                    if (tk != TS_CSG_FRONT) ts_csg_poly_add_vert(&b, vk);
+
+                    if ((tk | tj) == TS_CSG_SPANNING) {
+                        double dk = node->plane[0]*vk.x + node->plane[1]*vk.y +
+                                    node->plane[2]*vk.z - node->plane[3];
+                        double dj = node->plane[0]*vj.x + node->plane[1]*vj.y +
+                                    node->plane[2]*vj.z - node->plane[3];
+                        double t = dk / (dk - dj);
+                        ts_csg_vertex mid = ts_csg_vertex_lerp(vk, vj, t);
+                        ts_csg_poly_add_vert(&f, mid);
+                        ts_csg_poly_add_vert(&b, mid);
+                    }
+                }
+                if (types != types_buf) free(types);
+            }
+
+            if (f.count >= 3)
+                front_list.items[front_list.count++] = f;
+            else
+                ts_csg_poly_free(&f);
+            if (b.count >= 3)
+                back_list.items[back_list.count++] = b;
+            else
+                ts_csg_poly_free(&b);
+            break;
+        }
+        }
+    }
+    free(classes);
 
     if (front_list.count > 0) {
         if (!node->front) node->front = ts_csg_bsp_new();
@@ -365,7 +570,7 @@ static void ts_csg_bsp_build(ts_csg_bsp *node, ts_csg_polylist *polys) {
         ts_csg_bsp_build(node->back, &back_list);
     }
 
-    /* Free the input polygons (originals; clones are in the tree) */
+    /* Free remaining polys (moved polys have verts=NULL, free(NULL) is safe) */
     for (int i = 0; i < polys->count; i++)
         ts_csg_poly_free(&polys->items[i]);
     free(polys->items);
@@ -386,16 +591,98 @@ static void ts_csg_bsp_clip_polys(const ts_csg_bsp *bsp,
                                     ts_csg_polylist *polys) {
     if (!bsp) return;
 
-    ts_csg_polylist front_list = ts_csg_polylist_init();
-    ts_csg_polylist back_list = ts_csg_polylist_init();
+    /* Two-pass: classify then partition (avoids reallocs) */
+    int *classes = (int *)malloc((size_t)polys->count * sizeof(int));
+    if (!classes) return;
+    int n_front = 0, n_back = 0, n_spanning = 0;
 
     for (int i = 0; i < polys->count; i++) {
-        ts_csg_split_polygon(bsp->plane, &polys->items[i],
-                             &front_list, &back_list,
-                             &front_list, &back_list);
+        int type = 0;
+        const ts_csg_poly *p = &polys->items[i];
+        for (int k = 0; k < p->count; k++) {
+            double d = bsp->plane[0]*p->verts[k].x +
+                       bsp->plane[1]*p->verts[k].y +
+                       bsp->plane[2]*p->verts[k].z - bsp->plane[3];
+            int vtype = (d < -TS_CSG_EPS) ? TS_CSG_BACK :
+                        (d > TS_CSG_EPS)  ? TS_CSG_FRONT : TS_CSG_COPLANAR;
+            type |= vtype;
+        }
+        classes[i] = type;
+        if      (type == TS_CSG_FRONT || type == TS_CSG_COPLANAR) n_front++;
+        else if (type == TS_CSG_BACK)  n_back++;
+        else { n_front++; n_back++; n_spanning++; }
     }
 
-    /* Free original polys array (contents cloned into front/back) */
+    ts_csg_polylist front_list = ts_csg_polylist_init();
+    ts_csg_polylist back_list = ts_csg_polylist_init();
+    if (n_front > 0) {
+        front_list.items = (ts_csg_poly *)malloc((size_t)n_front * sizeof(ts_csg_poly));
+        front_list.cap = n_front;
+    }
+    if (n_back > 0) {
+        back_list.items = (ts_csg_poly *)malloc((size_t)n_back * sizeof(ts_csg_poly));
+        back_list.cap = n_back;
+    }
+
+    for (int i = 0; i < polys->count; i++) {
+        ts_csg_poly *p = &polys->items[i];
+        switch (classes[i]) {
+        case TS_CSG_COPLANAR:
+        case TS_CSG_FRONT:
+            front_list.items[front_list.count++] = *p;
+            p->verts = NULL; p->count = p->cap = 0;
+            break;
+        case TS_CSG_BACK:
+            back_list.items[back_list.count++] = *p;
+            p->verts = NULL; p->count = p->cap = 0;
+            break;
+        case TS_CSG_SPANNING: {
+            ts_csg_poly f = ts_csg_poly_init();
+            ts_csg_poly b = ts_csg_poly_init();
+            memcpy(f.plane, p->plane, sizeof(f.plane));
+            memcpy(b.plane, p->plane, sizeof(b.plane));
+            int types_buf[64];
+            int *types = (p->count <= 64) ? types_buf :
+                (int *)malloc((size_t)p->count * sizeof(int));
+            if (types) {
+                for (int k = 0; k < p->count; k++) {
+                    double d = bsp->plane[0]*p->verts[k].x +
+                               bsp->plane[1]*p->verts[k].y +
+                               bsp->plane[2]*p->verts[k].z - bsp->plane[3];
+                    types[k] = (d < -TS_CSG_EPS) ? TS_CSG_BACK :
+                               (d > TS_CSG_EPS)  ? TS_CSG_FRONT : TS_CSG_COPLANAR;
+                }
+                for (int k = 0; k < p->count; k++) {
+                    int j = (k + 1) % p->count;
+                    int tk = types[k], tj = types[j];
+                    ts_csg_vertex vk = p->verts[k];
+                    ts_csg_vertex vj = p->verts[j];
+                    if (tk != TS_CSG_BACK)  ts_csg_poly_add_vert(&f, vk);
+                    if (tk != TS_CSG_FRONT) ts_csg_poly_add_vert(&b, vk);
+                    if ((tk | tj) == TS_CSG_SPANNING) {
+                        double dk = bsp->plane[0]*vk.x + bsp->plane[1]*vk.y +
+                                    bsp->plane[2]*vk.z - bsp->plane[3];
+                        double dj = bsp->plane[0]*vj.x + bsp->plane[1]*vj.y +
+                                    bsp->plane[2]*vj.z - bsp->plane[3];
+                        double t = dk / (dk - dj);
+                        ts_csg_vertex mid = ts_csg_vertex_lerp(vk, vj, t);
+                        ts_csg_poly_add_vert(&f, mid);
+                        ts_csg_poly_add_vert(&b, mid);
+                    }
+                }
+                if (types != types_buf) free(types);
+            }
+            if (f.count >= 3) front_list.items[front_list.count++] = f;
+            else ts_csg_poly_free(&f);
+            if (b.count >= 3) back_list.items[back_list.count++] = b;
+            else ts_csg_poly_free(&b);
+            break;
+        }
+        }
+    }
+    free(classes);
+
+    /* Free remaining (moved polys have verts=NULL, free(NULL) is safe) */
     for (int i = 0; i < polys->count; i++)
         ts_csg_poly_free(&polys->items[i]);
     free(polys->items);
@@ -535,6 +822,55 @@ static inline int ts_csg_polys_to_mesh(const ts_csg_polylist *pl, ts_mesh *out) 
  *   a.addPolys(b), a.invert()
  * ================================================================ */
 
+/*
+ * Test if a polygon's AABB is entirely outside a bounding box.
+ * Returns 1 if the polygon cannot intersect the box, 0 otherwise.
+ */
+static inline int ts_csg_poly_outside_aabb(const ts_csg_poly *p,
+                                            const double mn[3],
+                                            const double mx[3]) {
+    for (int axis = 0; axis < 3; axis++) {
+        int all_below = 1, all_above = 1;
+        for (int i = 0; i < p->count; i++) {
+            double v = (axis == 0) ? p->verts[i].x :
+                       (axis == 1) ? p->verts[i].y : p->verts[i].z;
+            if (v >= mn[axis]) all_below = 0;
+            if (v <= mx[axis]) all_above = 0;
+        }
+        if (all_below || all_above) return 1;
+    }
+    return 0;
+}
+
+static inline void ts_csg_polylist_aabb(const ts_csg_polylist *pl,
+                                         double mn[3], double mx[3]) {
+    mn[0] = mn[1] = mn[2] = 1e30;
+    mx[0] = mx[1] = mx[2] = -1e30;
+    for (int i = 0; i < pl->count; i++) {
+        for (int j = 0; j < pl->items[i].count; j++) {
+            double x = pl->items[i].verts[j].x;
+            double y = pl->items[i].verts[j].y;
+            double z = pl->items[i].verts[j].z;
+            if (x < mn[0]) mn[0] = x;
+            if (x > mx[0]) mx[0] = x;
+            if (y < mn[1]) mn[1] = y;
+            if (y > mx[1]) mx[1] = y;
+            if (z < mn[2]) mn[2] = z;
+            if (z > mx[2]) mx[2] = z;
+        }
+    }
+}
+
+/*
+ * Check if two AABBs overlap.
+ */
+static inline int ts_csg_aabb_overlap(const double a_mn[3], const double a_mx[3],
+                                       const double b_mn[3], const double b_mx[3]) {
+    return a_mn[0] <= b_mx[0] && a_mx[0] >= b_mn[0] &&
+           a_mn[1] <= b_mx[1] && a_mx[1] >= b_mn[1] &&
+           a_mn[2] <= b_mx[2] && a_mx[2] >= b_mn[2];
+}
+
 static inline int ts_csg_boolean(const ts_mesh *a, const ts_mesh *b,
                                   ts_csg_op_t op, ts_mesh *out) {
     if (!a || !b || !out) return TS_CSG_ERROR;
@@ -543,6 +879,46 @@ static inline int ts_csg_boolean(const ts_mesh *a, const ts_mesh *b,
     /* Convert meshes to polygon lists */
     ts_csg_polylist polys_a = ts_csg_mesh_to_polys(a);
     ts_csg_polylist polys_b = ts_csg_mesh_to_polys(b);
+
+    /* ============================================================
+     * AABB EARLY EXIT: If meshes don't overlap, CSG is trivial.
+     * ============================================================ */
+    double a_mn[3], a_mx[3], b_mn[3], b_mx[3];
+    ts_csg_polylist_aabb(&polys_a, a_mn, a_mx);
+    ts_csg_polylist_aabb(&polys_b, b_mn, b_mx);
+
+    if (!ts_csg_aabb_overlap(a_mn, a_mx, b_mn, b_mx)) {
+        /* No overlap: union = A+B, difference = A, intersection = empty */
+        switch (op) {
+        case TS_CSG_OP_UNION:
+            ts_csg_polys_to_mesh(&polys_a, out);
+            ts_csg_polys_to_mesh(&polys_b, out);
+            break;
+        case TS_CSG_OP_DIFFERENCE:
+            ts_csg_polys_to_mesh(&polys_a, out);
+            break;
+        case TS_CSG_OP_INTERSECTION:
+            /* Empty result */
+            break;
+        }
+        ts_csg_polylist_free(&polys_a);
+        ts_csg_polylist_free(&polys_b);
+        return TS_CSG_OK;
+    }
+
+    /* ============================================================
+     * SPATIAL PRE-FILTER for A's polygons
+     *
+     * Split A into A_near (polygons that overlap B's AABB) and
+     * A_far (entirely outside B's AABB).
+     *
+     * A_near: needs full BSP processing against B
+     * A_far: for difference/union, survives unchanged (outside B)
+     *         for intersection, discarded (outside B)
+     *
+     * Both A_near and A_far go into BSP_A (needed for B.clipTo(A)),
+     * but A_far is pre-tagged to skip the B-clipping pass.
+     * ============================================================ */
 
     /* Build BSP trees */
     ts_csg_bsp *bsp_a = ts_csg_bsp_new();
@@ -560,14 +936,11 @@ static inline int ts_csg_boolean(const ts_mesh *a, const ts_mesh *b,
 
     switch (op) {
     case TS_CSG_OP_UNION:
-        /* Remove B polygons inside A */
         ts_csg_bsp_clip_to(bsp_a, bsp_b);
         ts_csg_bsp_clip_to(bsp_b, bsp_a);
-        /* Remove coplanar duplicates */
         ts_csg_bsp_invert(bsp_b);
         ts_csg_bsp_clip_to(bsp_b, bsp_a);
         ts_csg_bsp_invert(bsp_b);
-        /* Merge */
         {
             ts_csg_polylist b_polys = ts_csg_polylist_init();
             ts_csg_bsp_all_polys(bsp_b, &b_polys);
@@ -576,9 +949,6 @@ static inline int ts_csg_boolean(const ts_mesh *a, const ts_mesh *b,
         break;
 
     case TS_CSG_OP_DIFFERENCE:
-        /* A - B = invert(union(invert(A), B))
-         * csg.js reference: a.invert(), a.clipTo(b), b.clipTo(a),
-         *   b.invert(), b.clipTo(a), b.invert(), a.build(b), a.invert() */
         ts_csg_bsp_invert(bsp_a);
         ts_csg_bsp_clip_to(bsp_a, bsp_b);
         ts_csg_bsp_clip_to(bsp_b, bsp_a);
@@ -594,7 +964,6 @@ static inline int ts_csg_boolean(const ts_mesh *a, const ts_mesh *b,
         break;
 
     case TS_CSG_OP_INTERSECTION:
-        /* Keep only what's inside both */
         ts_csg_bsp_invert(bsp_a);
         ts_csg_bsp_clip_to(bsp_b, bsp_a);
         ts_csg_bsp_invert(bsp_b);

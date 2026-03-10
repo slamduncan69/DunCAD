@@ -139,6 +139,36 @@ static const char *TS_OPENCL_K2 =
 "    out[i] = lo + t * (hi - lo);\n"
 "}\n";
 
+/* Part 3: CSG classification kernel
+ * Input: N polygons packed as triangles (9 doubles each: 3 verts × xyz)
+ *        1 plane (4 doubles: nx, ny, nz, w)
+ *        epsilon for coplanar threshold
+ * Output: N ints — classification per polygon
+ *   0=COPLANAR, 1=FRONT, 2=BACK, 3=SPANNING
+ *
+ * One work-item per polygon. Each classifies its 3 vertices against
+ * the plane, then ORs the per-vertex types.
+ */
+static const char *TS_OPENCL_K3 =
+"#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n"
+"__kernel void csg_classify_tris(\n"
+"    __global const double *polys,\n"    /* 9 doubles per tri: v0xyz v1xyz v2xyz */
+"    __global const double *plane,\n"    /* 4 doubles: nx ny nz w */
+"    double eps,\n"
+"    __global int *out,\n"              /* N ints: classification */
+"    int n) {\n"
+"    int i = get_global_id(0); if (i >= n) return;\n"
+"    int j = i * 9;\n"
+"    double nx=plane[0], ny=plane[1], nz=plane[2], w=plane[3];\n"
+"    int type = 0;\n"
+"    for (int k = 0; k < 3; k++) {\n"
+"        double d = nx*polys[j+k*3] + ny*polys[j+k*3+1] + nz*polys[j+k*3+2] - w;\n"
+"        int vtype = (d < -eps) ? 2 : ((d > eps) ? 1 : 0);\n"
+"        type |= vtype;\n"
+"    }\n"
+"    out[i] = type;\n"
+"}\n";
+
 #endif /* TS_GPU_AVAILABLE */
 
 /* ================================================================
@@ -165,6 +195,7 @@ typedef struct {
     cl_kernel k_scalar_pow;
     cl_kernel k_mesh_transform;
     cl_kernel k_rng_uniform;
+    cl_kernel k_csg_classify_tris;
 #endif
     int active;         /* 1 if GPU is available and initialized */
     char device_name[256];
@@ -235,10 +266,10 @@ static inline ts_gpu_ctx ts_gpu_init(void) {
         return ctx;
     }
 
-    /* Compile kernel program (two source strings concatenated) */
-    const char *srcs[2] = { TS_OPENCL_K1, TS_OPENCL_K2 };
-    size_t src_lens[2] = { strlen(TS_OPENCL_K1), strlen(TS_OPENCL_K2) };
-    ctx.program = clCreateProgramWithSource(ctx.context, 2, srcs, src_lens, &err);
+    /* Compile kernel program (three source strings concatenated) */
+    const char *srcs[3] = { TS_OPENCL_K1, TS_OPENCL_K2, TS_OPENCL_K3 };
+    size_t src_lens[3] = { strlen(TS_OPENCL_K1), strlen(TS_OPENCL_K2), strlen(TS_OPENCL_K3) };
+    ctx.program = clCreateProgramWithSource(ctx.context, 3, srcs, src_lens, &err);
     if (err != CL_SUCCESS) {
         clReleaseCommandQueue(ctx.queue);
         clReleaseContext(ctx.context);
@@ -281,6 +312,7 @@ static inline ts_gpu_ctx ts_gpu_init(void) {
     ctx.k_scalar_pow = clCreateKernel(ctx.program, "scalar_pow", NULL);
     ctx.k_mesh_transform = clCreateKernel(ctx.program, "mesh_transform", NULL);
     ctx.k_rng_uniform = clCreateKernel(ctx.program, "rng_uniform", NULL);
+    ctx.k_csg_classify_tris = clCreateKernel(ctx.program, "csg_classify_tris", NULL);
 
     ctx.platform = platform;
     ctx.device = device;
@@ -306,6 +338,7 @@ static inline void ts_gpu_shutdown(ts_gpu_ctx *ctx) {
     if (ctx->k_scalar_pow) clReleaseKernel(ctx->k_scalar_pow);
     if (ctx->k_mesh_transform) clReleaseKernel(ctx->k_mesh_transform);
     if (ctx->k_rng_uniform) clReleaseKernel(ctx->k_rng_uniform);
+    if (ctx->k_csg_classify_tris) clReleaseKernel(ctx->k_csg_classify_tris);
     if (ctx->program) clReleaseProgram(ctx->program);
     if (ctx->queue) clReleaseCommandQueue(ctx->queue);
     if (ctx->context) clReleaseContext(ctx->context);
@@ -652,6 +685,94 @@ static inline int ts_gpu_rng_uniform(const ts_gpu_ctx *ctx,
         z = z ^ (z >> 31);
         double t = (double)(z >> 11) * (1.0 / 9007199254740992.0);
         out[i] = lo + t * (hi - lo);
+    }
+    return 0;
+}
+
+/* ================================================================
+ * CSG BATCH CLASSIFICATION
+ *
+ * Classify N triangular polygons against a splitting plane.
+ * Each polygon is 3 vertices (9 doubles: v0x,v0y,v0z, v1..., v2...).
+ * Output: N ints (0=COPLANAR, 1=FRONT, 2=BACK, 3=SPANNING).
+ *
+ * GPU: one work-item per polygon (3 dot products each).
+ * CPU fallback: simple loop.
+ *
+ * This is the hot inner loop of BSP build and clip operations.
+ * At 48K polygons, GPU gives massive parallelism benefit.
+ * ================================================================ */
+
+#define TS_GPU_CSG_MIN_BATCH 1024
+
+static inline int ts_gpu_csg_classify_tris(const ts_gpu_ctx *ctx,
+                                            const double *packed_verts,
+                                            const double plane[4],
+                                            double eps,
+                                            int *out,
+                                            int n) {
+#if TS_GPU_AVAILABLE
+    if (ctx && ctx->active && n >= TS_GPU_CSG_MIN_BATCH) {
+        cl_int err;
+        size_t poly_bytes = (size_t)n * 9 * sizeof(double);
+        size_t plane_bytes = 4 * sizeof(double);
+        size_t out_bytes = (size_t)n * sizeof(int);
+
+        cl_mem buf_polys = clCreateBuffer(ctx->context,
+            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            poly_bytes, (void *)packed_verts, &err);
+        if (err != CL_SUCCESS) return -1;
+
+        cl_mem buf_plane = clCreateBuffer(ctx->context,
+            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            plane_bytes, (void *)plane, &err);
+        if (err != CL_SUCCESS) {
+            clReleaseMemObject(buf_polys);
+            return -1;
+        }
+
+        cl_mem buf_out = clCreateBuffer(ctx->context, CL_MEM_WRITE_ONLY,
+                                         out_bytes, NULL, &err);
+        if (err != CL_SUCCESS) {
+            clReleaseMemObject(buf_polys);
+            clReleaseMemObject(buf_plane);
+            return -1;
+        }
+
+        clSetKernelArg(ctx->k_csg_classify_tris, 0, sizeof(cl_mem), &buf_polys);
+        clSetKernelArg(ctx->k_csg_classify_tris, 1, sizeof(cl_mem), &buf_plane);
+        clSetKernelArg(ctx->k_csg_classify_tris, 2, sizeof(double), &eps);
+        clSetKernelArg(ctx->k_csg_classify_tris, 3, sizeof(cl_mem), &buf_out);
+        clSetKernelArg(ctx->k_csg_classify_tris, 4, sizeof(int), &n);
+
+        size_t global = (size_t)n;
+        err = clEnqueueNDRangeKernel(ctx->queue, ctx->k_csg_classify_tris,
+                                      1, NULL, &global, NULL, 0, NULL, NULL);
+        if (err == CL_SUCCESS) {
+            clEnqueueReadBuffer(ctx->queue, buf_out, CL_TRUE, 0,
+                                out_bytes, out, 0, NULL, NULL);
+        }
+
+        clReleaseMemObject(buf_polys);
+        clReleaseMemObject(buf_plane);
+        clReleaseMemObject(buf_out);
+        return (err == CL_SUCCESS) ? 0 : -1;
+    }
+#else
+    (void)ctx;
+#endif
+    /* CPU fallback */
+    for (int i = 0; i < n; i++) {
+        int j = i * 9;
+        int type = 0;
+        for (int k = 0; k < 3; k++) {
+            double d = plane[0]*packed_verts[j+k*3] +
+                       plane[1]*packed_verts[j+k*3+1] +
+                       plane[2]*packed_verts[j+k*3+2] - plane[3];
+            int vtype = (d < -eps) ? 2 : ((d > eps) ? 1 : 0);
+            type |= vtype;
+        }
+        out[i] = type;
     }
     return 0;
 }
