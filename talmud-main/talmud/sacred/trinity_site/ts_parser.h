@@ -40,6 +40,7 @@ typedef enum {
     TS_AST_USE,
     TS_AST_LIST_COMP,  /* [for (var = range) expr] */
     TS_AST_LET,        /* let(x=1, y=2) expr */
+    TS_AST_ASSERT,     /* assert(cond, msg) */
 } ts_ast_type;
 
 /* ================================================================
@@ -751,6 +752,15 @@ static ts_ast *ts_parse_statement(ts_lexer *lex, ts_parse_error *err) {
     if (t.type == TS_TOK_ECHO) {
         ts_lexer_next(lex);
         ts_ast *n = ts_ast_new(TS_AST_ECHO, t.line);
+        ts_parse_arglist(lex, n, err);
+        ts_expect(lex, TS_TOK_SEMICOLON, err);
+        return n;
+    }
+
+    /* assert */
+    if (t.type == TS_TOK_ASSERT) {
+        ts_lexer_next(lex);
+        ts_ast *n = ts_ast_new(TS_AST_ASSERT, t.line);
         ts_parse_arglist(lex, n, err);
         ts_expect(lex, TS_TOK_SEMICOLON, err);
         return n;

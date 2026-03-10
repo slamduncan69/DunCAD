@@ -33,8 +33,12 @@
 #define TS_CSG_OK               0
 #define TS_CSG_ERROR           -1
 
-/* Epsilon for plane classification */
-#define TS_CSG_EPS 1e-5
+/* Adaptive epsilon for plane classification.
+ * Default 1e-5. ts_csg_boolean sets this relative to mesh extents
+ * at the start of each operation: eps = max_extent * 1e-8, clamped
+ * to [1e-10, 1e-4]. Prevents misclassification for both tiny and huge meshes. */
+static double ts_csg_eps_ = 1e-5;
+#define TS_CSG_EPS ts_csg_eps_
 
 /* --- CSG operation type enum --- */
 typedef enum {
@@ -886,6 +890,23 @@ static inline int ts_csg_boolean(const ts_mesh *a, const ts_mesh *b,
     double a_mn[3], a_mx[3], b_mn[3], b_mx[3];
     ts_csg_polylist_aabb(&polys_a, a_mn, a_mx);
     ts_csg_polylist_aabb(&polys_b, b_mn, b_mx);
+
+    /* Adaptive epsilon: scale relative to mesh extents.
+     * For tiny meshes (mm scale), use smaller eps to avoid erasing features.
+     * For huge meshes (1000+ units), use larger eps for numerical stability. */
+    {
+        double extent = 0;
+        for (int i = 0; i < 3; i++) {
+            double ea = a_mx[i] - a_mn[i];
+            double eb = b_mx[i] - b_mn[i];
+            if (ea > extent) extent = ea;
+            if (eb > extent) extent = eb;
+        }
+        double eps = extent * 1e-8;
+        if (eps < 1e-10) eps = 1e-10;
+        if (eps > 1e-4) eps = 1e-4;
+        ts_csg_eps_ = eps;
+    }
 
     if (!ts_csg_aabb_overlap(a_mn, a_mx, b_mn, b_mx)) {
         /* No overlap: union = A+B, difference = A, intersection = empty */

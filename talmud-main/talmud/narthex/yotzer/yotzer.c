@@ -118,18 +118,10 @@ static int compile(const char *src, const char *bin, const char *defs) {
     return ret;
 }
 
-/* Return the newest mtime among all files in include/. */
-static time_t newest_header_mtime(void) {
-    static time_t cached = -1;
-    if (cached != -1) return cached;
-
-    char inc_dir[8192];
-    snprintf(inc_dir, sizeof(inc_dir), "%s/narthex/include", g_talmud_dir);
-
-    DIR *d = opendir(inc_dir);
-    if (!d) return 0;
-
-    time_t newest = 0;
+/* Scan directory for newest .h file mtime. */
+static time_t newest_h_in_dir(const char *dir, time_t best) {
+    DIR *d = opendir(dir);
+    if (!d) return best;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.') continue;
@@ -138,12 +130,29 @@ static time_t newest_header_mtime(void) {
             ent->d_name[nlen - 2] != '.' || ent->d_name[nlen - 1] != 'h')
             continue;
         char path[4096 + 256 + 2];
-        snprintf(path, sizeof(path), "%.4096s/%s", inc_dir, ent->d_name);
+        snprintf(path, sizeof(path), "%.4096s/%s", dir, ent->d_name);
         struct stat fst;
-        if (stat(path, &fst) == 0 && fst.st_mtime > newest)
-            newest = fst.st_mtime;
+        if (stat(path, &fst) == 0 && fst.st_mtime > best)
+            best = fst.st_mtime;
     }
     closedir(d);
+    return best;
+}
+
+/* Return the newest mtime among headers in include/ and sacred/trinity_site/. */
+static time_t newest_header_mtime(void) {
+    static time_t cached = -1;
+    if (cached != -1) return cached;
+
+    char dir[8192];
+    time_t newest = 0;
+
+    snprintf(dir, sizeof(dir), "%s/narthex/include", g_talmud_dir);
+    newest = newest_h_in_dir(dir, newest);
+
+    snprintf(dir, sizeof(dir), "%s/sacred/trinity_site", g_talmud_dir);
+    newest = newest_h_in_dir(dir, newest);
+
     cached = newest;
     return newest;
 }

@@ -136,6 +136,9 @@ struct ts_env {
     ts_ast **caller_children;
     int      caller_child_count;
 
+    /* Module call stack for parent_module() */
+    const char *module_name;  /* name of module being evaluated, NULL = top-level */
+
     /* Base directory for resolving include/use paths */
     char   *base_dir;   /* heap-owned, NULL = cwd */
 
@@ -591,6 +594,27 @@ static ts_val ts_eval_expr(ts_ast *node, ts_env *env) {
             free(buf);
             return v;
         }
+        /* parent_module(idx) — return name of module in the call stack */
+        if (strcmp(name, "parent_module") == 0) {
+            int idx = 0;
+            if (node->arg_count >= 1)
+                idx = (int)ts_val_to_num(ts_eval_expr(node->args[0].value, env));
+            /* Walk up the env chain counting module contexts */
+            int depth = 0;
+            for (ts_env *cur = env; cur; cur = cur->parent) {
+                if (cur->module_name) {
+                    if (depth == idx) {
+                        ts_val v; memset(&v, 0, sizeof(v));
+                        v.type = TS_VAL_STRING;
+                        v.str = strdup(cur->module_name);
+                        return v;
+                    }
+                    depth++;
+                }
+            }
+            return ts_val_undef();
+        }
+
         /* str() */
         if (strcmp(name, "str") == 0) {
             /* Simple: convert first arg to string */
@@ -799,7 +823,8 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
                 ts_ast *c = node->children[i];
                 if (c->type != TS_AST_ASSIGN && c->type != TS_AST_MODULE_DEF &&
                     c->type != TS_AST_FUNCTION_DEF && c->type != TS_AST_INCLUDE &&
-                    c->type != TS_AST_USE && c->type != TS_AST_ECHO)
+                    c->type != TS_AST_USE && c->type != TS_AST_ECHO &&
+                    c->type != TS_AST_ASSERT)
                     geo_count++;
             }
             env->progress->total = geo_count;
@@ -809,8 +834,14 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             ts_ast *c = node->children[i];
             if (c->type == TS_AST_ASSIGN || c->type == TS_AST_MODULE_DEF ||
                 c->type == TS_AST_FUNCTION_DEF || c->type == TS_AST_INCLUDE ||
-                c->type == TS_AST_USE || c->type == TS_AST_ECHO)
+                c->type == TS_AST_USE)
                 continue;
+            /* Execute echo/assert inline (side effects only, no geometry) */
+            if (c->type == TS_AST_ECHO || c->type == TS_AST_ASSERT) {
+                ts_mesh dummy = ts_eval_geometry(c, env, xform);
+                ts_mesh_free(&dummy);
+                continue;
+            }
             ts_mesh child = ts_eval_geometry(c, env, xform);
             ts_mesh_append(&result, &child);
             ts_mesh_free(&child);
@@ -850,6 +881,28 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             else fprintf(stderr, "undef");
         }
         fprintf(stderr, "\n");
+        return result;
+    }
+
+    /* ---- Assert ---- */
+    case TS_AST_ASSERT: {
+        if (node->arg_count >= 1) {
+            ts_val cond = ts_eval_expr(node->args[0].value, env);
+            if (!ts_val_is_true(cond)) {
+                if (node->arg_count >= 2) {
+                    ts_val msg = ts_eval_expr(node->args[1].value, env);
+                    if (msg.type == TS_VAL_STRING)
+                        fprintf(stderr, "ERROR: Assertion failed: %s (line %d)\n",
+                                msg.str, node->line);
+                    else
+                        fprintf(stderr, "ERROR: Assertion failed (line %d)\n",
+                                node->line);
+                } else {
+                    fprintf(stderr, "ERROR: Assertion failed (line %d)\n",
+                            node->line);
+                }
+            }
+        }
         return result;
     }
 
@@ -1058,6 +1111,34 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
 
         if (strcmp(name, "render") == 0) {
             return ts_eval_children(node, env, xform);
+        }
+
+        /* --- import() — load external STL files --- */
+        if (strcmp(name, "import") == 0) {
+            ts_val file_v = ts_arg_get(node, env, "file", 0, ts_val_undef());
+            if (file_v.type == TS_VAL_STRING && file_v.str) {
+                /* Resolve path relative to base_dir */
+                char resolved[4096];
+                if (file_v.str[0] == '/') {
+                    snprintf(resolved, sizeof(resolved), "%s", file_v.str);
+                } else if (env->base_dir) {
+                    snprintf(resolved, sizeof(resolved), "%s/%s",
+                             env->base_dir, file_v.str);
+                } else {
+                    snprintf(resolved, sizeof(resolved), "%s", file_v.str);
+                }
+                /* Check file extension — only STL supported */
+                const char *ext = strrchr(resolved, '.');
+                if (ext && (strcmp(ext, ".stl") == 0 || strcmp(ext, ".STL") == 0)) {
+                    if (ts_mesh_read_stl(&result, resolved) != 0)
+                        fprintf(stderr, "Warning: cannot read STL '%s'\n", resolved);
+                    else
+                        ts_apply_xform(&result, xform);
+                } else {
+                    fprintf(stderr, "Warning: import() only supports STL files, got '%s'\n", resolved);
+                }
+            }
+            return result;
         }
 
         /* --- CSG operations --- */
@@ -1357,6 +1438,7 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
         ts_ast *mdef = ts_env_get_module(env, name);
         if (mdef) {
             ts_env *menv = ts_env_new(env);
+            menv->module_name = name;
             /* Pass caller's children for children() access */
             menv->caller_children = node->children;
             menv->caller_child_count = node->child_count;

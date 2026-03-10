@@ -266,4 +266,42 @@ static inline int ts_mesh_write_stl(const ts_mesh *m, const char *path) {
     return 0;
 }
 
+/* --- Read binary STL --- */
+static inline int ts_mesh_read_stl(ts_mesh *m, const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return -1;
+
+    /* Skip 80-byte header */
+    fseek(fp, 80, SEEK_SET);
+
+    /* Triangle count */
+    unsigned int ntri = 0;
+    if (fread(&ntri, sizeof(ntri), 1, fp) != 1) { fclose(fp); return -1; }
+    if (ntri == 0) { fclose(fp); return 0; }
+
+    ts_mesh_reserve(m, (int)ntri * 3, (int)ntri);
+
+    for (unsigned int i = 0; i < ntri; i++) {
+        float tri_data[12];
+        unsigned short attr;
+        if (fread(tri_data, sizeof(float), 12, fp) != 12) { fclose(fp); return -1; }
+        if (fread(&attr, sizeof(attr), 1, fp) != 1) { fclose(fp); return -1; }
+
+        double nx = (double)tri_data[0], ny = (double)tri_data[1], nz = (double)tri_data[2];
+        int a = ts_mesh_add_vertex(m,
+            (double)tri_data[3], (double)tri_data[4], (double)tri_data[5],
+            nx, ny, nz);
+        int b = ts_mesh_add_vertex(m,
+            (double)tri_data[6], (double)tri_data[7], (double)tri_data[8],
+            nx, ny, nz);
+        int c = ts_mesh_add_vertex(m,
+            (double)tri_data[9], (double)tri_data[10], (double)tri_data[11],
+            nx, ny, nz);
+        ts_mesh_add_triangle(m, a, b, c);
+    }
+
+    fclose(fp);
+    return 0;
+}
+
 #endif /* TS_MESH_H */
