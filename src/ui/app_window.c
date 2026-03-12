@@ -2,11 +2,15 @@
 #include "ui/code_editor.h"
 #include "ui/scad_preview.h"
 #include "ui/transform_panel.h"
+#include "ui/terminal_panel.h"
+#include "ui/ai_chat.h"
 #include "ui/shape_menu.h"
 #include "gl/gl_viewport.h"
 #include "bezier/bezier_editor.h"
+#include "inspect/inspect.h"
 #include "core/log.h"
 
+#include <math.h>
 #include <string.h>
 
 /* -------------------------------------------------------------------------
@@ -77,24 +81,6 @@ build_menu_model(void)
     return G_MENU_MODEL(menu_bar);
 }
 
-/* -------------------------------------------------------------------------
- * Placeholder panel content helpers
- * ---------------------------------------------------------------------- */
-static GtkWidget *
-make_placeholder_panel(const char *label_text)
-{
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-
-    GtkWidget *label = gtk_label_new(label_text);
-    gtk_widget_set_opacity(label, 0.35);
-    gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
-    gtk_widget_set_hexpand(label, TRUE);
-    gtk_widget_set_vexpand(label, TRUE);
-
-    gtk_box_append(GTK_BOX(box), label);
-    return box;
-}
 
 /* -------------------------------------------------------------------------
  * Pick callback — viewport object click → code editor + transform panel
@@ -102,6 +88,9 @@ make_placeholder_panel(const char *label_text)
 typedef struct {
     DC_CodeEditor     *code_ed;
     DC_TransformPanel *transform;
+    DC_GlViewport     *gl_vp;       /* for live translate during drag */
+    DC_ScadPreview    *preview;     /* for auto-render on drag end */
+    double             move_init[3]; /* initial translate at drag start */
 } PickCtx;
 
 static void
@@ -148,6 +137,89 @@ on_object_picked(int obj_idx, int line_start, int line_end, void *userdata)
 }
 
 /* -------------------------------------------------------------------------
+ * Move callback — viewport object drag → live translate update
+ * ---------------------------------------------------------------------- */
+static void
+on_object_moved(int obj_idx, int phase, float dx, float dy, float dz,
+                void *userdata)
+{
+    PickCtx *ctx = userdata;
+
+    if (phase == 0) {
+        /* Drag start: save initial translate values */
+        if (ctx->transform)
+            dc_transform_panel_get_translate(ctx->transform,
+                &ctx->move_init[0], &ctx->move_init[1], &ctx->move_init[2]);
+        fprintf(stderr, "MOVE phase 0: init=[%.2f, %.2f, %.2f]\n",
+                ctx->move_init[0], ctx->move_init[1], ctx->move_init[2]);
+        return;
+    }
+
+    if (phase == 1) {
+        /* Moving: visual-only GL translate offset (no code changes mid-drag).
+         * Delta only — mesh already has original translate baked in. */
+        if (ctx->gl_vp)
+            dc_gl_viewport_set_object_translate(ctx->gl_vp, obj_idx,
+                                                 dx, dy, dz);
+
+        /* Live preview: convert GL delta to SCAD-space and show in panel+terminal */
+        float scad_dx =  dx;
+        float scad_dy = -dz;
+        float scad_dz =  dy;
+        double fx = ctx->move_init[0] + (double)scad_dx;
+        double fy = ctx->move_init[1] + (double)scad_dy;
+        double fz = ctx->move_init[2] + (double)scad_dz;
+
+        if (ctx->transform)
+            dc_transform_panel_set_translate_preview(ctx->transform, fx, fy, fz);
+
+        fprintf(stderr, "MOVE live: translate([%.2f, %.2f, %.2f])\n", fx, fy, fz);
+        return;
+    }
+
+    if (phase == 2) {
+        /* Convert GL-space delta (Y-up) to SCAD-space (Z-up).
+         * STL loader does: GL_x=SCAD_x, GL_y=SCAD_z, GL_z=-SCAD_y
+         * Inverse:         SCAD_x=GL_x, SCAD_y=-GL_z, SCAD_z=GL_y */
+        float scad_dx =  dx;
+        float scad_dy = -dz;
+        float scad_dz =  dy;
+
+        fprintf(stderr, "MOVE phase 2: gl_delta=[%.2f, %.2f, %.2f] scad_delta=[%.2f, %.2f, %.2f] init=[%.2f, %.2f, %.2f]\n",
+                (double)dx, (double)dy, (double)dz,
+                (double)scad_dx, (double)scad_dy, (double)scad_dz,
+                ctx->move_init[0], ctx->move_init[1], ctx->move_init[2]);
+        fprintf(stderr, "MOVE phase 2: final=[%.2f, %.2f, %.2f]\n",
+                ctx->move_init[0] + (double)scad_dx,
+                ctx->move_init[1] + (double)scad_dy,
+                ctx->move_init[2] + (double)scad_dz);
+
+        /* Drag end: snap back if dropped close to origin */
+        float mag = sqrtf(dx * dx + dy * dy + dz * dz);
+        float snap_thresh = 1.0f; /* world units */
+
+        if (mag < snap_thresh) {
+            DC_LOG_INFO_APP("move phase 2: snap back (mag=%.2f)", (double)mag);
+            /* Snap back — reset GL offset, no code change, no re-render */
+            if (ctx->gl_vp)
+                dc_gl_viewport_set_object_translate(ctx->gl_vp, obj_idx,
+                                                     0.0f, 0.0f, 0.0f);
+            return;
+        }
+
+        /* Commit final position to code (SCAD-space), then re-render */
+        if (ctx->transform)
+            dc_transform_panel_set_translate(ctx->transform,
+                ctx->move_init[0] + (double)scad_dx,
+                ctx->move_init[1] + (double)scad_dy,
+                ctx->move_init[2] + (double)scad_dz);
+        /* Keep GL offset until re-render replaces objects */
+        if (ctx->preview)
+            dc_scad_preview_render(ctx->preview);
+    }
+}
+
+/* -------------------------------------------------------------------------
  * Transform panel Enter callback — triggers preview render
  * ---------------------------------------------------------------------- */
 static void
@@ -155,6 +227,66 @@ on_transform_enter(void *userdata)
 {
     DC_ScadPreview *pv = userdata;
     if (pv) dc_scad_preview_render(pv);
+}
+
+/* -------------------------------------------------------------------------
+ * Terminal command routing: /cmd → inspect, else → AI chat
+ * ---------------------------------------------------------------------- */
+typedef struct {
+    DC_TerminalPanel *term;
+    DC_AiChat        *ai;
+} TermCtx;
+
+static void
+on_ai_response(const char *text, void *userdata)
+{
+    DC_TerminalPanel *term = userdata;
+    dc_terminal_panel_append(term, text);
+}
+
+static void
+on_ai_tool(const char *tool, const char *input, const char *result,
+           void *userdata)
+{
+    (void)result;
+    DC_TerminalPanel *term = userdata;
+    char buf[256];
+    /* Show tool name and abbreviated input */
+    size_t ilen = strlen(input);
+    if (ilen > 80) {
+        snprintf(buf, sizeof(buf), "[%s] %.77s...\n", tool, input);
+    } else {
+        snprintf(buf, sizeof(buf), "[%s] %s\n", tool, input);
+    }
+    dc_terminal_panel_append(term, buf);
+}
+
+static void
+on_terminal_command(const char *command, void *userdata)
+{
+    TermCtx *ctx = userdata;
+
+    if (command[0] == '/') {
+        /* Direct inspect command (strip leading /) */
+        char *response = dc_inspect_dispatch(command + 1);
+        if (response) {
+            dc_terminal_panel_append(ctx->term, response);
+            dc_terminal_panel_append(ctx->term, "\n");
+            free(response);
+        }
+    } else if (ctx->ai) {
+        if (dc_ai_chat_busy(ctx->ai)) {
+            dc_terminal_panel_append(ctx->term, "(busy, please wait...)\n");
+            return;
+        }
+        dc_terminal_panel_append(ctx->term, "...\n");
+        dc_ai_chat_send(ctx->ai, command);
+    } else {
+        /* No AI available — fall back to inspect */
+        dc_terminal_panel_append(ctx->term,
+            "AI not available (claude CLI not found). "
+            "Use /command for inspect commands.\n");
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -170,7 +302,7 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
     if (keyval == GDK_KEY_F5) {
         DC_ScadPreview *pv = g_object_get_data(G_OBJECT(window),
                                                 "dc-scad-preview-ref");
-        if (pv) dc_scad_preview_render(pv);
+        if (pv) dc_scad_preview_render_refit(pv);
         return TRUE;
     }
 
@@ -258,13 +390,13 @@ dc_app_window_create(GtkApplication *app)
     DC_BezierEditor *editor = dc_bezier_editor_new();
     GtkWidget *bezier_widget = dc_bezier_editor_widget(editor);
 
-    GtkWidget *bottom_placeholder = make_placeholder_panel(
-        "Properties\n(Future)");
+    DC_TerminalPanel *terminal = dc_terminal_panel_new();
+    GtkWidget *terminal_widget = dc_terminal_panel_widget(terminal);
 
-    /* Right pane: vertical split — bezier (top) + placeholder (bottom) */
+    /* Right pane: vertical split — bezier (top) + terminal (bottom) */
     GtkWidget *right_paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
     gtk_paned_set_start_child(GTK_PANED(right_paned), bezier_widget);
-    gtk_paned_set_end_child(GTK_PANED(right_paned), bottom_placeholder);
+    gtk_paned_set_end_child(GTK_PANED(right_paned), terminal_widget);
     gtk_paned_set_position(GTK_PANED(right_paned), 400);
     gtk_paned_set_resize_start_child(GTK_PANED(right_paned), TRUE);
     gtk_paned_set_resize_end_child(GTK_PANED(right_paned), TRUE);
@@ -339,14 +471,39 @@ dc_app_window_create(GtkApplication *app)
     g_object_set_data_full(G_OBJECT(window), "dc-scad-preview", preview,
                            (GDestroyNotify)dc_scad_preview_free);
 
+    /* Wire the terminal panel with AI chat */
+    DC_AiChat *ai_chat = dc_ai_chat_new(); /* NULL if no API key */
+    if (ai_chat) {
+        dc_ai_chat_set_response_callback(ai_chat, on_ai_response, terminal);
+        dc_ai_chat_set_tool_callback(ai_chat, on_ai_tool, terminal);
+        dc_terminal_panel_append(terminal,
+            "AI connected. Type to chat, /command for inspect.\n\n");
+    } else {
+        dc_terminal_panel_append(terminal,
+            "claude CLI not found. /command for inspect.\n\n");
+    }
+    TermCtx *term_ctx = malloc(sizeof(TermCtx));
+    term_ctx->term = terminal;
+    term_ctx->ai = ai_chat;
+    dc_terminal_panel_set_command_callback(terminal, on_terminal_command, term_ctx);
+    g_object_set_data_full(G_OBJECT(window), "dc-terminal", terminal,
+                           (GDestroyNotify)dc_terminal_panel_free);
+    g_object_set_data_full(G_OBJECT(window), "dc-ai-chat", ai_chat,
+                           (GDestroyNotify)dc_ai_chat_free);
+    g_object_set_data_full(G_OBJECT(window), "dc-term-ctx", term_ctx, free);
+
     /* Wire pick callback: viewport click → code editor + transform panel */
     DC_GlViewport *gl_vp = dc_scad_preview_get_viewport(preview);
     if (gl_vp) {
         /* PickCtx lives as long as the window (freed via destroy-notify) */
         PickCtx *pick_ctx = malloc(sizeof(PickCtx));
+        memset(pick_ctx, 0, sizeof(*pick_ctx));
         pick_ctx->code_ed = code_ed;
         pick_ctx->transform = dc_scad_preview_get_transform(preview);
+        pick_ctx->gl_vp = gl_vp;
+        pick_ctx->preview = preview;
         dc_gl_viewport_set_pick_callback(gl_vp, on_object_picked, pick_ctx);
+        dc_gl_viewport_set_move_callback(gl_vp, on_object_moved, pick_ctx);
         g_object_set_data_full(G_OBJECT(window), "dc-pick-ctx", pick_ctx, free);
 
         /* Enter in transform panel entries → trigger render */

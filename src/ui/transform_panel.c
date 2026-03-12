@@ -151,14 +151,26 @@ replace_lines(DC_TransformPanel *tp, const char *new_text)
 
 /* ---- Transform stripping and rebuilding ---- */
 
-/* Strip existing translate(...) and rotate(...) prefixes from text. */
+/* Strip existing translate(...) and rotate(...) prefixes from text.
+ * Also skips leading // comments and blank lines. */
 static const char *
 strip_transforms(const char *text)
 {
     const char *p = text;
-    while (*p && isspace((unsigned char)*p)) p++;
 
     for (;;) {
+        /* Skip whitespace */
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+
+        /* Skip // comments */
+        if (p[0] == '/' && p[1] == '/') {
+            while (*p && *p != '\n') p++;
+            if (*p == '\n') p++;
+            continue;
+        }
+
+        /* Try to strip translate/rotate */
         int found = 0;
         const char *keywords[] = {"translate", "rotate", NULL};
         for (int k = 0; keywords[k]; k++) {
@@ -262,6 +274,8 @@ on_entry_changed(GtkEditable *editable, gpointer data)
 
     /* Build new statement */
     char *new_stmt = build_transformed_text(tp, old_stmt);
+    fprintf(stderr, "TRANSFORM old=[%s] new=[%s] lines=%d-%d\n",
+            old_stmt, new_stmt ? new_stmt : "NULL", tp->line_start, tp->line_end);
     free(old_stmt);
 
     if (new_stmt) {
@@ -448,11 +462,10 @@ dc_transform_panel_show(DC_TransformPanel *tp, const char *stmt_text,
         tp->has_rotate = parse_transform(stmt_text, "rotate", &rx, &ry, &rz);
     }
 
-    /* If neither detected, don't show panel */
-    if (!tp->has_translate && !tp->has_rotate) {
-        gtk_widget_set_visible(tp->container, FALSE);
-        return;
-    }
+    /* Always show translate when an object is selected (enables mouse move).
+     * Rotate only shown if already present in the statement. */
+    if (!tp->has_translate)
+        tp->has_translate = 1;
 
     tp->values[0] = tx; tp->values[1] = ty; tp->values[2] = tz;
     tp->values[3] = rx; tp->values[4] = ry; tp->values[5] = rz;
@@ -496,4 +509,51 @@ dc_transform_panel_set_enter_callback(DC_TransformPanel *tp,
     if (!tp) return;
     tp->enter_cb = cb;
     tp->enter_cb_data = userdata;
+}
+
+void
+dc_transform_panel_get_translate(DC_TransformPanel *tp,
+                                  double *x, double *y, double *z)
+{
+    if (!tp) return;
+    if (x) *x = tp->values[0];
+    if (y) *y = tp->values[1];
+    if (z) *z = tp->values[2];
+}
+
+void
+dc_transform_panel_set_translate(DC_TransformPanel *tp,
+                                  double x, double y, double z)
+{
+    if (!tp || !tp->has_translate || tp->updating) return;
+
+    /* Batch-update all 3 entries without triggering intermediate code updates */
+    tp->updating = 1;
+    char buf[32];
+    double vals[3] = {x, y, z};
+    for (int i = 0; i < 3; i++) {
+        snprintf(buf, sizeof(buf), "%g", vals[i]);
+        gtk_editable_set_text(GTK_EDITABLE(tp->trans_entries[i]), buf);
+    }
+    tp->updating = 0;
+
+    /* Trigger one code update */
+    on_entry_changed(GTK_EDITABLE(tp->trans_entries[0]), tp);
+}
+
+void
+dc_transform_panel_set_translate_preview(DC_TransformPanel *tp,
+                                          double x, double y, double z)
+{
+    if (!tp || !tp->has_translate) return;
+
+    /* Update display only — no code modification */
+    tp->updating = 1;
+    char buf[32];
+    double vals[3] = {x, y, z};
+    for (int i = 0; i < 3; i++) {
+        snprintf(buf, sizeof(buf), "%g", vals[i]);
+        gtk_editable_set_text(GTK_EDITABLE(tp->trans_entries[i]), buf);
+    }
+    tp->updating = 0;
 }

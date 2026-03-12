@@ -27,4 +27,8 @@ int dc_inspect_start(GtkWidget *window);
 /* Stop the server and clean up the socket file. */
 void dc_inspect_stop(void);
 
+/* Execute an inspect command in-process.
+ * Returns a malloc'd response string (caller must free). */
+char *dc_inspect_dispatch(const char *cmd);
+
 #endif /* DC_INSPECT_H */

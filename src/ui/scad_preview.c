@@ -2,7 +2,6 @@
 #include "ui/scad_preview.h"
 #include "ui/code_editor.h"
 #include "gl/gl_viewport.h"
-#include "scad/scad_runner.h"
 #include "scad/scad_splitter.h"
 #include "ui/transform_panel.h"
 #include "core/log.h"
@@ -15,6 +14,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <ctype.h>
 
 /* -------------------------------------------------------------------------
  * Internal structure
@@ -30,17 +30,8 @@ struct DC_ScadPreview {
     GtkWidget      *grid_btn;
     GtkWidget      *axes_btn;
     DC_CodeEditor  *code_ed;        /* borrowed */
-    char           *tmp_scad;       /* temp .scad path (owned) */
-    char           *tmp_stl;        /* temp .stl path (owned) */
     int             rendering;
     guint           progress_id;    /* timer source for progress polling */
-
-    /* Multi-object render state (legacy, kept for preamble) */
-    DC_ScadStatements *stmts;       /* current split (owned) */
-    int             render_idx;
-    int             render_total;
-    int             render_ok;
-    char           *preamble;       /* owned */
 
     /* Transform panel overlay */
     DC_TransformPanel *transform;
@@ -50,6 +41,7 @@ struct DC_ScadPreview {
     volatile int    hq_cancel;      /* cooperative cancel flag for HQ task */
     int             hq_running;     /* is HQ task in flight? */
     ts_progress     progress;       /* shared progress — worker writes, UI reads */
+    int             camera_fitted;  /* 1 after first fit — skip auto-fit on re-renders */
 };
 
 /* -------------------------------------------------------------------------
@@ -94,22 +86,85 @@ progress_stop(DC_ScadPreview *pv)
 }
 
 /* -------------------------------------------------------------------------
- * Two-pass progressive render pipeline
+ * Preamble detection — identifies non-geometry statements
  *
- * Pass 1 (preview): $fn=12, $fa=12, $fs=2.0  — instant low-poly
- * Pass 2 (HQ):      $fn=100, $fa=1, $fs=0.4  — full quality, cancellable
+ * Preamble statements are prepended to each geometry statement when
+ * rendering per-object. They include: include/use directives,
+ * module/function definitions, and variable assignments.
+ * ---------------------------------------------------------------------- */
+static int
+is_preamble(const char *stmt)
+{
+    const char *p = stmt;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (!*p) return 1; /* empty = skip */
+
+    /* include/use directives */
+    if (strncmp(p, "include", 7) == 0 &&
+        !isalnum((unsigned char)p[7]) && p[7] != '_')
+        return 1;
+    if (strncmp(p, "use", 3) == 0 &&
+        !isalnum((unsigned char)p[3]) && p[3] != '_')
+        return 1;
+
+    /* module/function definitions */
+    if (strncmp(p, "module", 6) == 0 &&
+        !isalnum((unsigned char)p[6]) && p[6] != '_')
+        return 1;
+    if (strncmp(p, "function", 8) == 0 &&
+        !isalnum((unsigned char)p[8]) && p[8] != '_')
+        return 1;
+
+    /* Variable assignment: identifier = expr; (but not ==) */
+    const char *eq = strchr(p, '=');
+    if (eq && eq > p && eq[1] != '=') {
+        const char *q = p;
+        while (q < eq && (isalnum((unsigned char)*q) || *q == '_' || *q == '$'))
+            q++;
+        while (q < eq && isspace((unsigned char)*q)) q++;
+        if (q == eq) return 1;
+    }
+
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Multi-object progressive render pipeline
  *
- * Generation counter prevents stale results from overwriting newer ones.
+ * Pass 1 (preview): $fn=12, force_quality — instant low-poly per object
+ * Pass 2 (HQ):      $fn=100 — full quality per object, cancellable
+ *
+ * Each pass splits the SCAD source into top-level statements, identifies
+ * preamble (variables, includes, module defs), and renders each geometry
+ * statement separately with preamble prepended. Results are loaded as
+ * separate GL objects for color-ID picking.
  * ---------------------------------------------------------------------- */
 
 typedef struct {
-    ts_mesh         mesh;
-    ts_parse_error  err;
+    char *stl_path;     /* owned temp file path */
+    int   line_start;   /* 1-based source line range */
+    int   line_end;
+} ObjSlot;
+
+typedef struct {
+    ObjSlot        *objs;
+    int             obj_count;
+    ts_parse_error  err;        /* first error encountered */
     double          elapsed;
-    char           *stl_path;       /* where the STL was written (owned) */
-    unsigned int    gen;            /* generation this result belongs to */
-    int             is_hq;          /* 0=preview, 1=high-quality */
+    unsigned int    gen;
+    int             is_hq;
+    int             total_tris;
 } RenderResult;
+
+static void
+render_result_free(RenderResult *res)
+{
+    if (!res) return;
+    for (int i = 0; i < res->obj_count; i++)
+        free(res->objs[i].stl_path);
+    free(res->objs);
+    free(res);
+}
 
 typedef struct {
     char           *source;         /* owned copy of SCAD source */
@@ -127,7 +182,7 @@ render_task_data_free(gpointer p)
     free(td);
 }
 
-/* Worker thread: interpret source and write STL (no GTK calls!) */
+/* Worker thread: split source, render each geometry statement, write STLs */
 static void
 render_thread_func(GTask *task, gpointer source_obj,
                    gpointer task_data, GCancellable *cancellable)
@@ -136,58 +191,141 @@ render_thread_func(GTask *task, gpointer source_obj,
     (void)cancellable;
     RenderTaskData *td = task_data;
 
-    RenderResult *res = calloc(1, sizeof(*res));
-    if (!res) return;
-
-    res->gen   = td->gen;
-    res->is_hq = td->is_hq;
-
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    memset(&res->err, 0, sizeof(res->err));
+    /* Split source into top-level statements */
+    DC_ScadStatements *stmts = dc_scad_split(td->source);
+    if (!stmts || stmts->count == 0) {
+        RenderResult *res = calloc(1, sizeof(*res));
+        res->gen = td->gen;
+        res->is_hq = td->is_hq;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        res->elapsed = (double)(t1.tv_sec - t0.tv_sec)
+                     + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+        g_task_return_pointer(task, res, NULL);
+        dc_scad_stmts_free(stmts);
+        return;
+    }
 
+    /* Build preamble: concatenate all preamble statements */
+    size_t preamble_cap = 1;
+    for (int i = 0; i < stmts->count; i++) {
+        if (is_preamble(stmts->stmts[i].text))
+            preamble_cap += strlen(stmts->stmts[i].text) + 1;
+    }
+
+    char *preamble = malloc(preamble_cap);
+    preamble[0] = '\0';
+    for (int i = 0; i < stmts->count; i++) {
+        if (is_preamble(stmts->stmts[i].text)) {
+            strcat(preamble, stmts->stmts[i].text);
+            strcat(preamble, "\n");
+        }
+    }
+
+    /* Count geometry statements */
+    int geo_count = 0;
+    for (int i = 0; i < stmts->count; i++) {
+        if (!is_preamble(stmts->stmts[i].text))
+            geo_count++;
+    }
+
+    if (geo_count == 0) {
+        RenderResult *res = calloc(1, sizeof(*res));
+        res->gen = td->gen;
+        res->is_hq = td->is_hq;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        res->elapsed = (double)(t1.tv_sec - t0.tv_sec)
+                     + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+        g_task_return_pointer(task, res, NULL);
+        free(preamble);
+        dc_scad_stmts_free(stmts);
+        return;
+    }
+
+    /* Set up progress: one tick per geometry statement */
+    if (td->progress) {
+        td->progress->done = 0;
+        td->progress->total = geo_count;
+    }
+
+    /* Allocate result */
+    RenderResult *res = calloc(1, sizeof(*res));
+    res->gen = td->gen;
+    res->is_hq = td->is_hq;
+    res->objs = calloc((size_t)geo_count, sizeof(ObjSlot));
+
+    /* Set up interpret options */
     ts_interpret_opts opts = {0};
     if (td->is_hq) {
-        /* Full quality — 3D print parameters */
         opts.fn_override = 100;
         opts.fa_override = 1;
         opts.fs_override = 0.4;
-        opts.force_quality = 0;  /* respect source $fn if set */
-        opts.cancel      = td->cancel;
+        opts.force_quality = 0;
+        opts.cancel = td->cancel;
     } else {
-        /* Preview — fast low-poly, FORCE overrides source $fn */
         opts.fn_override = 12;
         opts.fa_override = 12;
         opts.fs_override = 2.0;
-        opts.force_quality = 1;  /* ignore source $fn/$fa/$fs */
-        opts.cancel      = NULL; /* preview is fast, no cancel needed */
+        opts.force_quality = 1;
+        opts.cancel = NULL;
     }
-    opts.progress = td->progress;
-    res->mesh = ts_interpret_ex(td->source, &res->err, &opts);
+
+    int obj_idx = 0;
+    for (int i = 0; i < stmts->count; i++) {
+        if (is_preamble(stmts->stmts[i].text))
+            continue;
+
+        /* Check cancellation */
+        if (td->cancel && *td->cancel)
+            break;
+
+        /* Build source: preamble + this statement */
+        size_t src_len = strlen(preamble) + strlen(stmts->stmts[i].text) + 2;
+        char *src = malloc(src_len);
+        snprintf(src, src_len, "%s%s", preamble, stmts->stmts[i].text);
+
+        ts_parse_error err = {0};
+        opts.progress = NULL; /* track at statement level, not internal */
+        ts_mesh mesh = ts_interpret_ex(src, &err, &opts);
+        free(src);
+
+        /* Store first error */
+        if (err.msg[0] && res->err.msg[0] == '\0')
+            res->err = err;
+
+        if (mesh.tri_count > 0) {
+            char path[128];
+            snprintf(path, sizeof(path), "/tmp/duncad-obj-%02d-%s.stl",
+                     obj_idx, td->is_hq ? "hq" : "lq");
+            if (ts_mesh_write_stl(&mesh, path) == 0) {
+                res->objs[obj_idx].stl_path = strdup(path);
+                res->objs[obj_idx].line_start = stmts->stmts[i].line_start;
+                res->objs[obj_idx].line_end = stmts->stmts[i].line_end;
+                res->total_tris += mesh.tri_count;
+                obj_idx++;
+            }
+        }
+        ts_mesh_free(&mesh);
+
+        if (td->progress)
+            td->progress->done++;
+    }
+    res->obj_count = obj_idx;
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
     res->elapsed = (double)(t1.tv_sec - t0.tv_sec)
                  + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
 
-    /* Check if cancelled (HQ only) */
+    /* If cancelled, clean up */
     if (td->cancel && *td->cancel) {
-        ts_mesh_free(&res->mesh);
-        free(res);
-        g_task_return_pointer(task, NULL, NULL);
-        return;
+        render_result_free(res);
+        res = NULL;
     }
 
-    /* Write STL in the worker thread */
-    if (res->err.msg[0] == '\0' && res->mesh.tri_count > 0) {
-        const char *path = td->is_hq ? "/tmp/duncad-preview-hq.stl"
-                                      : "/tmp/duncad-preview-lq.stl";
-        res->stl_path = strdup(path);
-        if (ts_mesh_write_stl(&res->mesh, res->stl_path) != 0) {
-            free(res->stl_path);
-            res->stl_path = NULL;
-        }
-    }
+    free(preamble);
+    dc_scad_stmts_free(stmts);
 
     g_task_return_pointer(task, res, NULL);
 }
@@ -205,26 +343,21 @@ render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
 
     /* NULL = cancelled */
     if (!res) {
-        if (pv->hq_running) {
+        if (pv->hq_running)
             pv->hq_running = 0;
-        }
         return;
     }
 
     /* Stale generation — discard */
     if (res->gen != pv->render_gen) {
-        ts_mesh_free(&res->mesh);
-        free(res->stl_path);
-        free(res);
+        render_result_free(res);
         return;
     }
 
     if (res->is_hq) {
-        /* HQ pass completed */
         pv->hq_running = 0;
         progress_stop(pv);
     } else {
-        /* Preview pass completed — re-enable render button */
         pv->rendering = 0;
         gtk_widget_set_sensitive(pv->render_btn, TRUE);
     }
@@ -236,59 +369,69 @@ render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
                  res->err.line, res->err.msg);
         gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
         if (!res->is_hq) progress_stop(pv);
-        ts_mesh_free(&res->mesh);
-        free(res->stl_path);
-        free(res);
+        render_result_free(res);
         return;
     }
 
-    if (res->mesh.tri_count == 0) {
+    if (res->obj_count == 0) {
         gtk_label_set_text(GTK_LABEL(pv->status_label), "No geometry produced");
         if (!res->is_hq) progress_stop(pv);
-        ts_mesh_free(&res->mesh);
-        free(res->stl_path);
-        free(res);
+        render_result_free(res);
         return;
     }
 
-    /* Load mesh into viewport */
-    if (res->stl_path) {
-        dc_gl_viewport_clear_objects(pv->viewport);
-        dc_gl_viewport_clear_mesh(pv->viewport);
-        int rc = dc_gl_viewport_load_stl(pv->viewport, res->stl_path);
-        if (rc == 0) {
-            char status[192];
-            if (res->is_hq) {
-                snprintf(status, sizeof(status),
-                         "HQ: %d tris in %.3fs",
-                         res->mesh.tri_count, res->elapsed);
-            } else {
-                snprintf(status, sizeof(status),
-                         "Preview: %d tris in %.3fs — refining...",
-                         res->mesh.tri_count, res->elapsed);
-            }
-            gtk_label_set_text(GTK_LABEL(pv->status_label), status);
-        } else {
-            gtk_label_set_text(GTK_LABEL(pv->status_label),
-                               "Render OK but STL load failed");
+    /* Load objects into viewport */
+    dc_gl_viewport_clear_objects(pv->viewport);
+    dc_gl_viewport_clear_mesh(pv->viewport);
+
+    int loaded = 0;
+    for (int i = 0; i < res->obj_count; i++) {
+        if (res->objs[i].stl_path) {
+            int idx = dc_gl_viewport_add_object(pv->viewport,
+                res->objs[i].stl_path,
+                res->objs[i].line_start,
+                res->objs[i].line_end);
+            if (idx >= 0) loaded++;
+            unlink(res->objs[i].stl_path);
         }
-        unlink(res->stl_path);
-        free(res->stl_path);
+    }
+
+    if (loaded > 0) {
+        /* Fit camera only on first preview render (not on re-renders from movement) */
+        if (!res->is_hq && !pv->camera_fitted) {
+            DC_LOG_INFO_APP("fit_all_objects: fitting camera (first render), gen=%u", pv->render_gen);
+            dc_gl_viewport_fit_all_objects(pv->viewport);
+            pv->camera_fitted = 1;
+        } else {
+            DC_LOG_INFO_APP("fit_all_objects: SKIPPED (is_hq=%d fitted=%d)",
+                            res->is_hq, pv->camera_fitted);
+        }
+
+        char status[192];
+        if (res->is_hq) {
+            snprintf(status, sizeof(status),
+                     "HQ: %d objs, %d tris in %.3fs",
+                     loaded, res->total_tris, res->elapsed);
+        } else {
+            snprintf(status, sizeof(status),
+                     "Preview: %d objs, %d tris in %.3fs — refining...",
+                     loaded, res->total_tris, res->elapsed);
+        }
+        gtk_label_set_text(GTK_LABEL(pv->status_label), status);
     } else {
         gtk_label_set_text(GTK_LABEL(pv->status_label),
-                           "Failed to write temp STL");
+                           "No geometry loaded");
     }
 
     /* If preview just completed, launch HQ in background */
-    if (!res->is_hq && res->mesh.tri_count > 0) {
+    if (!res->is_hq && res->obj_count > 0) {
         RenderTaskData *td = g_task_get_task_data(G_TASK(result));
         if (td && td->source) {
             launch_hq_render(pv, td->source);
         }
     }
 
-    ts_mesh_free(&res->mesh);
-    free(res);
+    render_result_free(res);
 }
 
 static void
@@ -342,9 +485,8 @@ do_render(DC_ScadPreview *pv)
     /* Increment generation — all older results will be discarded */
     pv->render_gen++;
 
-    /* Clear viewport and launch preview render */
-    dc_gl_viewport_clear_objects(pv->viewport);
-    dc_gl_viewport_clear_mesh(pv->viewport);
+    /* Don't clear objects here — they stay visible until results arrive.
+     * clear_objects is called in the result callback before loading new meshes. */
 
     pv->rendering = 1;
     gtk_widget_set_sensitive(pv->render_btn, FALSE);
@@ -371,10 +513,21 @@ do_render(DC_ScadPreview *pv)
 /* -------------------------------------------------------------------------
  * Button callbacks
  * ---------------------------------------------------------------------- */
-static void on_render_clicked(GtkButton *b, gpointer d) { (void)b; do_render(d); }
+static void on_render_clicked(GtkButton *b, gpointer d)
+{
+    (void)b;
+    DC_ScadPreview *pv = d;
+    pv->camera_fitted = 0; /* explicit render → refit camera */
+    do_render(pv);
+}
 
 static void on_reset_clicked(GtkButton *b, gpointer d)
-{ (void)b; dc_gl_viewport_reset_camera(((DC_ScadPreview*)d)->viewport); }
+{
+    (void)b;
+    DC_ScadPreview *pv = d;
+    dc_gl_viewport_fit_all_objects(pv->viewport);
+    pv->camera_fitted = 1; /* still fitted, but user explicitly asked */
+}
 
 static void on_ortho_clicked(GtkButton *b, gpointer d)
 { (void)b; dc_gl_viewport_toggle_ortho(((DC_ScadPreview*)d)->viewport); }
@@ -395,14 +548,9 @@ dc_scad_preview_new(void)
     DC_ScadPreview *pv = calloc(1, sizeof(*pv));
     if (!pv) return NULL;
 
-    pv->tmp_scad = strdup("/tmp/duncad-preview.scad");
-    pv->tmp_stl  = strdup("/tmp/duncad-preview.stl");
-
     /* GL viewport */
     pv->viewport = dc_gl_viewport_new();
     if (!pv->viewport) {
-        free(pv->tmp_scad);
-        free(pv->tmp_stl);
         free(pv);
         return NULL;
     }
@@ -485,10 +633,6 @@ dc_scad_preview_free(DC_ScadPreview *pv)
     progress_stop(pv);
     dc_transform_panel_free(pv->transform);
     dc_gl_viewport_free(pv->viewport);
-    dc_scad_stmts_free(pv->stmts);
-    free(pv->preamble);
-    free(pv->tmp_scad);
-    free(pv->tmp_stl);
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "scad preview freed");
     free(pv);
 }
@@ -511,6 +655,14 @@ void
 dc_scad_preview_render(DC_ScadPreview *pv)
 {
     if (pv) do_render(pv);
+}
+
+void
+dc_scad_preview_render_refit(DC_ScadPreview *pv)
+{
+    if (!pv) return;
+    pv->camera_fitted = 0;
+    do_render(pv);
 }
 
 DC_GlViewport *

@@ -32,8 +32,11 @@ GtkWidget *dc_scad_preview_widget(DC_ScadPreview *pv);
 /* Set the code editor to pull SCAD source from when rendering. */
 void dc_scad_preview_set_code_editor(DC_ScadPreview *pv, DC_CodeEditor *ed);
 
-/* Trigger a render (same as clicking the Render button). */
+/* Trigger a render (preserves camera position). */
 void dc_scad_preview_render(DC_ScadPreview *pv);
+
+/* Trigger a render and refit camera to scene (F5 / explicit render). */
+void dc_scad_preview_render_refit(DC_ScadPreview *pv);
 
 /* Get the GL viewport (for setting pick callbacks, etc.). Borrowed pointer. */
 struct DC_GlViewport *dc_scad_preview_get_viewport(DC_ScadPreview *pv);

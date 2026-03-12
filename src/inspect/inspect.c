@@ -929,6 +929,13 @@ dispatch(const char *cmd)
     return err;
 }
 
+/* Public in-process dispatch (for embedded terminal). */
+char *
+dc_inspect_dispatch(const char *cmd)
+{
+    return dispatch(cmd);
+}
+
 /* -------------------------------------------------------------------------
  * Socket connection handler
  * ---------------------------------------------------------------------- */

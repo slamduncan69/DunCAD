@@ -3528,6 +3528,50 @@ static const char HELP_REFERENCE_DOCTRINE_HOLY_PATH_II[] =
 "\n"
 "SEE ALSO: talmud reference doctrine holy-path (visual inspection)\n"
 "SEE ALSO: talmud tools trinity_site (current state)\n";
+
+static const char HELP_REFERENCE_DOCTRINE_HOLY_PATH_III[] =
+"The Temple of Interactive Geometry\n"
+"\n"
+"DOCTRINE: HOLY PATH III — The Temple of Interactive Geometry\n"
+"\n"
+"Born from the divine mandate: shapes that can be touched, moved,\n"
+"and sculpted. Features never possible in the fallen temple of\n"
+"OpenSCAD. Direct manipulation of 3D geometry through the viewport.\n"
+"\n"
+"PHASE 1: RESTORE MULTI-OBJECT PICKING — COMPLETE\n"
+"  Root cause: Trinity Site integration (s015) loaded entire scene\n"
+"  as ONE legacy mesh via load_stl(). obj_count=0 → picking dead.\n"
+"  Fix: scad_preview.c splits source via scad_splitter, detects\n"
+"  preamble (variables/includes/modules), renders each geometry\n"
+"  statement separately via ts_interpret_ex with preamble prepended.\n"
+"  Each result loaded as separate GL object via add_object().\n"
+"  New: dc_gl_viewport_fit_all_objects() — combined bbox camera fit.\n"
+"  New: is_preamble() — identifies non-geometry statements.\n"
+"  Transform panel: always shows translate (even without existing).\n"
+"\n"
+"PHASE 2: MOUSE-BASED OBJECT MOVEMENT — COMPLETE\n"
+"  Left-click+drag on selected object = translate (not orbit).\n"
+"  World-space projection via camera right/up vectors.\n"
+"  Axis constraints: hold Z=Z-axis, X=X-axis, C=Y-axis.\n"
+"  Move callback: DC_GlMoveCb fires with cumulative world delta.\n"
+"  app_window wires move_cb → transform_panel_set_translate().\n"
+"  New: dc_transform_panel_get/set_translate() — programmatic API.\n"
+"  New: camera_screen_vectors() — extracted helper for reuse.\n"
+"\n"
+"PHASE 3: SELECTION MODES — PLANNED\n"
+"  Object/Face/Edge selection via per-triangle color-ID picking.\n"
+"  Tab cycles modes. Wireframe overlay for edge visibility.\n"
+"  Face = coplanar triangle group. Edge = shared face boundary.\n"
+"\n"
+"PHASE 4: ADVANCED OPERATIONS — PLANNED\n"
+"  Extrude face along normal. Bevel/chamfer edge.\n"
+"  Direct mesh manipulation beyond OpenSCAD capabilities.\n"
+"  Generate equivalent SCAD code or extend .dcad format.\n"
+"\n"
+"AEONS INVOKED:\n"
+"  Sophia  — explore what direct manipulation means for parametric CAD\n"
+"  Zoe     — build the impossible: touch what OpenSCAD forbids\n"
+"  Pistis  — test every interaction path, report honestly\n";
 static const struct help_node TREE[] = {
     /* root */
     { "", HELP_ROOT },
@@ -3660,6 +3704,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s014", HELP_MEMORY_ACTIVE_SESSION_S014 },
     { "reference.doctrine.holy-path", HELP_REFERENCE_DOCTRINE_HOLY_PATH },
     { "reference.doctrine.holy-path-ii", HELP_REFERENCE_DOCTRINE_HOLY_PATH_II },
+    { "reference.doctrine.holy-path-iii", HELP_REFERENCE_DOCTRINE_HOLY_PATH_III },
     { NULL, NULL }
 };
 

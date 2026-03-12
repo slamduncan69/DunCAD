@@ -202,6 +202,7 @@ struct DC_GlViewport {
         int         uploaded;
         int         line_start;
         int         line_end;
+        float       translate[3]; /* viewport-space offset for live preview */
     }            objects[256];
     int          obj_count;
     int          selected_obj;   /* -1 = none */
@@ -235,7 +236,13 @@ struct DC_GlViewport {
     double       drag_x, drag_y;
     float        drag_theta, drag_phi;
     float        drag_center[3];    /* cam_center at drag start */
-    int          dragging;  /* 0=none, 1=orbit, 2=pan */
+    int          dragging;  /* 0=none, 1=orbit, 2=pan, 3=move object */
+
+    /* Object move state */
+    DC_GlMoveCb  move_cb;
+    void        *move_cb_data;
+    int          move_constraint;   /* 0=free, 1=X, 2=Y, 3=Z */
+    int          last_pick_reselect; /* 1 if last click re-selected same obj */
 
     /* Screenshot capture (set path, render reads pixels after drawing) */
     char        *capture_path;      /* non-NULL = capture on next render */
@@ -544,46 +551,62 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
     {
         glUseProgram(vp->mesh_prog);
 
-        float model[16];
-        mat4_identity(model);
-
-        float mvp[16];
-        mat4_mul(mvp, vp_mat, model);
-
-        glUniformMatrix4fv(glGetUniformLocation(vp->mesh_prog, "uMVP"), 1, GL_FALSE, mvp);
-        glUniformMatrix4fv(glGetUniformLocation(vp->mesh_prog, "uModel"), 1, GL_FALSE, model);
+        GLint loc_mvp   = glGetUniformLocation(vp->mesh_prog, "uMVP");
+        GLint loc_model = glGetUniformLocation(vp->mesh_prog, "uModel");
+        GLint loc_nmat  = glGetUniformLocation(vp->mesh_prog, "uNormalMat");
+        GLint loc_light = glGetUniformLocation(vp->mesh_prog, "uLightDir");
+        GLint loc_view  = glGetUniformLocation(vp->mesh_prog, "uViewPos");
+        GLint loc_color = glGetUniformLocation(vp->mesh_prog, "uColor");
 
         float nmat[9] = {1,0,0, 0,1,0, 0,0,1};
-        glUniformMatrix3fv(glGetUniformLocation(vp->mesh_prog, "uNormalMat"), 1, GL_FALSE, nmat);
+        glUniformMatrix3fv(loc_nmat, 1, GL_FALSE, nmat);
 
         float light_dir[3] = {0.5f, 0.8f, 0.3f};
         vec3_normalize(light_dir);
-        glUniform3fv(glGetUniformLocation(vp->mesh_prog, "uLightDir"), 1, light_dir);
-        glUniform3fv(glGetUniformLocation(vp->mesh_prog, "uViewPos"), 1, eye);
+        glUniform3fv(loc_light, 1, light_dir);
+        glUniform3fv(loc_view, 1, eye);
 
         if (vp->obj_count > 0) {
-            /* Multi-object rendering */
+            /* Multi-object rendering with per-object transforms */
             for (int i = 0; i < vp->obj_count; i++) {
                 if (!vp->objects[i].mesh || !vp->objects[i].uploaded)
                     continue;
 
+                /* Per-object model matrix (translate offset for live preview) */
+                float obj_model[16];
+                mat4_identity(obj_model);
+                obj_model[12] = vp->objects[i].translate[0];
+                obj_model[13] = vp->objects[i].translate[1];
+                obj_model[14] = vp->objects[i].translate[2];
+
+                float obj_mvp[16];
+                mat4_mul(obj_mvp, vp_mat, obj_model);
+
+                glUniformMatrix4fv(loc_mvp, 1, GL_FALSE, obj_mvp);
+                glUniformMatrix4fv(loc_model, 1, GL_FALSE, obj_model);
+
                 float color[3];
                 if (i == vp->selected_obj) {
-                    /* Gold/orange highlight for selected */
                     color[0] = 1.0f; color[1] = 0.7f; color[2] = 0.2f;
                 } else {
-                    /* OpenSCAD-ish blue */
                     color[0] = 0.6f; color[1] = 0.75f; color[2] = 0.9f;
                 }
-                glUniform3fv(glGetUniformLocation(vp->mesh_prog, "uColor"), 1, color);
+                glUniform3fv(loc_color, 1, color);
 
                 glBindVertexArray(vp->objects[i].vao);
                 glDrawArrays(GL_TRIANGLES, 0, vp->objects[i].mesh->num_vertices);
             }
         } else if (vp->mesh && vp->mesh_uploaded && vp->mesh_vao) {
             /* Legacy single mesh */
+            float model[16];
+            mat4_identity(model);
+            float mvp[16];
+            mat4_mul(mvp, vp_mat, model);
+            glUniformMatrix4fv(loc_mvp, 1, GL_FALSE, mvp);
+            glUniformMatrix4fv(loc_model, 1, GL_FALSE, model);
+
             float color[3] = {0.6f, 0.75f, 0.9f};
-            glUniform3fv(glGetUniformLocation(vp->mesh_prog, "uColor"), 1, color);
+            glUniform3fv(loc_color, 1, color);
 
             glBindVertexArray(vp->mesh_vao);
             glDrawArrays(GL_TRIANGLES, 0, vp->mesh->num_vertices);
@@ -652,13 +675,48 @@ on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data)
     vp->drag_y = y;
 
     if (button == 3 || button == 2 || (mods & GDK_SHIFT_MASK)) {
+        /* Pan: right/middle click or shift+click */
         vp->dragging = 2;
         memcpy(vp->drag_center, vp->cam_center, sizeof(vp->drag_center));
+    } else if (button == 1 && vp->last_pick_reselect &&
+               vp->selected_obj >= 0 && vp->move_cb) {
+        /* Move: left-drag on already-selected object */
+        vp->dragging = 3;
+        /* Grab keyboard focus for axis constraint keys (Z/X/C) */
+        gtk_widget_grab_focus(vp->gl_area);
+        /* Signal move start (phase 0) */
+        vp->move_cb(vp->selected_obj, 0, 0.0f, 0.0f, 0.0f, vp->move_cb_data);
     } else {
+        /* Orbit: default left-drag */
         vp->dragging = 1;
         vp->drag_theta = vp->cam_theta;
         vp->drag_phi = vp->cam_phi;
     }
+}
+
+/* Compute camera right and up vectors for screen-to-world projection */
+static void
+camera_screen_vectors(const DC_GlViewport *vp,
+                      float *rx, float *ry, float *rz,
+                      float *ux, float *uy, float *uz)
+{
+    float theta = vp->cam_theta * (float)M_PI / 180.0f;
+    float phi   = vp->cam_phi   * (float)M_PI / 180.0f;
+
+    /* Forward (camera toward center) */
+    float fx = cosf(phi) * sinf(theta);
+    float fy = sinf(phi);
+    float fz = cosf(phi) * cosf(theta);
+
+    /* Right (perpendicular in XZ plane) */
+    *rx = cosf(theta);
+    *ry = 0.0f;
+    *rz = -sinf(theta);
+
+    /* Up = cross(forward, right) */
+    *ux = fy * (*rz) - fz * (*ry);
+    *uy = fz * (*rx) - fx * (*rz);
+    *uz = fx * (*ry) - fy * (*rx);
 }
 
 static void
@@ -675,31 +733,41 @@ on_drag_update(GtkGestureDrag *gesture, double dx, double dy, gpointer data)
         if (vp->cam_phi < -89.0f) vp->cam_phi = -89.0f;
     } else if (vp->dragging == 2) {
         /* Pan — move center along camera right/up vectors */
-        float theta = vp->cam_theta * (float)M_PI / 180.0f;
-        float phi   = vp->cam_phi   * (float)M_PI / 180.0f;
+        float r_x, r_y, r_z, u_x, u_y, u_z;
+        camera_screen_vectors(vp, &r_x, &r_y, &r_z, &u_x, &u_y, &u_z);
         float scale = vp->cam_dist * 0.001f;
-
-        /* Camera forward vector (from camera toward center) */
-        float fx = cosf(phi) * sinf(theta);
-        float fy = sinf(phi);
-        float fz = cosf(phi) * cosf(theta);
-
-        /* Camera right vector (perpendicular to forward in XZ plane) */
-        float rx = cosf(theta);
-        float ry = 0.0f;
-        float rz = -sinf(theta);
-
-        /* Camera up vector = cross(forward, right), perpendicular to view */
-        float ux = fy * rz - fz * ry;
-        float uy = fz * rx - fx * rz;
-        float uz = fx * ry - fy * rx;
 
         float mx = (float)dx * scale;
         float my = (float)dy * scale;
 
-        vp->cam_center[0] = vp->drag_center[0] - mx * rx + my * ux;
-        vp->cam_center[1] = vp->drag_center[1]           + my * uy;
-        vp->cam_center[2] = vp->drag_center[2] - mx * rz + my * uz;
+        vp->cam_center[0] = vp->drag_center[0] - mx * r_x + my * u_x;
+        vp->cam_center[1] = vp->drag_center[1]            + my * u_y;
+        vp->cam_center[2] = vp->drag_center[2] - mx * r_z + my * u_z;
+    } else if (vp->dragging == 3 && vp->move_cb && vp->selected_obj >= 0) {
+        /* Move object — project screen delta to world space */
+        float r_x, r_y, r_z, u_x, u_y, u_z;
+        camera_screen_vectors(vp, &r_x, &r_y, &r_z, &u_x, &u_y, &u_z);
+        float scale = vp->cam_dist * 0.001f;
+
+        float mx = (float)dx * scale;
+        float my = (float)dy * scale;
+
+        /* World-space delta (opposite of pan: object follows mouse) */
+        float wx =  mx * r_x - my * u_x;
+        float wy =           - my * u_y;
+        float wz =  mx * r_z - my * u_z;
+
+        /* Apply axis constraint (mapped to SCAD axes via GL↔SCAD coords)
+         * SCAD_x=GL_x, SCAD_y=-GL_z, SCAD_z=GL_y
+         * X key (c=1): SCAD X only → keep GL_x, zero GL_y+GL_z
+         * C key (c=2): SCAD Y only → keep GL_z, zero GL_x+GL_y
+         * Z key (c=3): SCAD Z only → keep GL_y, zero GL_x+GL_z */
+        int c = vp->move_constraint;
+        if (c == 1) { wy = 0; wz = 0; }       /* SCAD X only (GL_x) */
+        else if (c == 2) { wx = 0; wy = 0; }   /* SCAD Y only (GL_z) */
+        else if (c == 3) { wx = 0; wz = 0; }   /* SCAD Z only (GL_y) */
+
+        vp->move_cb(vp->selected_obj, 1, wx, wy, wz, vp->move_cb_data);
     }
 
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
@@ -710,7 +778,68 @@ on_drag_end(GtkGestureDrag *gesture, double dx, double dy, gpointer data)
 {
     (void)gesture; (void)dx; (void)dy;
     DC_GlViewport *vp = data;
+
+    /* Fire move end callback (phase 2) using the stored GL translate offset.
+     * This is the exact delta the user saw visually — no recomputation needed.
+     * Recomputing from screen coords would be wrong if constraints changed
+     * mid-drag or if the constraint key was released before the mouse button. */
+    if (vp->dragging == 3 && vp->move_cb && vp->selected_obj >= 0) {
+        int idx = vp->selected_obj;
+        vp->move_cb(idx, 2,
+                    vp->objects[idx].translate[0],
+                    vp->objects[idx].translate[1],
+                    vp->objects[idx].translate[2],
+                    vp->move_cb_data);
+    }
+
     vp->dragging = 0;
+    vp->last_pick_reselect = 0;
+    vp->move_constraint = 0;
+}
+
+/* Key handler for axis constraints during object move.
+ * Z = constrain Z axis, X = constrain X axis, C = constrain Y axis. */
+static gboolean
+on_key_pressed_gl(GtkEventControllerKey *ctrl, guint keyval,
+                  guint keycode, GdkModifierType mods, gpointer data)
+{
+    (void)ctrl; (void)keycode; (void)mods;
+    DC_GlViewport *vp = data;
+
+    /* Set constraint on press, clear on release (no toggle — avoids key repeat bounce) */
+    switch (keyval) {
+    case GDK_KEY_x: case GDK_KEY_X:
+        vp->move_constraint = 1;
+        return TRUE;
+    case GDK_KEY_c: case GDK_KEY_C:
+        vp->move_constraint = 2;
+        return TRUE;
+    case GDK_KEY_z: case GDK_KEY_Z:
+        vp->move_constraint = 3;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void
+on_key_released_gl(GtkEventControllerKey *ctrl, guint keyval,
+                   guint keycode, GdkModifierType mods, gpointer data)
+{
+    (void)ctrl; (void)keycode; (void)mods;
+    DC_GlViewport *vp = data;
+
+    /* Clear constraint when key is released */
+    switch (keyval) {
+    case GDK_KEY_x: case GDK_KEY_X:
+        if (vp->move_constraint == 1) vp->move_constraint = 0;
+        break;
+    case GDK_KEY_c: case GDK_KEY_C:
+        if (vp->move_constraint == 2) vp->move_constraint = 0;
+        break;
+    case GDK_KEY_z: case GDK_KEY_Z:
+        if (vp->move_constraint == 3) vp->move_constraint = 0;
+        break;
+    }
 }
 
 static gboolean
@@ -802,7 +931,7 @@ do_pick(DC_GlViewport *vp, int px, int py)
     float eye[3];
     camera_eye(vp, eye);
     float up[3] = {0, 1, 0};
-    float view[16], proj[16], vp_mat[16], mvp[16], model[16];
+    float view[16], proj[16], vp_mat[16];
 
     mat4_lookat(view, eye, vp->cam_center, up);
     float aspect = (float)w / (float)h;
@@ -814,8 +943,6 @@ do_pick(DC_GlViewport *vp, int px, int py)
         mat4_perspective(proj, 45.0f, aspect, 0.1f, vp->cam_dist * 10.0f);
     }
     mat4_mul(vp_mat, proj, view);
-    mat4_identity(model);
-    mat4_mul(mvp, vp_mat, model);
 
     /* Render to pick FBO */
     glBindFramebuffer(GL_FRAMEBUFFER, vp->pick_fbo);
@@ -824,17 +951,27 @@ do_pick(DC_GlViewport *vp, int px, int py)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glUseProgram(vp->pick_prog);
-    glUniformMatrix4fv(glGetUniformLocation(vp->pick_prog, "uMVP"),
-                       1, GL_FALSE, mvp);
+    GLint pick_mvp_loc = glGetUniformLocation(vp->pick_prog, "uMVP");
+    GLint pick_color_loc = glGetUniformLocation(vp->pick_prog, "uPickColor");
 
     for (int i = 0; i < vp->obj_count; i++) {
         if (!vp->objects[i].mesh || !vp->objects[i].uploaded)
             continue;
 
+        /* Per-object transform for pick pass (matches render pass) */
+        float obj_model[16];
+        mat4_identity(obj_model);
+        obj_model[12] = vp->objects[i].translate[0];
+        obj_model[13] = vp->objects[i].translate[1];
+        obj_model[14] = vp->objects[i].translate[2];
+
+        float obj_mvp[16];
+        mat4_mul(obj_mvp, vp_mat, obj_model);
+        glUniformMatrix4fv(pick_mvp_loc, 1, GL_FALSE, obj_mvp);
+
         float rgb[3];
         obj_idx_to_color(i, rgb);
-        glUniform3fv(glGetUniformLocation(vp->pick_prog, "uPickColor"),
-                     1, rgb);
+        glUniform3fv(pick_color_loc, 1, rgb);
 
         glBindVertexArray(vp->objects[i].vao);
         glDrawArrays(GL_TRIANGLES, 0, vp->objects[i].mesh->num_vertices);
@@ -893,7 +1030,11 @@ on_click_pressed(GtkGestureClick *gesture, int n_press,
 
     if (vp->obj_count == 0) return;
 
+    int old_sel = vp->selected_obj;
     int obj = do_pick(vp, (int)x, (int)y);
+
+    /* Track if clicking on already-selected object (for move mode) */
+    vp->last_pick_reselect = (obj >= 0 && obj == old_sel) ? 1 : 0;
     vp->selected_obj = obj;
 
     /* Notify callback */
@@ -957,6 +1098,14 @@ dc_gl_viewport_new(void)
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 1);
     g_signal_connect(click, "pressed", G_CALLBACK(on_click_pressed), vp);
     gtk_widget_add_controller(vp->gl_area, GTK_EVENT_CONTROLLER(click));
+
+    /* Key controller for axis constraints (Z/X/C) */
+    GtkEventController *key_ctrl = gtk_event_controller_key_new();
+    g_signal_connect(key_ctrl, "key-pressed",
+                     G_CALLBACK(on_key_pressed_gl), vp);
+    g_signal_connect(key_ctrl, "key-released",
+                     G_CALLBACK(on_key_released_gl), vp);
+    gtk_widget_add_controller(vp->gl_area, key_ctrl);
 
     /* Queue an initial render once mapped */
     g_signal_connect_swapped(vp->gl_area, "map",
@@ -1265,6 +1414,78 @@ int
 dc_gl_viewport_get_axes(DC_GlViewport *vp)
 {
     return vp ? vp->show_axes : 0;
+}
+
+void
+dc_gl_viewport_set_move_callback(DC_GlViewport *vp,
+                                  DC_GlMoveCb cb, void *userdata)
+{
+    if (!vp) return;
+    vp->move_cb = cb;
+    vp->move_cb_data = userdata;
+}
+
+void
+dc_gl_viewport_set_object_translate(DC_GlViewport *vp, int obj_idx,
+                                     float x, float y, float z)
+{
+    if (!vp || obj_idx < 0 || obj_idx >= vp->obj_count) return;
+    vp->objects[obj_idx].translate[0] = x;
+    vp->objects[obj_idx].translate[1] = y;
+    vp->objects[obj_idx].translate[2] = z;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+void
+dc_gl_viewport_fit_all_objects(DC_GlViewport *vp)
+{
+    if (!vp || vp->obj_count == 0) return;
+
+    float bmin[3] = { 1e30f,  1e30f,  1e30f};
+    float bmax[3] = {-1e30f, -1e30f, -1e30f};
+
+    for (int i = 0; i < vp->obj_count; i++) {
+        DC_StlMesh *m = vp->objects[i].mesh;
+        if (!m) continue;
+        for (int j = 0; j < 3; j++) {
+            if (m->min[j] < bmin[j]) bmin[j] = m->min[j];
+            if (m->max[j] > bmax[j]) bmax[j] = m->max[j];
+        }
+    }
+
+    vp->cam_center[0] = (bmin[0] + bmax[0]) * 0.5f;
+    vp->cam_center[1] = (bmin[1] + bmax[1]) * 0.5f;
+    vp->cam_center[2] = (bmin[2] + bmax[2]) * 0.5f;
+
+    float dx = bmax[0] - bmin[0];
+    float dy = bmax[1] - bmin[1];
+    float dz = bmax[2] - bmin[2];
+    float extent = dx > dy ? dx : dy;
+    if (dz > extent) extent = dz;
+    vp->cam_dist = extent * 2.0f;
+    if (vp->cam_dist < 1.0f) vp->cam_dist = 1.0f;
+
+    /* Rebuild grid and axes to match new scale */
+    if (vp->gl_ready) {
+        gtk_gl_area_make_current(GTK_GL_AREA(vp->gl_area));
+        if (vp->grid_vao) {
+            glDeleteVertexArrays(1, &vp->grid_vao);
+            glDeleteBuffers(1, &vp->grid_vbo);
+            vp->grid_vao = vp->grid_vbo = 0;
+        }
+        float grid_size = vp->cam_dist * 2.0f;
+        float grid_step = grid_size / 20.0f;
+        build_grid(vp, grid_size, grid_step);
+
+        if (vp->axes_vao) {
+            glDeleteVertexArrays(1, &vp->axes_vao);
+            glDeleteBuffers(1, &vp->axes_vbo);
+            vp->axes_vao = vp->axes_vbo = 0;
+        }
+        build_axes(vp, grid_size * 0.5f);
+    }
+
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
 }
 
 int

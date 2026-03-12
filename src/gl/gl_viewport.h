@@ -98,6 +98,26 @@ typedef void (*DC_GlPickCb)(int obj_idx, int line_start, int line_end,
 void dc_gl_viewport_set_pick_callback(DC_GlViewport *vp,
                                        DC_GlPickCb cb, void *userdata);
 
+/* Move callback — called when user drags a selected object.
+ * phase: 0=drag started, 1=moving, 2=drag ended.
+ * dx/dy/dz is cumulative world-space delta from drag start.
+ * Axis constraints (Z/X/C keys) are already applied. */
+typedef void (*DC_GlMoveCb)(int obj_idx, int phase,
+                             float dx, float dy, float dz,
+                             void *userdata);
+void dc_gl_viewport_set_move_callback(DC_GlViewport *vp,
+                                       DC_GlMoveCb cb, void *userdata);
+
+/* Set a viewport-space translate offset for an object (live preview).
+ * Applied as a model matrix during rendering — does not modify mesh data.
+ * Reset to (0,0,0) when objects are cleared/reloaded. */
+void dc_gl_viewport_set_object_translate(DC_GlViewport *vp, int obj_idx,
+                                          float x, float y, float z);
+
+/* Fit camera to encompass all loaded objects (combined bounding box).
+ * Preserves orbit angles (theta/phi). Rebuilds grid/axes to match. */
+void dc_gl_viewport_fit_all_objects(DC_GlViewport *vp);
+
 /* Capture the current viewport to a PNG file. Returns 0 on success.
  * Must be called from the GTK main thread. */
 int dc_gl_viewport_capture_png(DC_GlViewport *vp, const char *path);

@@ -42,4 +42,17 @@ void dc_transform_panel_set_enter_callback(DC_TransformPanel *tp,
                                             DC_TransformEnterCb cb,
                                             void *userdata);
 
+/* Get current translate values from the panel. */
+void dc_transform_panel_get_translate(DC_TransformPanel *tp,
+                                       double *x, double *y, double *z);
+
+/* Set translate values programmatically and update the code editor.
+ * Batches all 3 entry updates into a single code replacement. */
+void dc_transform_panel_set_translate(DC_TransformPanel *tp,
+                                       double x, double y, double z);
+
+/* Update translate display without modifying code (for live drag preview). */
+void dc_transform_panel_set_translate_preview(DC_TransformPanel *tp,
+                                               double x, double y, double z);
+
 #endif /* DC_TRANSFORM_PANEL_H */
