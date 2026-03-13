@@ -3439,6 +3439,60 @@ static const char HELP_MEMORY_ACTIVE_SESSION_S015[] =
 "  - Fixed-size socket buffers + AI payloads = time bomb.\n"
 "  - Always log AI conversations to disk for post-mortem.\n";
 
+static const char HELP_MEMORY_ACTIVE_SESSION_S016[] =
+"Session s016 (Holy Path III — Smooth Selection)\n"
+"\n"
+"Session s016 — Smooth Surface/Edge Grouping + Selection UX\n"
+"\n"
+"DATE: 2026-03-13\n"
+"\n"
+"FEATURES ADDED:\n"
+"  1. Smooth face grouping (dc_topo.h)\n"
+"     Dihedral angle threshold (30deg) replaces exact normal match.\n"
+"     Cylinder side = 1 face group instead of N strips.\n"
+"     Sphere = few groups instead of hundreds.\n"
+"     Averaged normals per face group.\n"
+"\n"
+"  2. Edge grouping (dc_topo.h)\n"
+"     Connected edges with smooth direction merge into groups.\n"
+"     Vertex hash map + union-find algorithm.\n"
+"     Cylinder rim: 32 segments -> 1 edge group.\n"
+"     New type: DC_EdgeGroup (edge_indices[], edge_count).\n"
+"     DC_Topo gains: edge_groups, edge_group_count, edge_to_group.\n"
+"\n"
+"  3. Mode indicator (gl_viewport.c)\n"
+"     GtkOverlay wraps GtkGLArea for HUD labels.\n"
+"     Shows Object/Face/Edge mode in top-left corner.\n"
+"     CSS: semi-transparent dark background, white text.\n"
+"\n"
+"  4. Locked flash (gl_viewport.c)\n"
+"     Red flash message when clicking during AI lock.\n"
+"     Auto-hides after 1.5s timeout.\n"
+"     Cleared immediately on unlock.\n"
+"\n"
+"  5. GL resource cleanup (gl_viewport.c)\n"
+"     on_unrealize frees face_ebo, wire_vao, wire_vbo.\n"
+"\n"
+"TECHNICAL DETAILS:\n"
+"  - dc_topo_normals_match: dot > cos(30deg) threshold\n"
+"  - Edge pick colors use group index, not individual edge\n"
+"  - Edge highlight draws all edges in selected group\n"
+"  - dc_gl_viewport_widget() returns overlay (not gl_area)\n"
+"  - app_window focus check adapted for overlay container\n"
+"  - Forward declarations for ensure_topo/ebo/vbo after struct\n"
+"\n"
+"FILES: dc_topo.h, gl_viewport.c, app_window.c, test_topo.c\n"
+"\n"
+"TESTS: 42 tests, 0 failures\n"
+"  New: test_edge_groups_cube, test_edge_groups_cylinder\n"
+"  Updated: sphere/face assertions relaxed for smooth grouping\n"
+"\n"
+"LESSONS:\n"
+"  - Exact normal match fails for curved surfaces — use angle.\n"
+"  - Edge grouping needs direction continuity, not just adjacency.\n"
+"  - GtkOverlay focus: check get_focus_child, not has_focus.\n"
+"  - Session docs go in TALMUD, not duncad_docs.c.\n";
+
 static const char HELP_REFERENCE_DOCTRINE_HOLY_PATH[] =
 "The Visual Inspection Rite\n"
 "\n"
@@ -3751,6 +3805,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s013", HELP_MEMORY_ACTIVE_SESSION_S013 },
     { "memory.active.session-s014", HELP_MEMORY_ACTIVE_SESSION_S014 },
     { "memory.active.session-s015", HELP_MEMORY_ACTIVE_SESSION_S015 },
+    { "memory.active.session-s016", HELP_MEMORY_ACTIVE_SESSION_S016 },
     { "reference.doctrine.holy-path", HELP_REFERENCE_DOCTRINE_HOLY_PATH },
     { "reference.doctrine.holy-path-ii", HELP_REFERENCE_DOCTRINE_HOLY_PATH_II },
     { "reference.doctrine.holy-path-iii", HELP_REFERENCE_DOCTRINE_HOLY_PATH_III },

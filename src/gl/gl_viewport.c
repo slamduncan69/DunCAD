@@ -177,6 +177,10 @@ static const char *LINE_FRAG_SRC =
 
 struct DC_GlViewport {
     GtkWidget   *gl_area;
+    GtkWidget   *overlay;        /* GtkOverlay wrapping gl_area */
+    GtkWidget   *mode_label;     /* selection mode indicator (top-left) */
+    GtkWidget   *locked_label;   /* "Locked" flash (center) */
+    guint        locked_flash_id; /* timeout source for flash fade */
 
     /* Camera */
     float        cam_center[3];   /* orbit center */
@@ -223,7 +227,7 @@ struct DC_GlViewport {
     /* Selection mode */
     DC_SelectMode sel_mode;     /* DC_SEL_OBJECT / FACE / EDGE */
     int          selected_face; /* face group index in selected obj (-1 = none) */
-    int          selected_edge; /* edge index in selected obj (-1 = none) */
+    int          selected_edge; /* edge group index in selected obj (-1 = none) */
     int          show_wireframe;
 
     /* Color-ID pick framebuffer */
@@ -723,55 +727,66 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         glDepthFunc(GL_LESS);
     }
 
-    /* --- Edge highlight: redraw selected edge in cyan --- */
+    /* --- Edge highlight: redraw selected edge GROUP in cyan --- */
     if (vp->sel_mode == DC_SEL_EDGE && vp->selected_obj >= 0
         && vp->selected_edge >= 0 && vp->line_prog) {
         int si = vp->selected_obj;
         if (si < vp->obj_count && vp->objects[si].topo) {
             DC_Topo *t = vp->objects[si].topo;
-            int ei = vp->selected_edge;
-            if (ei >= 0 && ei < t->edge_count) {
-                glUseProgram(vp->line_prog);
-                GLint emvp_loc = glGetUniformLocation(vp->line_prog, "uMVP");
+            int eg = vp->selected_edge;
+            if (eg >= 0 && eg < t->edge_group_count && t->edge_groups) {
+                DC_EdgeGroup *grp = &t->edge_groups[eg];
+                int nverts = grp->edge_count * 2;
+                float *edata = (float *)malloc((size_t)nverts * 6 * sizeof(float));
+                if (edata) {
+                    float *p = edata;
+                    for (int j = 0; j < grp->edge_count; j++) {
+                        DC_Edge *ed = &t->edges[grp->edge_indices[j]];
+                        p[0]=ed->a[0]; p[1]=ed->a[1]; p[2]=ed->a[2];
+                        p[3]=0.0f; p[4]=1.0f; p[5]=1.0f; /* cyan */
+                        p += 6;
+                        p[0]=ed->b[0]; p[1]=ed->b[1]; p[2]=ed->b[2];
+                        p[3]=0.0f; p[4]=1.0f; p[5]=1.0f;
+                        p += 6;
+                    }
 
-                float obj_model_e[16];
-                mat4_identity(obj_model_e);
-                obj_model_e[12] = vp->objects[si].translate[0];
-                obj_model_e[13] = vp->objects[si].translate[1];
-                obj_model_e[14] = vp->objects[si].translate[2];
-                float edge_mvp[16];
-                mat4_mul(edge_mvp, vp_mat, obj_model_e);
-                glUniformMatrix4fv(emvp_loc, 1, GL_FALSE, edge_mvp);
+                    glUseProgram(vp->line_prog);
+                    GLint emvp_loc = glGetUniformLocation(vp->line_prog, "uMVP");
 
-                /* Build a tiny 2-vertex VBO for the highlighted edge */
-                float edata[12] = {
-                    t->edges[ei].a[0], t->edges[ei].a[1], t->edges[ei].a[2],
-                    0.0f, 1.0f, 1.0f,  /* cyan */
-                    t->edges[ei].b[0], t->edges[ei].b[1], t->edges[ei].b[2],
-                    0.0f, 1.0f, 1.0f   /* cyan */
-                };
+                    float obj_model_e[16];
+                    mat4_identity(obj_model_e);
+                    obj_model_e[12] = vp->objects[si].translate[0];
+                    obj_model_e[13] = vp->objects[si].translate[1];
+                    obj_model_e[14] = vp->objects[si].translate[2];
+                    float edge_mvp[16];
+                    mat4_mul(edge_mvp, vp_mat, obj_model_e);
+                    glUniformMatrix4fv(emvp_loc, 1, GL_FALSE, edge_mvp);
 
-                GLuint evao, evbo;
-                glGenVertexArrays(1, &evao);
-                glGenBuffers(1, &evbo);
-                glBindVertexArray(evao);
-                glBindBuffer(GL_ARRAY_BUFFER, evbo);
-                glBufferData(GL_ARRAY_BUFFER, sizeof(edata), edata, GL_STREAM_DRAW);
-                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
-                                      6*sizeof(float), (void*)0);
-                glEnableVertexAttribArray(0);
-                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE,
-                                      6*sizeof(float), (void*)(3*sizeof(float)));
-                glEnableVertexAttribArray(1);
+                    GLuint evao, evbo;
+                    glGenVertexArrays(1, &evao);
+                    glGenBuffers(1, &evbo);
+                    glBindVertexArray(evao);
+                    glBindBuffer(GL_ARRAY_BUFFER, evbo);
+                    glBufferData(GL_ARRAY_BUFFER,
+                                 (GLsizeiptr)((size_t)nverts * 6 * sizeof(float)),
+                                 edata, GL_STREAM_DRAW);
+                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                                          6*sizeof(float), (void*)0);
+                    glEnableVertexAttribArray(0);
+                    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE,
+                                          6*sizeof(float), (void*)(3*sizeof(float)));
+                    glEnableVertexAttribArray(1);
 
-                glDepthFunc(GL_LEQUAL);
-                glLineWidth(4.0f);
-                glDrawArrays(GL_LINES, 0, 2);
-                glLineWidth(1.0f);
-                glDepthFunc(GL_LESS);
+                    glDepthFunc(GL_LEQUAL);
+                    glLineWidth(4.0f);
+                    glDrawArrays(GL_LINES, 0, nverts);
+                    glLineWidth(1.0f);
+                    glDepthFunc(GL_LESS);
 
-                glDeleteBuffers(1, &evbo);
-                glDeleteVertexArrays(1, &evao);
+                    glDeleteBuffers(1, &evbo);
+                    glDeleteVertexArrays(1, &evao);
+                    free(edata);
+                }
             }
         }
     }
@@ -1358,10 +1373,11 @@ do_pick_edge(DC_GlViewport *vp, int px, int py)
                               (void*)(3*sizeof(float)));
         glEnableVertexAttribArray(1);
 
-        /* Draw each edge with unique pick color */
+        /* Draw each edge with pick color = its edge GROUP index */
         for (int e = 0; e < t->edge_count; e++) {
+            int grp = (t->edge_to_group) ? t->edge_to_group[e] : e;
             float rgb[3];
-            dc_topo_sub_to_color(i, e, rgb);
+            dc_topo_sub_to_color(i, grp, rgb);
             glUniform3fv(col_loc, 1, rgb);
             glDrawArrays(GL_LINES, e * 2, 2);
         }
@@ -1379,8 +1395,8 @@ do_pick_edge(DC_GlViewport *vp, int px, int py)
     pick_read_pixel(fpx, fpy, pixel);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    int obj_idx, edge_idx;
-    dc_topo_color_to_sub(pixel[0], pixel[1], pixel[2], &obj_idx, &edge_idx);
+    int obj_idx, edge_grp;
+    dc_topo_color_to_sub(pixel[0], pixel[1], pixel[2], &obj_idx, &edge_grp);
 
     if (obj_idx < 0 || obj_idx >= vp->obj_count) {
         vp->selected_edge = -1;
@@ -1388,12 +1404,12 @@ do_pick_edge(DC_GlViewport *vp, int px, int py)
     }
 
     DC_Topo *t = vp->objects[obj_idx].topo;
-    if (!t || edge_idx < 0 || edge_idx >= t->edge_count) {
+    if (!t || edge_grp < 0 || edge_grp >= t->edge_group_count) {
         vp->selected_edge = -1;
         return obj_idx;
     }
 
-    vp->selected_edge = edge_idx;
+    vp->selected_edge = edge_grp;
     return obj_idx;
 }
 
@@ -1441,6 +1457,17 @@ upload_object(DC_GlViewport *vp, int idx)
     vp->objects[idx].uploaded = 1;
 }
 
+/* Timeout callback to hide locked flash label */
+static gboolean
+locked_flash_hide(gpointer data)
+{
+    DC_GlViewport *vp = data;
+    if (vp->locked_label)
+        gtk_widget_set_visible(vp->locked_label, FALSE);
+    vp->locked_flash_id = 0;
+    return G_SOURCE_REMOVE;
+}
+
 /* Click handler — single click (not drag) triggers pick */
 static void
 on_click_pressed(GtkGestureClick *gesture, int n_press,
@@ -1452,7 +1479,18 @@ on_click_pressed(GtkGestureClick *gesture, int n_press,
     /* Always grab focus so axis constraint keys go here, not code editor */
     gtk_widget_grab_focus(vp->gl_area);
 
-    if (vp->locked || vp->obj_count == 0) return;
+    if (vp->locked) {
+        /* Flash the locked label */
+        if (vp->locked_label) {
+            gtk_widget_set_visible(vp->locked_label, TRUE);
+            if (vp->locked_flash_id)
+                g_source_remove(vp->locked_flash_id);
+            vp->locked_flash_id = g_timeout_add(1500,
+                locked_flash_hide, vp);
+        }
+        return;
+    }
+    if (vp->obj_count == 0) return;
 
     int old_sel = vp->selected_obj;
     int obj = do_pick(vp, (int)x, (int)y);
@@ -1544,6 +1582,55 @@ dc_gl_viewport_new(void)
     g_signal_connect_swapped(vp->gl_area, "map",
         G_CALLBACK(gtk_gl_area_queue_render), vp->gl_area);
 
+    /* CSS for HUD labels */
+    {
+        GtkCssProvider *css = gtk_css_provider_new();
+        gtk_css_provider_load_from_string(css,
+            ".gl-mode-label {"
+            "  background: rgba(0,0,0,0.6);"
+            "  color: #e0e0e0;"
+            "  padding: 3px 8px;"
+            "  border-radius: 4px;"
+            "  font-size: 11px;"
+            "  font-weight: bold;"
+            "}"
+            ".gl-locked-flash {"
+            "  background: rgba(200,30,30,0.85);"
+            "  color: #fff;"
+            "  padding: 8px 18px;"
+            "  border-radius: 6px;"
+            "  font-size: 14px;"
+            "  font-weight: bold;"
+            "}"
+        );
+        gtk_style_context_add_provider_for_display(
+            gdk_display_get_default(),
+            GTK_STYLE_PROVIDER(css),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(css);
+    }
+
+    /* Wrap GL area in overlay for HUD labels */
+    vp->overlay = gtk_overlay_new();
+    gtk_overlay_set_child(GTK_OVERLAY(vp->overlay), vp->gl_area);
+
+    /* Selection mode label (top-left) */
+    vp->mode_label = gtk_label_new("Object");
+    gtk_widget_set_halign(vp->mode_label, GTK_ALIGN_START);
+    gtk_widget_set_valign(vp->mode_label, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(vp->mode_label, 8);
+    gtk_widget_set_margin_top(vp->mode_label, 8);
+    gtk_widget_add_css_class(vp->mode_label, "gl-mode-label");
+    gtk_overlay_add_overlay(GTK_OVERLAY(vp->overlay), vp->mode_label);
+
+    /* Locked flash label (center, hidden by default) */
+    vp->locked_label = gtk_label_new("🔒 AI Working — Interaction Locked");
+    gtk_widget_set_halign(vp->locked_label, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(vp->locked_label, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(vp->locked_label, "gl-locked-flash");
+    gtk_widget_set_visible(vp->locked_label, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(vp->overlay), vp->locked_label);
+
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "gl_viewport created");
     return vp;
 }
@@ -1566,7 +1653,7 @@ dc_gl_viewport_free(DC_GlViewport *vp)
 GtkWidget *
 dc_gl_viewport_widget(DC_GlViewport *vp)
 {
-    return vp ? vp->gl_area : NULL;
+    return vp ? vp->overlay : NULL;
 }
 
 int
@@ -1972,7 +2059,16 @@ dc_gl_viewport_select_object_quiet(DC_GlViewport *vp, int obj_idx)
 void
 dc_gl_viewport_set_locked(DC_GlViewport *vp, int locked)
 {
-    if (vp) vp->locked = locked;
+    if (!vp) return;
+    vp->locked = locked;
+    /* Hide flash label when unlocking */
+    if (!locked && vp->locked_label) {
+        gtk_widget_set_visible(vp->locked_label, FALSE);
+        if (vp->locked_flash_id) {
+            g_source_remove(vp->locked_flash_id);
+            vp->locked_flash_id = 0;
+        }
+    }
 }
 
 int
@@ -2137,6 +2233,12 @@ dc_gl_viewport_set_select_mode(DC_GlViewport *vp, DC_SelectMode mode)
         }
     }
 
+    /* Update mode label */
+    if (vp->mode_label) {
+        static const char *labels[] = {"Object", "Face", "Edge"};
+        gtk_label_set_text(GTK_LABEL(vp->mode_label), labels[mode]);
+    }
+
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
 }
 
@@ -2146,9 +2248,6 @@ dc_gl_viewport_cycle_select_mode(DC_GlViewport *vp)
     if (!vp) return;
     DC_SelectMode next = (DC_SelectMode)((vp->sel_mode + 1) % 3);
     dc_gl_viewport_set_select_mode(vp, next);
-    static const char *names[] = {"Object", "Face", "Edge"};
-    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-           "select mode: %s", names[next]);
 }
 
 int
@@ -2178,7 +2277,7 @@ dc_gl_viewport_get_edge_count(DC_GlViewport *vp, int obj_idx)
     if (!vp || obj_idx < 0 || obj_idx >= vp->obj_count) return 0;
     ensure_topo(vp, obj_idx);
     DC_Topo *t = vp->objects[obj_idx].topo;
-    return t ? t->edge_count : 0;
+    return t ? t->edge_group_count : 0;
 }
 
 void

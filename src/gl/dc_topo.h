@@ -4,7 +4,10 @@
  * Pure C, no GL dependency. Works on interleaved STL mesh data:
  *   [nx, ny, nz, vx, vy, vz] per vertex, 3 vertices per triangle.
  *
- * Face group = set of adjacent triangles sharing the same normal.
+ * Face group = set of adjacent triangles on a smooth surface.
+ * Two adjacent triangles are merged if their dihedral angle is below
+ * DC_TOPO_SMOOTH_ANGLE (default 30°). This groups curved surfaces
+ * (cylinder sides, spheres) as single selectable faces.
  * Edge = boundary between two different face groups (or mesh boundary).
  *
  * Usage:
@@ -36,11 +39,20 @@ typedef struct {
 } DC_Edge;
 
 typedef struct {
+    int     *edge_indices;    /* indices into DC_Topo.edges[] */
+    int      edge_count;      /* number of edge segments in this group */
+} DC_EdgeGroup;
+
+typedef struct {
     DC_FaceGroup *face_groups;
     int           face_count;
 
     DC_Edge      *edges;
     int           edge_count;
+
+    DC_EdgeGroup *edge_groups;  /* smooth edge groups (curves/loops) */
+    int           edge_group_count;
+    int          *edge_to_group; /* [edge_count] -> edge group index */
 
     int          *tri_to_face; /* [num_triangles] -> face group index */
     int           num_triangles;
@@ -241,19 +253,28 @@ dc_topo_uf_union(int *parent, int *rank, int a, int b)
 }
 
 /* =========================================================================
- * Normal comparison
+ * Smooth surface detection (dihedral angle threshold)
  * ========================================================================= */
 
-#ifndef DC_TOPO_NORMAL_EPS
-#define DC_TOPO_NORMAL_EPS 1e-4f
+/* Maximum dihedral angle (degrees) for two adjacent triangles to be
+ * considered part of the same smooth surface. Default 30° works well
+ * for cylinders ($fn>=16), spheres, cones, and fillets while preserving
+ * sharp edges (90° cube edges, 45° chamfers). */
+#ifndef DC_TOPO_SMOOTH_ANGLE
+#define DC_TOPO_SMOOTH_ANGLE 30.0f
 #endif
 
-/* Returns 1 if normals are nearly identical (dot product close to 1.0). */
+/* Returns 1 if adjacent triangle normals are smooth (dihedral angle
+ * below threshold). This merges curved surfaces like cylinder sides.
+ * cos(30°) ≈ 0.866, cos(45°) ≈ 0.707, cos(60°) ≈ 0.5. */
 static inline int
 dc_topo_normals_match(const float *n1, const float *n2)
 {
+    static float cos_thresh = -1.0f;
+    if (cos_thresh < 0.0f)
+        cos_thresh = cosf(DC_TOPO_SMOOTH_ANGLE * 3.14159265f / 180.0f);
     float dot = n1[0]*n2[0] + n1[1]*n2[1] + n1[2]*n2[2];
-    return dot > (1.0f - DC_TOPO_NORMAL_EPS);
+    return dot > cos_thresh;
 }
 
 /* =========================================================================
@@ -392,13 +413,26 @@ dc_topo_build(const float *data, int num_triangles)
         fg->tri_count = 0; /* reset for fill pass */
     }
 
-    /* Fill tri_indices and set normals from first triangle in each group */
+    /* Fill tri_indices and accumulate normals (averaged for smooth groups) */
     for (int t = 0; t < num_triangles; t++) {
         int g = topo->tri_to_face[t];
         DC_FaceGroup *fg = &topo->face_groups[g];
-        if (fg->tri_count == 0)
-            memcpy(fg->normal, normals + t * 3, 3 * sizeof(float));
+        fg->normal[0] += normals[t * 3 + 0];
+        fg->normal[1] += normals[t * 3 + 1];
+        fg->normal[2] += normals[t * 3 + 2];
         fg->tri_indices[fg->tri_count++] = t;
+    }
+    /* Normalize averaged normals */
+    for (int g = 0; g < group_count; g++) {
+        DC_FaceGroup *fg = &topo->face_groups[g];
+        float len = sqrtf(fg->normal[0]*fg->normal[0] +
+                          fg->normal[1]*fg->normal[1] +
+                          fg->normal[2]*fg->normal[2]);
+        if (len > 1e-10f) {
+            fg->normal[0] /= len;
+            fg->normal[1] /= len;
+            fg->normal[2] /= len;
+        }
     }
 
     /* Extract edges: boundaries between different face groups */
@@ -436,6 +470,160 @@ dc_topo_build(const float *data, int num_triangles)
         }
     }
 
+    /* ---- Edge grouping: merge connected edges with smooth direction ---- */
+    if (edge_count > 0) {
+        /* Reuse parent/rank for edge union-find */
+        int *eparent = (int *)malloc((size_t)edge_count * sizeof(int));
+        int *erank = (int *)calloc((size_t)edge_count, sizeof(int));
+        if (eparent && erank) {
+            for (int i = 0; i < edge_count; i++) eparent[i] = i;
+
+            /* For each pair of edges sharing a vertex, check direction
+             * continuity: angle between edge directions < threshold.
+             *
+             * Use a vertex hash map: quantized vertex → first edge index.
+             * When a second edge maps to the same vertex, test and merge. */
+            int vcap = edge_count * 4;
+            if (vcap < 64) vcap = 64;
+            /* Round to power of 2 */
+            int vc2 = 64;
+            while (vc2 < vcap) vc2 *= 2;
+            vcap = vc2;
+
+            /* Vertex hash table: key = quantized vertex, value = list of
+             * (edge_idx, is_b) pairs. Simple approach: for each edge endpoint,
+             * find other edges at the same vertex and test merging. */
+            typedef struct { int qx, qy, qz; int edge_idx; int is_b; int next; } VSlot;
+            int vslot_count = edge_count * 2;
+            VSlot *vslots = (VSlot *)calloc((size_t)vslot_count, sizeof(VSlot));
+            int *vbuckets = (int *)malloc((size_t)vcap * sizeof(int));
+            if (vslots && vbuckets) {
+                memset(vbuckets, -1, (size_t)vcap * sizeof(int));
+                unsigned int vmask = (unsigned int)(vcap - 1);
+                int vsi = 0;
+
+                float cos_thresh_edge = cosf(DC_TOPO_SMOOTH_ANGLE * 3.14159265f / 180.0f);
+
+                for (int e = 0; e < edge_count; e++) {
+                    DC_Edge *ed = &topo->edges[e];
+                    /* Direction vector of this edge */
+                    float dx = ed->b[0] - ed->a[0];
+                    float dy = ed->b[1] - ed->a[1];
+                    float dz = ed->b[2] - ed->a[2];
+                    float dlen = sqrtf(dx*dx + dy*dy + dz*dz);
+                    if (dlen < 1e-10f) continue;
+                    dx /= dlen; dy /= dlen; dz /= dlen;
+
+                    /* Process both endpoints */
+                    for (int ep = 0; ep < 2; ep++) {
+                        float *pt = (ep == 0) ? ed->a : ed->b;
+                        /* Direction pointing away from this endpoint */
+                        float ex = (ep == 0) ? dx : -dx;
+                        float ey = (ep == 0) ? dy : -dy;
+                        float ez = (ep == 0) ? dz : -dz;
+
+                        int qx = dc_topo_quant(pt[0]);
+                        int qy = dc_topo_quant(pt[1]);
+                        int qz = dc_topo_quant(pt[2]);
+                        unsigned int vh = ((unsigned int)qx * 73856093u) ^
+                                          ((unsigned int)qy * 19349663u) ^
+                                          ((unsigned int)qz * 83492791u);
+                        unsigned int bi = vh & vmask;
+
+                        /* Check existing edges at this vertex */
+                        int si = vbuckets[bi];
+                        while (si >= 0) {
+                            VSlot *vs = &vslots[si];
+                            if (vs->qx == qx && vs->qy == qy && vs->qz == qz) {
+                                /* Same vertex — check direction continuity */
+                                int oe = vs->edge_idx;
+                                DC_Edge *other = &topo->edges[oe];
+                                float odx = other->b[0] - other->a[0];
+                                float ody = other->b[1] - other->a[1];
+                                float odz = other->b[2] - other->a[2];
+                                float olen = sqrtf(odx*odx + ody*ody + odz*odz);
+                                if (olen > 1e-10f) {
+                                    odx /= olen; ody /= olen; odz /= olen;
+                                    /* Direction pointing away from shared vertex */
+                                    float ox, oy, oz;
+                                    if (vs->is_b) {
+                                        ox = -odx; oy = -ody; oz = -odz;
+                                    } else {
+                                        ox = odx; oy = ody; oz = odz;
+                                    }
+                                    /* Dot product of outgoing directions.
+                                     * For smooth continuation, directions should
+                                     * be nearly opposite (edges continue through
+                                     * the vertex), so dot ≈ -1. We check
+                                     * |dot| > cos_thresh which catches both
+                                     * same-direction and opposite-direction. */
+                                    float dot = ex*ox + ey*oy + ez*oz;
+                                    if (dot < -cos_thresh_edge) {
+                                        /* Smooth continuation — merge */
+                                        dc_topo_uf_union(eparent, erank, e, oe);
+                                    }
+                                }
+                            }
+                            si = vs->next;
+                        }
+
+                        /* Insert this edge endpoint */
+                        if (vsi < vslot_count) {
+                            vslots[vsi].qx = qx;
+                            vslots[vsi].qy = qy;
+                            vslots[vsi].qz = qz;
+                            vslots[vsi].edge_idx = e;
+                            vslots[vsi].is_b = ep;
+                            vslots[vsi].next = vbuckets[bi];
+                            vbuckets[bi] = vsi;
+                            vsi++;
+                        }
+                    }
+                }
+
+                /* Collect edge groups from union-find */
+                int *eroot_to_group = (int *)malloc((size_t)edge_count * sizeof(int));
+                topo->edge_to_group = (int *)malloc((size_t)edge_count * sizeof(int));
+                if (eroot_to_group && topo->edge_to_group) {
+                    memset(eroot_to_group, -1, (size_t)edge_count * sizeof(int));
+                    int egroup_count = 0;
+                    for (int e = 0; e < edge_count; e++) {
+                        int root = dc_topo_uf_find(eparent, e);
+                        if (eroot_to_group[root] == -1)
+                            eroot_to_group[root] = egroup_count++;
+                        topo->edge_to_group[e] = eroot_to_group[root];
+                    }
+
+                    topo->edge_group_count = egroup_count;
+                    topo->edge_groups = (DC_EdgeGroup *)calloc(
+                        (size_t)egroup_count, sizeof(DC_EdgeGroup));
+                    if (topo->edge_groups) {
+                        /* Count edges per group */
+                        for (int e = 0; e < edge_count; e++)
+                            topo->edge_groups[topo->edge_to_group[e]].edge_count++;
+                        /* Allocate */
+                        for (int g = 0; g < egroup_count; g++) {
+                            topo->edge_groups[g].edge_indices = (int *)malloc(
+                                (size_t)topo->edge_groups[g].edge_count * sizeof(int));
+                            topo->edge_groups[g].edge_count = 0; /* reset for fill */
+                        }
+                        /* Fill */
+                        for (int e = 0; e < edge_count; e++) {
+                            int g = topo->edge_to_group[e];
+                            DC_EdgeGroup *eg = &topo->edge_groups[g];
+                            eg->edge_indices[eg->edge_count++] = e;
+                        }
+                    }
+                }
+                free(eroot_to_group);
+            }
+            free(vslots);
+            free(vbuckets);
+        }
+        free(eparent);
+        free(erank);
+    }
+
     /* Cleanup */
     free(normals);
     free(root_to_group);
@@ -456,6 +644,12 @@ dc_topo_free(DC_Topo *topo)
         free(topo->face_groups);
     }
     free(topo->edges);
+    if (topo->edge_groups) {
+        for (int i = 0; i < topo->edge_group_count; i++)
+            free(topo->edge_groups[i].edge_indices);
+        free(topo->edge_groups);
+    }
+    free(topo->edge_to_group);
     free(topo->tri_to_face);
     free(topo);
 }

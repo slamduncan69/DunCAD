@@ -149,9 +149,13 @@ on_cursor_changed(GtkTextBuffer *buffer, GtkTextIter *location,
     /* Only react to the insert mark (cursor), not selection-bound etc. */
     if (mark != gtk_text_buffer_get_insert(buffer)) return;
 
-    /* Don't fight with GL-initiated selections (check if GL has focus) */
+    /* Don't fight with GL-initiated selections (check if GL area has focus).
+     * dc_gl_viewport_widget() returns an overlay; check child focus. */
     GtkWidget *gl_widget = dc_gl_viewport_widget(ctx->gl_vp);
-    if (gl_widget && gtk_widget_has_focus(gl_widget)) return;
+    if (gl_widget) {
+        GtkWidget *focus_child = gtk_widget_get_focus_child(gl_widget);
+        if (focus_child && gtk_widget_has_focus(focus_child)) return;
+    }
 
     int cursor_line = gtk_text_iter_get_line(location) + 1; /* 1-based */
 
