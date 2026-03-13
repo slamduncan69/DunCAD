@@ -206,6 +206,16 @@ struct DC_GlViewport {
         float       translate[3]; /* viewport-space offset for live preview */
         /* Topology (built lazily on first face/edge pick) */
         DC_Topo    *topo;
+        /* Face-group EBO for per-face drawing (built with topology) */
+        GLuint      face_ebo;
+        int        *face_draw_start; /* [face_count] index offset per group */
+        int        *face_draw_count; /* [face_count] vertex count per group */
+        int         face_draw_built;
+        /* Edge wireframe VBO (built with topology) */
+        GLuint      wire_vao;
+        GLuint      wire_vbo;
+        int         wire_vert_count;
+        int         wire_built;
     }            objects[256];
     int          obj_count;
     int          selected_obj;   /* -1 = none */
@@ -260,6 +270,11 @@ struct DC_GlViewport {
     /* Interaction lock (AI working — block picking/moving) */
     int          locked;
 };
+
+/* Forward declarations for lazy topology builders */
+static void ensure_topo(DC_GlViewport *vp, int obj_idx);
+static void ensure_face_ebo(DC_GlViewport *vp, int obj_idx);
+static void ensure_wire_vbo(DC_GlViewport *vp, int obj_idx);
 
 /* =========================================================================
  * Shader compilation helpers
@@ -487,6 +502,12 @@ on_unrealize(GtkGLArea *area, gpointer data)
             glDeleteVertexArrays(1, &vp->objects[i].vao);
             glDeleteBuffers(1, &vp->objects[i].vbo);
         }
+        if (vp->objects[i].face_ebo)
+            glDeleteBuffers(1, &vp->objects[i].face_ebo);
+        if (vp->objects[i].wire_vao) {
+            glDeleteVertexArrays(1, &vp->objects[i].wire_vao);
+            glDeleteBuffers(1, &vp->objects[i].wire_vbo);
+        }
     }
     if (vp->mesh_vao) { glDeleteVertexArrays(1, &vp->mesh_vao); glDeleteBuffers(1, &vp->mesh_vbo); }
     if (vp->grid_vao) { glDeleteVertexArrays(1, &vp->grid_vao); glDeleteBuffers(1, &vp->grid_vbo); }
@@ -598,7 +619,8 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
                 glUniformMatrix4fv(loc_model, 1, GL_FALSE, obj_model);
 
                 float color[3];
-                if (i == vp->selected_obj) {
+                if (i == vp->selected_obj && vp->sel_mode == DC_SEL_OBJECT) {
+                    /* Object mode: gold highlight for selected */
                     color[0] = 1.0f; color[1] = 0.7f; color[2] = 0.2f;
                 } else {
                     color[0] = 0.6f; color[1] = 0.75f; color[2] = 0.9f;
@@ -608,6 +630,51 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
                 glBindVertexArray(vp->objects[i].vao);
                 glDrawArrays(GL_TRIANGLES, 0, vp->objects[i].mesh->num_vertices);
             }
+
+            /* --- Face highlight: redraw selected face group in gold --- */
+            if (vp->sel_mode == DC_SEL_FACE && vp->selected_obj >= 0
+                && vp->selected_face >= 0) {
+                int si = vp->selected_obj;
+                if (si < vp->obj_count && vp->objects[si].face_draw_built
+                    && vp->objects[si].uploaded) {
+
+                    float obj_model2[16];
+                    mat4_identity(obj_model2);
+                    obj_model2[12] = vp->objects[si].translate[0];
+                    obj_model2[13] = vp->objects[si].translate[1];
+                    obj_model2[14] = vp->objects[si].translate[2];
+                    float obj_mvp2[16];
+                    mat4_mul(obj_mvp2, vp_mat, obj_model2);
+
+                    glUniformMatrix4fv(loc_mvp, 1, GL_FALSE, obj_mvp2);
+                    glUniformMatrix4fv(loc_model, 1, GL_FALSE, obj_model2);
+
+                    float gold[3] = {1.0f, 0.7f, 0.2f};
+                    glUniform3fv(loc_color, 1, gold);
+
+                    glBindVertexArray(vp->objects[si].vao);
+                    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,
+                                 vp->objects[si].face_ebo);
+
+                    int fg = vp->selected_face;
+                    DC_Topo *t = vp->objects[si].topo;
+                    if (t && fg >= 0 && fg < t->face_count) {
+                        /* Slight polygon offset so face renders on top */
+                        glEnable(GL_POLYGON_OFFSET_FILL);
+                        glPolygonOffset(-1.0f, -1.0f);
+
+                        glDrawElements(GL_TRIANGLES,
+                                       vp->objects[si].face_draw_count[fg],
+                                       GL_UNSIGNED_INT,
+                                       (void*)((size_t)vp->objects[si].face_draw_start[fg]
+                                               * sizeof(GLuint)));
+
+                        glDisable(GL_POLYGON_OFFSET_FILL);
+                    }
+                    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+                }
+            }
+
         } else if (vp->mesh && vp->mesh_uploaded && vp->mesh_vao) {
             /* Legacy single mesh */
             float model[16];
@@ -622,6 +689,90 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
 
             glBindVertexArray(vp->mesh_vao);
             glDrawArrays(GL_TRIANGLES, 0, vp->mesh->num_vertices);
+        }
+    }
+
+    /* --- Wireframe overlay: render edges as GL_LINES --- */
+    if (vp->show_wireframe && vp->obj_count > 0 && vp->line_prog) {
+        glUseProgram(vp->line_prog);
+        GLint wire_mvp_loc = glGetUniformLocation(vp->line_prog, "uMVP");
+
+        glDepthFunc(GL_LEQUAL);
+        glLineWidth(1.0f);
+
+        for (int i = 0; i < vp->obj_count; i++) {
+            if (!vp->objects[i].mesh || !vp->objects[i].uploaded)
+                continue;
+
+            ensure_wire_vbo(vp, i);
+            if (!vp->objects[i].wire_built) continue;
+
+            float obj_model_w[16];
+            mat4_identity(obj_model_w);
+            obj_model_w[12] = vp->objects[i].translate[0];
+            obj_model_w[13] = vp->objects[i].translate[1];
+            obj_model_w[14] = vp->objects[i].translate[2];
+            float wire_mvp[16];
+            mat4_mul(wire_mvp, vp_mat, obj_model_w);
+
+            glUniformMatrix4fv(wire_mvp_loc, 1, GL_FALSE, wire_mvp);
+            glBindVertexArray(vp->objects[i].wire_vao);
+            glDrawArrays(GL_LINES, 0, vp->objects[i].wire_vert_count);
+        }
+
+        glDepthFunc(GL_LESS);
+    }
+
+    /* --- Edge highlight: redraw selected edge in cyan --- */
+    if (vp->sel_mode == DC_SEL_EDGE && vp->selected_obj >= 0
+        && vp->selected_edge >= 0 && vp->line_prog) {
+        int si = vp->selected_obj;
+        if (si < vp->obj_count && vp->objects[si].topo) {
+            DC_Topo *t = vp->objects[si].topo;
+            int ei = vp->selected_edge;
+            if (ei >= 0 && ei < t->edge_count) {
+                glUseProgram(vp->line_prog);
+                GLint emvp_loc = glGetUniformLocation(vp->line_prog, "uMVP");
+
+                float obj_model_e[16];
+                mat4_identity(obj_model_e);
+                obj_model_e[12] = vp->objects[si].translate[0];
+                obj_model_e[13] = vp->objects[si].translate[1];
+                obj_model_e[14] = vp->objects[si].translate[2];
+                float edge_mvp[16];
+                mat4_mul(edge_mvp, vp_mat, obj_model_e);
+                glUniformMatrix4fv(emvp_loc, 1, GL_FALSE, edge_mvp);
+
+                /* Build a tiny 2-vertex VBO for the highlighted edge */
+                float edata[12] = {
+                    t->edges[ei].a[0], t->edges[ei].a[1], t->edges[ei].a[2],
+                    0.0f, 1.0f, 1.0f,  /* cyan */
+                    t->edges[ei].b[0], t->edges[ei].b[1], t->edges[ei].b[2],
+                    0.0f, 1.0f, 1.0f   /* cyan */
+                };
+
+                GLuint evao, evbo;
+                glGenVertexArrays(1, &evao);
+                glGenBuffers(1, &evbo);
+                glBindVertexArray(evao);
+                glBindBuffer(GL_ARRAY_BUFFER, evbo);
+                glBufferData(GL_ARRAY_BUFFER, sizeof(edata), edata, GL_STREAM_DRAW);
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                                      6*sizeof(float), (void*)0);
+                glEnableVertexAttribArray(0);
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE,
+                                      6*sizeof(float), (void*)(3*sizeof(float)));
+                glEnableVertexAttribArray(1);
+
+                glDepthFunc(GL_LEQUAL);
+                glLineWidth(4.0f);
+                glDrawArrays(GL_LINES, 0, 2);
+                glLineWidth(1.0f);
+                glDepthFunc(GL_LESS);
+
+                glDeleteBuffers(1, &evbo);
+                glDeleteVertexArrays(1, &evao);
+            }
         }
     }
 
@@ -932,13 +1083,14 @@ color_to_obj_idx(unsigned char r, unsigned char g, unsigned char b)
     return id - 1; /* -1 if background (id=0) */
 }
 
-/* Perform pick at pixel (px, py) in widget coords.
- * Returns object index or -1 if background. */
+/* Set up pick FBO and build view/proj matrices for picking.
+ * Returns 0 on failure. On success, pick FBO is bound and ready. */
 static int
-do_pick(DC_GlViewport *vp, int px, int py)
+pick_setup(DC_GlViewport *vp, int px, int py,
+           float *vp_mat, int *out_fpx, int *out_fpy)
 {
     if (!vp->gl_ready || vp->obj_count == 0 || !vp->pick_prog)
-        return -1;
+        return 0;
 
     int w = gtk_widget_get_width(GTK_WIDGET(vp->gl_area));
     int h = gtk_widget_get_height(GTK_WIDGET(vp->gl_area));
@@ -948,11 +1100,10 @@ do_pick(DC_GlViewport *vp, int px, int py)
     gtk_gl_area_make_current(GTK_GL_AREA(vp->gl_area));
     ensure_pick_fbo(vp, fw, fh);
 
-    /* Build same view/proj as normal render */
     float eye[3];
     camera_eye(vp, eye);
     float up[3] = {0, 1, 0};
-    float view[16], proj[16], vp_mat[16];
+    float view[16], proj[16];
 
     mat4_lookat(view, eye, vp->cam_center, up);
     float aspect = (float)w / (float)h;
@@ -965,21 +1116,40 @@ do_pick(DC_GlViewport *vp, int px, int py)
     }
     mat4_mul(vp_mat, proj, view);
 
-    /* Render to pick FBO */
     glBindFramebuffer(GL_FRAMEBUFFER, vp->pick_fbo);
     glViewport(0, 0, fw, fh);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    *out_fpx = px * scale;
+    *out_fpy = fh - (py * scale) - 1;
+    return 1;
+}
+
+/* Read a single pixel from the bound FBO at (fpx, fpy). */
+static void
+pick_read_pixel(int fpx, int fpy, unsigned char *pixel)
+{
+    glReadPixels(fpx, fpy, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+}
+
+/* Object-mode pick: one color per object. Returns obj_idx or -1. */
+static int
+do_pick_object(DC_GlViewport *vp, int px, int py)
+{
+    float vp_mat[16];
+    int fpx, fpy;
+    if (!pick_setup(vp, px, py, vp_mat, &fpx, &fpy))
+        return -1;
+
     glUseProgram(vp->pick_prog);
-    GLint pick_mvp_loc = glGetUniformLocation(vp->pick_prog, "uMVP");
-    GLint pick_color_loc = glGetUniformLocation(vp->pick_prog, "uPickColor");
+    GLint mvp_loc = glGetUniformLocation(vp->pick_prog, "uMVP");
+    GLint col_loc = glGetUniformLocation(vp->pick_prog, "uPickColor");
 
     for (int i = 0; i < vp->obj_count; i++) {
         if (!vp->objects[i].mesh || !vp->objects[i].uploaded)
             continue;
 
-        /* Per-object transform for pick pass (matches render pass) */
         float obj_model[16];
         mat4_identity(obj_model);
         obj_model[12] = vp->objects[i].translate[0];
@@ -988,28 +1158,258 @@ do_pick(DC_GlViewport *vp, int px, int py)
 
         float obj_mvp[16];
         mat4_mul(obj_mvp, vp_mat, obj_model);
-        glUniformMatrix4fv(pick_mvp_loc, 1, GL_FALSE, obj_mvp);
+        glUniformMatrix4fv(mvp_loc, 1, GL_FALSE, obj_mvp);
 
         float rgb[3];
         obj_idx_to_color(i, rgb);
-        glUniform3fv(pick_color_loc, 1, rgb);
+        glUniform3fv(col_loc, 1, rgb);
 
         glBindVertexArray(vp->objects[i].vao);
         glDrawArrays(GL_TRIANGLES, 0, vp->objects[i].mesh->num_vertices);
     }
 
-    /* Read pixel at click position (flip Y for OpenGL) */
-    int fpx = px * scale;
-    int fpy = fh - (py * scale) - 1;
     unsigned char pixel[4] = {0};
-    glReadPixels(fpx, fpy, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
-
+    pick_read_pixel(fpx, fpy, pixel);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     int result = color_to_obj_idx(pixel[0], pixel[1], pixel[2]);
     if (result < 0 || result >= vp->obj_count) result = -1;
-
     return result;
+}
+
+/* Face-mode pick: one color per face group. Sets vp->selected_obj and
+ * vp->selected_face. Returns picked obj_idx or -1. */
+static int
+do_pick_face(DC_GlViewport *vp, int px, int py)
+{
+    float vp_mat[16];
+    int fpx, fpy;
+    if (!pick_setup(vp, px, py, vp_mat, &fpx, &fpy))
+        return -1;
+
+    glUseProgram(vp->pick_prog);
+    GLint mvp_loc = glGetUniformLocation(vp->pick_prog, "uMVP");
+    GLint col_loc = glGetUniformLocation(vp->pick_prog, "uPickColor");
+
+    for (int i = 0; i < vp->obj_count; i++) {
+        if (!vp->objects[i].mesh || !vp->objects[i].uploaded)
+            continue;
+
+        ensure_face_ebo(vp, i);
+        if (!vp->objects[i].face_draw_built) continue;
+        DC_Topo *t = vp->objects[i].topo;
+        if (!t) continue;
+
+        float obj_model[16];
+        mat4_identity(obj_model);
+        obj_model[12] = vp->objects[i].translate[0];
+        obj_model[13] = vp->objects[i].translate[1];
+        obj_model[14] = vp->objects[i].translate[2];
+
+        float obj_mvp[16];
+        mat4_mul(obj_mvp, vp_mat, obj_model);
+        glUniformMatrix4fv(mvp_loc, 1, GL_FALSE, obj_mvp);
+
+        glBindVertexArray(vp->objects[i].vao);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vp->objects[i].face_ebo);
+
+        /* Draw each face group with a unique pick color */
+        for (int g = 0; g < t->face_count; g++) {
+            float rgb[3];
+            dc_topo_sub_to_color(i, g, rgb);
+            glUniform3fv(col_loc, 1, rgb);
+
+            glDrawElements(GL_TRIANGLES,
+                           vp->objects[i].face_draw_count[g],
+                           GL_UNSIGNED_INT,
+                           (void*)((size_t)vp->objects[i].face_draw_start[g]
+                                   * sizeof(GLuint)));
+        }
+    }
+
+    unsigned char pixel[4] = {0};
+    pick_read_pixel(fpx, fpy, pixel);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    int obj_idx, face_idx;
+    dc_topo_color_to_sub(pixel[0], pixel[1], pixel[2], &obj_idx, &face_idx);
+
+    if (obj_idx < 0 || obj_idx >= vp->obj_count) {
+        vp->selected_face = -1;
+        return -1;
+    }
+
+    DC_Topo *t = vp->objects[obj_idx].topo;
+    if (!t || face_idx < 0 || face_idx >= t->face_count) {
+        vp->selected_face = -1;
+        return obj_idx;
+    }
+
+    vp->selected_face = face_idx;
+    return obj_idx;
+}
+
+/* Edge-mode pick: render edges as thick GL_LINES with unique colors.
+ * Sets vp->selected_obj and vp->selected_edge. Returns obj_idx or -1. */
+static int
+do_pick_edge(DC_GlViewport *vp, int px, int py)
+{
+    float vp_mat[16];
+    int fpx, fpy;
+    if (!pick_setup(vp, px, py, vp_mat, &fpx, &fpy))
+        return -1;
+
+    /* First, render solid faces (so edges on back faces are occluded) */
+    glUseProgram(vp->pick_prog);
+    GLint mvp_loc = glGetUniformLocation(vp->pick_prog, "uMVP");
+    GLint col_loc = glGetUniformLocation(vp->pick_prog, "uPickColor");
+
+    for (int i = 0; i < vp->obj_count; i++) {
+        if (!vp->objects[i].mesh || !vp->objects[i].uploaded)
+            continue;
+
+        float obj_model[16];
+        mat4_identity(obj_model);
+        obj_model[12] = vp->objects[i].translate[0];
+        obj_model[13] = vp->objects[i].translate[1];
+        obj_model[14] = vp->objects[i].translate[2];
+
+        float obj_mvp[16];
+        mat4_mul(obj_mvp, vp_mat, obj_model);
+        glUniformMatrix4fv(mvp_loc, 1, GL_FALSE, obj_mvp);
+
+        /* Draw solid geometry as background (pick color 0 = background) */
+        float bg[3] = {0, 0, 0};
+        glUniform3fv(col_loc, 1, bg);
+        glBindVertexArray(vp->objects[i].vao);
+        glDrawArrays(GL_TRIANGLES, 0, vp->objects[i].mesh->num_vertices);
+    }
+
+    /* Now render edges on top with per-edge pick colors.
+     * Use the line shader's VAO but the pick program. We need a temporary
+     * VBO with per-edge pick colors, or we can reuse the pick shader with
+     * a uniform per edge. Since edges are few (~100s), uniform-per-edge is fine. */
+    glLineWidth(5.0f);
+    glDepthFunc(GL_LEQUAL); /* edges draw on top of coplanar faces */
+
+    /* We render edges manually: 2 vertices per edge, using the pick shader.
+     * The pick shader ignores aNormal (location 0), uses aPos (location 1).
+     * But our line VBO has aPos at location 0 — so we need to use the
+     * line program VAO layout. Actually, the pick shader has aNormal at 0
+     * and aPos at 1 (matching the mesh VBO). For line-based rendering we
+     * need aPos at location 0. We'll use the line_prog shader with a
+     * uniform-color trick — or better, build a temporary VBO.
+     *
+     * Simplest approach: build a temporary VBO per object with edge
+     * positions, draw each edge (2 verts) individually with pick uniform. */
+
+    /* Use a temporary VAO/VBO for edge pick rendering */
+    GLuint tmp_vao, tmp_vbo;
+    glGenVertexArrays(1, &tmp_vao);
+    glGenBuffers(1, &tmp_vbo);
+    glBindVertexArray(tmp_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, tmp_vbo);
+
+    /* Pick shader layout: location 0 = aNormal (3f), location 1 = aPos (3f)
+     * We'll pack [0,0,0, px,py,pz] per vertex so aPos reads correctly. */
+
+    for (int i = 0; i < vp->obj_count; i++) {
+        if (!vp->objects[i].mesh || !vp->objects[i].uploaded)
+            continue;
+
+        ensure_wire_vbo(vp, i);
+        DC_Topo *t = vp->objects[i].topo;
+        if (!t || t->edge_count <= 0) continue;
+
+        float obj_model[16];
+        mat4_identity(obj_model);
+        obj_model[12] = vp->objects[i].translate[0];
+        obj_model[13] = vp->objects[i].translate[1];
+        obj_model[14] = vp->objects[i].translate[2];
+
+        float obj_mvp[16];
+        mat4_mul(obj_mvp, vp_mat, obj_model);
+        glUniformMatrix4fv(mvp_loc, 1, GL_FALSE, obj_mvp);
+
+        /* Build edge pick data: [0,0,0, ax,ay,az, 0,0,0, bx,by,bz] per edge
+         * This maps to pick shader: aNormal=(0,0,0), aPos=(position). */
+        int nfloats = t->edge_count * 2 * 6;
+        float *edata = (float *)malloc((size_t)nfloats * sizeof(float));
+        if (!edata) continue;
+
+        for (int e = 0; e < t->edge_count; e++) {
+            float *p = edata + e * 12;
+            /* Vertex A: aNormal=0, aPos=edge.a */
+            p[0]=0; p[1]=0; p[2]=0;
+            p[3]=t->edges[e].a[0]; p[4]=t->edges[e].a[1]; p[5]=t->edges[e].a[2];
+            /* Vertex B: aNormal=0, aPos=edge.b */
+            p[6]=0; p[7]=0; p[8]=0;
+            p[9]=t->edges[e].b[0]; p[10]=t->edges[e].b[1]; p[11]=t->edges[e].b[2];
+        }
+
+        glBufferData(GL_ARRAY_BUFFER,
+                     (GLsizeiptr)((size_t)nfloats * sizeof(float)),
+                     edata, GL_STREAM_DRAW);
+
+        /* Set up vertex attributes matching pick shader */
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float),
+                              (void*)(3*sizeof(float)));
+        glEnableVertexAttribArray(1);
+
+        /* Draw each edge with unique pick color */
+        for (int e = 0; e < t->edge_count; e++) {
+            float rgb[3];
+            dc_topo_sub_to_color(i, e, rgb);
+            glUniform3fv(col_loc, 1, rgb);
+            glDrawArrays(GL_LINES, e * 2, 2);
+        }
+
+        free(edata);
+    }
+
+    glDeleteBuffers(1, &tmp_vbo);
+    glDeleteVertexArrays(1, &tmp_vao);
+
+    glLineWidth(1.0f);
+    glDepthFunc(GL_LESS);
+
+    unsigned char pixel[4] = {0};
+    pick_read_pixel(fpx, fpy, pixel);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    int obj_idx, edge_idx;
+    dc_topo_color_to_sub(pixel[0], pixel[1], pixel[2], &obj_idx, &edge_idx);
+
+    if (obj_idx < 0 || obj_idx >= vp->obj_count) {
+        vp->selected_edge = -1;
+        return -1;
+    }
+
+    DC_Topo *t = vp->objects[obj_idx].topo;
+    if (!t || edge_idx < 0 || edge_idx >= t->edge_count) {
+        vp->selected_edge = -1;
+        return obj_idx;
+    }
+
+    vp->selected_edge = edge_idx;
+    return obj_idx;
+}
+
+/* Unified pick dispatch — calls appropriate mode-specific picker. */
+static int
+do_pick(DC_GlViewport *vp, int px, int py)
+{
+    switch (vp->sel_mode) {
+    case DC_SEL_FACE:
+        return do_pick_face(vp, px, py);
+    case DC_SEL_EDGE:
+        return do_pick_edge(vp, px, py);
+    case DC_SEL_OBJECT:
+    default:
+        return do_pick_object(vp, px, py);
+    }
 }
 
 /* Upload a single object mesh to GL */
@@ -1060,6 +1460,12 @@ on_click_pressed(GtkGestureClick *gesture, int n_press,
     /* Track if clicking on already-selected object (for move mode) */
     vp->last_pick_reselect = (obj >= 0 && obj == old_sel) ? 1 : 0;
     vp->selected_obj = obj;
+
+    /* Clear sub-element selection when object changes */
+    if (obj != old_sel) {
+        vp->selected_face = -1;
+        vp->selected_edge = -1;
+    }
 
     /* Notify callback */
     if (vp->pick_cb) {
@@ -1150,6 +1556,8 @@ dc_gl_viewport_free(DC_GlViewport *vp)
     for (int i = 0; i < vp->obj_count; i++) {
         dc_stl_free(vp->objects[i].mesh);
         dc_topo_free(vp->objects[i].topo);
+        free(vp->objects[i].face_draw_start);
+        free(vp->objects[i].face_draw_count);
     }
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "gl_viewport freed");
     free(vp);
@@ -1279,12 +1687,20 @@ dc_gl_viewport_clear_objects(DC_GlViewport *vp)
                 glDeleteVertexArrays(1, &vp->objects[i].vao);
                 glDeleteBuffers(1, &vp->objects[i].vbo);
             }
+            if (vp->objects[i].face_ebo)
+                glDeleteBuffers(1, &vp->objects[i].face_ebo);
+            if (vp->objects[i].wire_vao) {
+                glDeleteVertexArrays(1, &vp->objects[i].wire_vao);
+                glDeleteBuffers(1, &vp->objects[i].wire_vbo);
+            }
         }
     }
 
     for (int i = 0; i < vp->obj_count; i++) {
         dc_stl_free(vp->objects[i].mesh);
         dc_topo_free(vp->objects[i].topo);
+        free(vp->objects[i].face_draw_start);
+        free(vp->objects[i].face_draw_count);
     }
 
     memset(vp->objects, 0, sizeof(vp->objects));
@@ -1580,6 +1996,119 @@ ensure_topo(DC_GlViewport *vp, int obj_idx)
     vp->objects[obj_idx].topo = dc_topo_build(m->data, m->num_triangles);
 }
 
+/* Build face-group EBO for per-face drawing (for pick pass and highlight).
+ * Creates an element buffer with vertex indices sorted by face group,
+ * plus face_draw_start/count arrays for per-group glDrawElements calls. */
+static void
+ensure_face_ebo(DC_GlViewport *vp, int obj_idx)
+{
+    if (obj_idx < 0 || obj_idx >= vp->obj_count) return;
+    if (vp->objects[obj_idx].face_draw_built) return;
+
+    ensure_topo(vp, obj_idx);
+    DC_Topo *t = vp->objects[obj_idx].topo;
+    if (!t) return;
+
+    /* Build index array: vertex indices sorted by face group */
+    int total_indices = t->num_triangles * 3;
+    GLuint *indices = (GLuint *)malloc((size_t)total_indices * sizeof(GLuint));
+    int *starts = (int *)malloc((size_t)t->face_count * sizeof(int));
+    int *counts = (int *)malloc((size_t)t->face_count * sizeof(int));
+    if (!indices || !starts || !counts) {
+        free(indices); free(starts); free(counts);
+        return;
+    }
+
+    int idx = 0;
+    for (int g = 0; g < t->face_count; g++) {
+        starts[g] = idx;
+        DC_FaceGroup *fg = &t->face_groups[g];
+        for (int i = 0; i < fg->tri_count; i++) {
+            int tri = fg->tri_indices[i];
+            indices[idx++] = (GLuint)(tri * 3);
+            indices[idx++] = (GLuint)(tri * 3 + 1);
+            indices[idx++] = (GLuint)(tri * 3 + 2);
+        }
+        counts[g] = fg->tri_count * 3;
+    }
+
+    /* Upload EBO */
+    if (!vp->objects[obj_idx].face_ebo)
+        glGenBuffers(1, &vp->objects[obj_idx].face_ebo);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vp->objects[obj_idx].face_ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 (GLsizeiptr)(total_indices * (int)sizeof(GLuint)),
+                 indices, GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+    free(indices);
+
+    /* Store draw params */
+    free(vp->objects[obj_idx].face_draw_start);
+    free(vp->objects[obj_idx].face_draw_count);
+    vp->objects[obj_idx].face_draw_start = starts;
+    vp->objects[obj_idx].face_draw_count = counts;
+    vp->objects[obj_idx].face_draw_built = 1;
+}
+
+/* Build wireframe VBO for edge overlay rendering.
+ * Creates a GL_LINES VBO with [x,y,z, r,g,b] per vertex. */
+static void
+ensure_wire_vbo(DC_GlViewport *vp, int obj_idx)
+{
+    if (obj_idx < 0 || obj_idx >= vp->obj_count) return;
+    if (vp->objects[obj_idx].wire_built) return;
+
+    ensure_topo(vp, obj_idx);
+    DC_Topo *t = vp->objects[obj_idx].topo;
+    if (!t || t->edge_count <= 0) return;
+
+    /* 2 verts per edge * 6 floats per vert */
+    int vert_count = t->edge_count * 2;
+    float *data = (float *)malloc((size_t)vert_count * 6 * sizeof(float));
+    if (!data) return;
+
+    float *p = data;
+    for (int i = 0; i < t->edge_count; i++) {
+        DC_Edge *e = &t->edges[i];
+        /* Vertex A: pos + color */
+        p[0] = e->a[0]; p[1] = e->a[1]; p[2] = e->a[2];
+        p[3] = 0.05f;   p[4] = 0.05f;   p[5] = 0.05f; /* dark gray */
+        p += 6;
+        /* Vertex B: pos + color */
+        p[0] = e->b[0]; p[1] = e->b[1]; p[2] = e->b[2];
+        p[3] = 0.05f;   p[4] = 0.05f;   p[5] = 0.05f;
+        p += 6;
+    }
+
+    /* Upload to GL */
+    if (!vp->objects[obj_idx].wire_vao) {
+        glGenVertexArrays(1, &vp->objects[obj_idx].wire_vao);
+        glGenBuffers(1, &vp->objects[obj_idx].wire_vbo);
+    }
+
+    glBindVertexArray(vp->objects[obj_idx].wire_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vp->objects[obj_idx].wire_vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)((size_t)vert_count * 6 * sizeof(float)),
+                 data, GL_STATIC_DRAW);
+
+    /* Position: location 0 */
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    /* Color: location 1 */
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float),
+                          (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+    free(data);
+
+    vp->objects[obj_idx].wire_vert_count = vert_count;
+    vp->objects[obj_idx].wire_built = 1;
+}
+
 DC_SelectMode
 dc_gl_viewport_get_select_mode(DC_GlViewport *vp)
 {
@@ -1595,10 +2124,17 @@ dc_gl_viewport_set_select_mode(DC_GlViewport *vp, DC_SelectMode mode)
     vp->selected_face = -1;
     vp->selected_edge = -1;
 
-    /* Build topology for all objects if entering face/edge mode */
+    /* Build topology + GL resources for all objects if entering face/edge mode */
     if (mode != DC_SEL_OBJECT) {
-        for (int i = 0; i < vp->obj_count; i++)
+        if (vp->gl_ready)
+            gtk_gl_area_make_current(GTK_GL_AREA(vp->gl_area));
+        for (int i = 0; i < vp->obj_count; i++) {
             ensure_topo(vp, i);
+            if (vp->gl_ready) {
+                ensure_face_ebo(vp, i);
+                ensure_wire_vbo(vp, i);
+            }
+        }
     }
 
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));

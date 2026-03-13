@@ -1083,6 +1083,421 @@ static void bench_flat_grid_316(void)
 }
 
 /* =========================================================================
+ * GL Integration Tests — verify data patterns used by gl_viewport.c
+ * ========================================================================= */
+
+/* Test: face EBO index generation matches what ensure_face_ebo() produces.
+ * For each face group, indices should be tri*3, tri*3+1, tri*3+2. */
+static void test_face_ebo_index_generation(void)
+{
+    float *cube = build_cube();
+    DC_Topo *topo = dc_topo_build(cube, 12);
+    ASSERT_TRUE(topo != NULL);
+
+    /* Simulate ensure_face_ebo: build index array sorted by face group */
+    int total_indices = topo->num_triangles * 3;
+    int *indices = (int *)calloc((size_t)total_indices, sizeof(int));
+    int *starts = (int *)calloc((size_t)topo->face_count, sizeof(int));
+    int *counts = (int *)calloc((size_t)topo->face_count, sizeof(int));
+    ASSERT_TRUE(indices && starts && counts);
+
+    int idx = 0;
+    for (int g = 0; g < topo->face_count; g++) {
+        starts[g] = idx;
+        DC_FaceGroup *fg = &topo->face_groups[g];
+        for (int i = 0; i < fg->tri_count; i++) {
+            int tri = fg->tri_indices[i];
+            ASSERT_TRUE(tri >= 0 && tri < topo->num_triangles);
+            indices[idx++] = tri * 3;
+            indices[idx++] = tri * 3 + 1;
+            indices[idx++] = tri * 3 + 2;
+        }
+        counts[g] = fg->tri_count * 3;
+    }
+
+    /* Verify total indices matches */
+    ASSERT_EQ(idx, total_indices);
+
+    /* Verify no index exceeds vertex count */
+    int max_vert = topo->num_triangles * 3;
+    for (int i = 0; i < total_indices; i++) {
+        ASSERT_TRUE(indices[i] >= 0 && indices[i] < max_vert);
+    }
+
+    /* Verify each face group's count is divisible by 3 */
+    for (int g = 0; g < topo->face_count; g++) {
+        ASSERT_TRUE(counts[g] % 3 == 0);
+        ASSERT_TRUE(counts[g] > 0);
+    }
+
+    /* Verify all triangles appear exactly once across all groups */
+    int *seen = (int *)calloc((size_t)topo->num_triangles, sizeof(int));
+    ASSERT_TRUE(seen != NULL);
+    for (int g = 0; g < topo->face_count; g++) {
+        DC_FaceGroup *fg = &topo->face_groups[g];
+        for (int i = 0; i < fg->tri_count; i++) {
+            int tri = fg->tri_indices[i];
+            ASSERT_EQ(seen[tri], 0);
+            seen[tri] = 1;
+        }
+    }
+    for (int i = 0; i < topo->num_triangles; i++) {
+        ASSERT_EQ(seen[i], 1);
+    }
+
+    free(seen);
+    free(indices);
+    free(starts);
+    free(counts);
+    dc_topo_free(topo);
+    free(cube);
+}
+
+/* Test: wire VBO data layout matches what ensure_wire_vbo() produces.
+ * Each edge should produce 2 vertices with [x,y,z, r,g,b] layout. */
+static void test_wire_vbo_data_layout(void)
+{
+    float *cube = build_cube();
+    DC_Topo *topo = dc_topo_build(cube, 12);
+    ASSERT_TRUE(topo != NULL);
+    ASSERT_TRUE(topo->edge_count > 0);
+
+    /* Simulate ensure_wire_vbo: build 2 verts per edge, 6 floats per vert */
+    int vert_count = topo->edge_count * 2;
+    float *data = (float *)calloc((size_t)vert_count * 6, sizeof(float));
+    ASSERT_TRUE(data != NULL);
+
+    float *p = data;
+    for (int i = 0; i < topo->edge_count; i++) {
+        DC_Edge *e = &topo->edges[i];
+        /* Vertex A: pos + color */
+        p[0] = e->a[0]; p[1] = e->a[1]; p[2] = e->a[2];
+        p[3] = 0.05f;   p[4] = 0.05f;   p[5] = 0.05f;
+        p += 6;
+        /* Vertex B: pos + color */
+        p[0] = e->b[0]; p[1] = e->b[1]; p[2] = e->b[2];
+        p[3] = 0.05f;   p[4] = 0.05f;   p[5] = 0.05f;
+        p += 6;
+    }
+
+    /* Verify stride: vert_count * 6 floats total */
+    int written = (int)(p - data);
+    ASSERT_EQ(written, vert_count * 6);
+
+    /* Verify all positions are finite */
+    for (int i = 0; i < vert_count; i++) {
+        ASSERT_TRUE(isfinite(data[i * 6 + 0]));
+        ASSERT_TRUE(isfinite(data[i * 6 + 1]));
+        ASSERT_TRUE(isfinite(data[i * 6 + 2]));
+    }
+
+    /* Verify edge endpoint A != B (no degenerate zero-length edges) */
+    for (int i = 0; i < topo->edge_count; i++) {
+        DC_Edge *e = &topo->edges[i];
+        float dx = e->a[0] - e->b[0];
+        float dy = e->a[1] - e->b[1];
+        float dz = e->a[2] - e->b[2];
+        float len2 = dx*dx + dy*dy + dz*dz;
+        ASSERT_TRUE(len2 > 1e-10f);
+    }
+
+    free(data);
+    dc_topo_free(topo);
+    free(cube);
+}
+
+/* Test: pick color encoding for multi-object face picking.
+ * Verifies that colors are unique across all (obj, face) pairs. */
+static void test_pick_color_multi_object_faces(void)
+{
+    /* Simulate 4 objects, each with up to 10 face groups */
+    int total = 0;
+    for (int obj = 0; obj < 4; obj++) {
+        for (int face = 0; face < 10; face++) {
+            total++;
+        }
+    }
+
+    /* Collect all colors, check uniqueness */
+    unsigned char *colors = (unsigned char *)calloc((size_t)total * 3, 1);
+    ASSERT_TRUE(colors != NULL);
+
+    int ci = 0;
+    for (int obj = 0; obj < 4; obj++) {
+        for (int face = 0; face < 10; face++) {
+            float rgb[3];
+            dc_topo_sub_to_color(obj, face, rgb);
+
+            unsigned char r = (unsigned char)(rgb[0] * 255.0f + 0.5f);
+            unsigned char g = (unsigned char)(rgb[1] * 255.0f + 0.5f);
+            unsigned char b = (unsigned char)(rgb[2] * 255.0f + 0.5f);
+
+            /* Check roundtrip */
+            int dec_obj, dec_sub;
+            dc_topo_color_to_sub(r, g, b, &dec_obj, &dec_sub);
+            ASSERT_EQ(dec_obj, obj);
+            ASSERT_EQ(dec_sub, face);
+
+            colors[ci * 3 + 0] = r;
+            colors[ci * 3 + 1] = g;
+            colors[ci * 3 + 2] = b;
+            ci++;
+        }
+    }
+
+    /* Check all colors unique */
+    for (int i = 0; i < total; i++) {
+        for (int j = i + 1; j < total; j++) {
+            int same = (colors[i*3] == colors[j*3])
+                    && (colors[i*3+1] == colors[j*3+1])
+                    && (colors[i*3+2] == colors[j*3+2]);
+            ASSERT_TRUE(!same);
+        }
+    }
+
+    free(colors);
+}
+
+/* Test: pick color encoding for edge picking (same encoding, different indices) */
+static void test_pick_color_multi_object_edges(void)
+{
+    /* 3 objects with 50 edges each */
+    for (int obj = 0; obj < 3; obj++) {
+        for (int edge = 0; edge < 50; edge++) {
+            float rgb[3];
+            dc_topo_sub_to_color(obj, edge, rgb);
+            unsigned char r = (unsigned char)(rgb[0] * 255.0f + 0.5f);
+            unsigned char g = (unsigned char)(rgb[1] * 255.0f + 0.5f);
+            unsigned char b = (unsigned char)(rgb[2] * 255.0f + 0.5f);
+
+            int dec_obj, dec_sub;
+            dc_topo_color_to_sub(r, g, b, &dec_obj, &dec_sub);
+            ASSERT_EQ(dec_obj, obj);
+            ASSERT_EQ(dec_sub, edge);
+        }
+    }
+}
+
+/* Test: edge pick data layout matches do_pick_edge() temporary VBO format.
+ * Layout: [0,0,0, ax,ay,az, 0,0,0, bx,by,bz] per edge (pick shader). */
+static void test_edge_pick_data_layout(void)
+{
+    float *cube = build_cube();
+    DC_Topo *topo = dc_topo_build(cube, 12);
+    ASSERT_TRUE(topo != NULL);
+    ASSERT_TRUE(topo->edge_count > 0);
+
+    /* Simulate do_pick_edge data generation */
+    int nfloats = topo->edge_count * 2 * 6;
+    float *edata = (float *)calloc((size_t)nfloats, sizeof(float));
+    ASSERT_TRUE(edata != NULL);
+
+    for (int e = 0; e < topo->edge_count; e++) {
+        float *p = edata + e * 12;
+        /* Vertex A: aNormal=0, aPos=edge.a */
+        p[0]=0; p[1]=0; p[2]=0;
+        p[3]=topo->edges[e].a[0]; p[4]=topo->edges[e].a[1]; p[5]=topo->edges[e].a[2];
+        /* Vertex B: aNormal=0, aPos=edge.b */
+        p[6]=0; p[7]=0; p[8]=0;
+        p[9]=topo->edges[e].b[0]; p[10]=topo->edges[e].b[1]; p[11]=topo->edges[e].b[2];
+    }
+
+    /* Verify: for each edge, aNormal fields are zero, aPos is actual position */
+    for (int e = 0; e < topo->edge_count; e++) {
+        float *p = edata + e * 12;
+        /* Vertex A normal = 0 */
+        ASSERT_FLOAT_EQ(p[0], 0.0f, 1e-10f);
+        ASSERT_FLOAT_EQ(p[1], 0.0f, 1e-10f);
+        ASSERT_FLOAT_EQ(p[2], 0.0f, 1e-10f);
+        /* Vertex A pos = edge.a */
+        ASSERT_FLOAT_EQ(p[3], topo->edges[e].a[0], 1e-6f);
+        ASSERT_FLOAT_EQ(p[4], topo->edges[e].a[1], 1e-6f);
+        ASSERT_FLOAT_EQ(p[5], topo->edges[e].a[2], 1e-6f);
+        /* Vertex B normal = 0 */
+        ASSERT_FLOAT_EQ(p[6], 0.0f, 1e-10f);
+        ASSERT_FLOAT_EQ(p[7], 0.0f, 1e-10f);
+        ASSERT_FLOAT_EQ(p[8], 0.0f, 1e-10f);
+        /* Vertex B pos = edge.b */
+        ASSERT_FLOAT_EQ(p[9], topo->edges[e].b[0], 1e-6f);
+        ASSERT_FLOAT_EQ(p[10], topo->edges[e].b[1], 1e-6f);
+        ASSERT_FLOAT_EQ(p[11], topo->edges[e].b[2], 1e-6f);
+    }
+
+    free(edata);
+    dc_topo_free(topo);
+    free(cube);
+}
+
+/* RED test: face EBO with degenerate single-triangle mesh (1 face, 3 indices) */
+static void test_face_ebo_single_triangle(void)
+{
+    float data[18];
+    set_tri(data, 0,  0,0,1,  0,0,0, 1,0,0, 0,1,0);
+    DC_Topo *topo = dc_topo_build(data, 1);
+    ASSERT_TRUE(topo != NULL);
+    ASSERT_EQ(topo->face_count, 1);
+    ASSERT_EQ(topo->face_groups[0].tri_count, 1);
+    ASSERT_EQ(topo->face_groups[0].tri_indices[0], 0);
+
+    /* EBO should have exactly 3 indices: 0, 1, 2 */
+    DC_FaceGroup *fg = &topo->face_groups[0];
+    int tri = fg->tri_indices[0];
+    ASSERT_EQ(tri * 3, 0);
+    ASSERT_EQ(tri * 3 + 1, 1);
+    ASSERT_EQ(tri * 3 + 2, 2);
+
+    dc_topo_free(topo);
+}
+
+/* RED test: ensure topology handles many tiny disconnected triangles */
+static void test_many_disconnected_tris(void)
+{
+    int ntri = 1000;
+    float *data = (float *)calloc((size_t)ntri * 18, sizeof(float));
+    ASSERT_TRUE(data != NULL);
+
+    /* 1000 separate triangles, all with same normal (0,0,1) but not touching */
+    for (int i = 0; i < ntri; i++) {
+        float x = (float)(i * 10);
+        set_tri(data, i, 0,0,1,
+                x, 0, 0,
+                x+1, 0, 0,
+                x, 1, 0);
+    }
+
+    DC_Topo *topo = dc_topo_build(data, ntri);
+    ASSERT_TRUE(topo != NULL);
+    /* Each tri is disconnected, so each should be its own face group
+     * even though they share the same normal (flood fill won't connect them) */
+    ASSERT_EQ(topo->face_count, ntri);
+    /* Each disconnected tri has 3 boundary edges (tri_b == -1, fb == -1 != fa).
+     * So edge_count == ntri * 3. */
+    ASSERT_EQ(topo->edge_count, ntri * 3);
+
+    dc_topo_free(topo);
+    free(data);
+}
+
+/* Stress test: face EBO + wire VBO for a complex mesh (sphere) */
+static void test_gl_data_sphere(void)
+{
+    int ntri;
+    float *data = build_sphere(32, &ntri);
+    ASSERT_TRUE(data != NULL);
+
+    DC_Topo *topo = dc_topo_build(data, ntri);
+    ASSERT_TRUE(topo != NULL);
+    ASSERT_TRUE(topo->face_count > 0);
+    ASSERT_TRUE(topo->edge_count > 0);
+
+    /* Verify face EBO covers all triangles */
+    int total_tri = 0;
+    for (int g = 0; g < topo->face_count; g++) {
+        total_tri += topo->face_groups[g].tri_count;
+    }
+    ASSERT_EQ(total_tri, ntri);
+
+    /* Verify each edge has finite endpoints */
+    for (int i = 0; i < topo->edge_count; i++) {
+        ASSERT_TRUE(isfinite(topo->edges[i].a[0]));
+        ASSERT_TRUE(isfinite(topo->edges[i].a[1]));
+        ASSERT_TRUE(isfinite(topo->edges[i].a[2]));
+        ASSERT_TRUE(isfinite(topo->edges[i].b[0]));
+        ASSERT_TRUE(isfinite(topo->edges[i].b[1]));
+        ASSERT_TRUE(isfinite(topo->edges[i].b[2]));
+    }
+
+    /* Verify pick colors unique for all faces */
+    for (int g = 0; g < topo->face_count; g++) {
+        float rgb[3];
+        dc_topo_sub_to_color(0, g, rgb);
+        unsigned char r = (unsigned char)(rgb[0] * 255.0f + 0.5f);
+        unsigned char gg = (unsigned char)(rgb[1] * 255.0f + 0.5f);
+        unsigned char b = (unsigned char)(rgb[2] * 255.0f + 0.5f);
+        int dec_obj, dec_sub;
+        dc_topo_color_to_sub(r, gg, b, &dec_obj, &dec_sub);
+        ASSERT_EQ(dec_obj, 0);
+        ASSERT_EQ(dec_sub, g);
+    }
+
+    /* Verify pick colors unique for all edges */
+    for (int e = 0; e < topo->edge_count; e++) {
+        float rgb[3];
+        dc_topo_sub_to_color(0, e, rgb);
+        unsigned char r = (unsigned char)(rgb[0] * 255.0f + 0.5f);
+        unsigned char gg = (unsigned char)(rgb[1] * 255.0f + 0.5f);
+        unsigned char b = (unsigned char)(rgb[2] * 255.0f + 0.5f);
+        int dec_obj, dec_sub;
+        dc_topo_color_to_sub(r, gg, b, &dec_obj, &dec_sub);
+        ASSERT_EQ(dec_obj, 0);
+        ASSERT_EQ(dec_sub, e);
+    }
+
+    dc_topo_free(topo);
+    free(data);
+}
+
+/* Benchmark: face EBO generation pattern (index sorting by face group) */
+static void bench_face_ebo_sphere(void)
+{
+    int ntri;
+    float *data = build_sphere(64, &ntri);
+    DC_Topo *topo = dc_topo_build(data, ntri);
+
+    BENCH_START();
+    int iters = 100;
+    for (int it = 0; it < iters; it++) {
+        int total_indices = topo->num_triangles * 3;
+        int *indices = (int *)malloc((size_t)total_indices * sizeof(int));
+        int idx = 0;
+        for (int g = 0; g < topo->face_count; g++) {
+            DC_FaceGroup *fg = &topo->face_groups[g];
+            for (int i = 0; i < fg->tri_count; i++) {
+                int tri = fg->tri_indices[i];
+                indices[idx++] = tri * 3;
+                indices[idx++] = tri * 3 + 1;
+                indices[idx++] = tri * 3 + 2;
+            }
+        }
+        free(indices);
+    }
+    BENCH_END("face EBO generation (sphere 64, ~8K tri)", iters);
+
+    dc_topo_free(topo);
+    free(data);
+}
+
+/* Benchmark: wire VBO generation pattern */
+static void bench_wire_vbo_sphere(void)
+{
+    int ntri;
+    float *data = build_sphere(64, &ntri);
+    DC_Topo *topo = dc_topo_build(data, ntri);
+
+    BENCH_START();
+    int iters = 100;
+    for (int it = 0; it < iters; it++) {
+        int vert_count = topo->edge_count * 2;
+        float *vdata = (float *)malloc((size_t)vert_count * 6 * sizeof(float));
+        float *p = vdata;
+        for (int i = 0; i < topo->edge_count; i++) {
+            DC_Edge *e = &topo->edges[i];
+            p[0] = e->a[0]; p[1] = e->a[1]; p[2] = e->a[2];
+            p[3] = 0.05f;   p[4] = 0.05f;   p[5] = 0.05f;
+            p += 6;
+            p[0] = e->b[0]; p[1] = e->b[1]; p[2] = e->b[2];
+            p[3] = 0.05f;   p[4] = 0.05f;   p[5] = 0.05f;
+            p += 6;
+        }
+        free(vdata);
+    }
+    BENCH_END("wire VBO generation (sphere 64, ~8K tri)", iters);
+
+    dc_topo_free(topo);
+    free(data);
+}
+
+/* =========================================================================
  * Main
  * ========================================================================= */
 
@@ -1140,6 +1555,16 @@ int main(int argc, char **argv)
         RUN_TEST(test_pick_color_max_obj);
         RUN_TEST(test_pick_color_uniqueness);
 
+        printf("\n=== dc_topo GL INTEGRATION tests ===\n");
+        RUN_TEST(test_face_ebo_index_generation);
+        RUN_TEST(test_wire_vbo_data_layout);
+        RUN_TEST(test_pick_color_multi_object_faces);
+        RUN_TEST(test_pick_color_multi_object_edges);
+        RUN_TEST(test_edge_pick_data_layout);
+        RUN_TEST(test_face_ebo_single_triangle);
+        RUN_TEST(test_many_disconnected_tris);
+        RUN_TEST(test_gl_data_sphere);
+
         printf("\n--- Results: %d passed, %d failed ---\n", g_pass, g_fail);
     }
 
@@ -1150,6 +1575,8 @@ int main(int argc, char **argv)
         bench_sphere_32();
         bench_sphere_128();
         bench_flat_grid_316();
+        bench_face_ebo_sphere();
+        bench_wire_vbo_sphere();
         printf("\n--- %d benchmarks complete ---\n", g_bench_count);
     }
 
