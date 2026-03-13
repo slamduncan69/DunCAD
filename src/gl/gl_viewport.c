@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gl/gl_viewport.h"
 #include "gl/stl_loader.h"
+#include "gl/dc_topo.h"
 #include "core/log.h"
 
 #include <epoxy/gl.h>
@@ -203,9 +204,17 @@ struct DC_GlViewport {
         int         line_start;
         int         line_end;
         float       translate[3]; /* viewport-space offset for live preview */
+        /* Topology (built lazily on first face/edge pick) */
+        DC_Topo    *topo;
     }            objects[256];
     int          obj_count;
     int          selected_obj;   /* -1 = none */
+
+    /* Selection mode */
+    DC_SelectMode sel_mode;     /* DC_SEL_OBJECT / FACE / EDGE */
+    int          selected_face; /* face group index in selected obj (-1 = none) */
+    int          selected_edge; /* edge index in selected obj (-1 = none) */
+    int          show_wireframe;
 
     /* Color-ID pick framebuffer */
     GLuint       pick_fbo;
@@ -810,8 +819,8 @@ on_key_pressed_gl(GtkEventControllerKey *ctrl, guint keyval,
     (void)ctrl; (void)keycode; (void)mods;
     DC_GlViewport *vp = data;
 
-    /* Set constraint on press, clear on release (no toggle — avoids key repeat bounce) */
     switch (keyval) {
+    /* Axis constraints for object move */
     case GDK_KEY_x: case GDK_KEY_X:
         vp->move_constraint = 1;
         return TRUE;
@@ -820,6 +829,14 @@ on_key_pressed_gl(GtkEventControllerKey *ctrl, guint keyval,
         return TRUE;
     case GDK_KEY_z: case GDK_KEY_Z:
         vp->move_constraint = 3;
+        return TRUE;
+    /* Tab cycles selection mode: Object → Face → Edge → Object */
+    case GDK_KEY_Tab:
+        dc_gl_viewport_cycle_select_mode(vp);
+        return TRUE;
+    /* W toggles wireframe overlay */
+    case GDK_KEY_w: case GDK_KEY_W:
+        dc_gl_viewport_toggle_wireframe(vp);
         return TRUE;
     }
     return FALSE;
@@ -1074,6 +1091,9 @@ dc_gl_viewport_new(void)
     vp->show_grid = 1;
     vp->show_axes = 1;
     vp->selected_obj = -1;
+    vp->sel_mode = DC_SEL_OBJECT;
+    vp->selected_face = -1;
+    vp->selected_edge = -1;
 
     /* Create GtkGLArea */
     vp->gl_area = gtk_gl_area_new();
@@ -1127,8 +1147,10 @@ dc_gl_viewport_free(DC_GlViewport *vp)
 {
     if (!vp) return;
     dc_stl_free(vp->mesh);
-    for (int i = 0; i < vp->obj_count; i++)
+    for (int i = 0; i < vp->obj_count; i++) {
         dc_stl_free(vp->objects[i].mesh);
+        dc_topo_free(vp->objects[i].topo);
+    }
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "gl_viewport freed");
     free(vp);
 }
@@ -1260,12 +1282,16 @@ dc_gl_viewport_clear_objects(DC_GlViewport *vp)
         }
     }
 
-    for (int i = 0; i < vp->obj_count; i++)
+    for (int i = 0; i < vp->obj_count; i++) {
         dc_stl_free(vp->objects[i].mesh);
+        dc_topo_free(vp->objects[i].topo);
+    }
 
     memset(vp->objects, 0, sizeof(vp->objects));
     vp->obj_count = 0;
     vp->selected_obj = -1;
+    vp->selected_face = -1;
+    vp->selected_edge = -1;
 
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
 }
@@ -1537,4 +1563,98 @@ int
 dc_gl_viewport_get_locked(DC_GlViewport *vp)
 {
     return vp ? vp->locked : 0;
+}
+
+/* =========================================================================
+ * Selection mode + topology
+ * ========================================================================= */
+
+/* Build topology for an object if not already built. */
+static void
+ensure_topo(DC_GlViewport *vp, int obj_idx)
+{
+    if (obj_idx < 0 || obj_idx >= vp->obj_count) return;
+    if (vp->objects[obj_idx].topo) return;
+    DC_StlMesh *m = vp->objects[obj_idx].mesh;
+    if (!m || m->num_triangles <= 0) return;
+    vp->objects[obj_idx].topo = dc_topo_build(m->data, m->num_triangles);
+}
+
+DC_SelectMode
+dc_gl_viewport_get_select_mode(DC_GlViewport *vp)
+{
+    return vp ? vp->sel_mode : DC_SEL_OBJECT;
+}
+
+void
+dc_gl_viewport_set_select_mode(DC_GlViewport *vp, DC_SelectMode mode)
+{
+    if (!vp) return;
+    if (mode < DC_SEL_OBJECT || mode > DC_SEL_EDGE) return;
+    vp->sel_mode = mode;
+    vp->selected_face = -1;
+    vp->selected_edge = -1;
+
+    /* Build topology for all objects if entering face/edge mode */
+    if (mode != DC_SEL_OBJECT) {
+        for (int i = 0; i < vp->obj_count; i++)
+            ensure_topo(vp, i);
+    }
+
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+void
+dc_gl_viewport_cycle_select_mode(DC_GlViewport *vp)
+{
+    if (!vp) return;
+    DC_SelectMode next = (DC_SelectMode)((vp->sel_mode + 1) % 3);
+    dc_gl_viewport_set_select_mode(vp, next);
+    static const char *names[] = {"Object", "Face", "Edge"};
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "select mode: %s", names[next]);
+}
+
+int
+dc_gl_viewport_get_selected_face(DC_GlViewport *vp)
+{
+    return vp ? vp->selected_face : -1;
+}
+
+int
+dc_gl_viewport_get_selected_edge(DC_GlViewport *vp)
+{
+    return vp ? vp->selected_edge : -1;
+}
+
+int
+dc_gl_viewport_get_face_count(DC_GlViewport *vp, int obj_idx)
+{
+    if (!vp || obj_idx < 0 || obj_idx >= vp->obj_count) return 0;
+    ensure_topo(vp, obj_idx);
+    DC_Topo *t = vp->objects[obj_idx].topo;
+    return t ? t->face_count : 0;
+}
+
+int
+dc_gl_viewport_get_edge_count(DC_GlViewport *vp, int obj_idx)
+{
+    if (!vp || obj_idx < 0 || obj_idx >= vp->obj_count) return 0;
+    ensure_topo(vp, obj_idx);
+    DC_Topo *t = vp->objects[obj_idx].topo;
+    return t ? t->edge_count : 0;
+}
+
+void
+dc_gl_viewport_toggle_wireframe(DC_GlViewport *vp)
+{
+    if (!vp) return;
+    vp->show_wireframe = !vp->show_wireframe;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+int
+dc_gl_viewport_get_wireframe(DC_GlViewport *vp)
+{
+    return vp ? vp->show_wireframe : 0;
 }

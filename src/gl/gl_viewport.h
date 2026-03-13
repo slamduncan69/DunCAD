@@ -130,4 +130,33 @@ void dc_gl_viewport_select_object_quiet(DC_GlViewport *vp, int obj_idx);
 void dc_gl_viewport_set_locked(DC_GlViewport *vp, int locked);
 int  dc_gl_viewport_get_locked(DC_GlViewport *vp);
 
+/* ---- Selection modes ---- */
+
+typedef enum {
+    DC_SEL_OBJECT = 0,  /* Select whole objects (default) */
+    DC_SEL_FACE   = 1,  /* Select face groups (coplanar triangles) */
+    DC_SEL_EDGE   = 2,  /* Select edges (face boundaries) */
+} DC_SelectMode;
+
+/* Get/set selection mode. */
+DC_SelectMode dc_gl_viewport_get_select_mode(DC_GlViewport *vp);
+void dc_gl_viewport_set_select_mode(DC_GlViewport *vp, DC_SelectMode mode);
+
+/* Cycle selection mode: Object → Face → Edge → Object.
+ * Clears sub-element selection, builds topology if needed. */
+void dc_gl_viewport_cycle_select_mode(DC_GlViewport *vp);
+
+/* Get selected face/edge index within selected object (-1 if none). */
+int dc_gl_viewport_get_selected_face(DC_GlViewport *vp);
+int dc_gl_viewport_get_selected_edge(DC_GlViewport *vp);
+
+/* Get face/edge counts for an object (triggers topology build if needed).
+ * Returns 0 if obj_idx is out of range or has no mesh. */
+int dc_gl_viewport_get_face_count(DC_GlViewport *vp, int obj_idx);
+int dc_gl_viewport_get_edge_count(DC_GlViewport *vp, int obj_idx);
+
+/* Toggle wireframe overlay. */
+void dc_gl_viewport_toggle_wireframe(DC_GlViewport *vp);
+int  dc_gl_viewport_get_wireframe(DC_GlViewport *vp);
+
 #endif /* DC_GL_VIEWPORT_H */

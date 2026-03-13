@@ -542,6 +542,11 @@ cmd_gl_state(void)
     int axes    = dc_gl_viewport_get_axes(vp);
     int obj_cnt = dc_gl_viewport_get_object_count(vp);
     int sel     = dc_gl_viewport_get_selected(vp);
+    DC_SelectMode smode = dc_gl_viewport_get_select_mode(vp);
+    int sel_face = dc_gl_viewport_get_selected_face(vp);
+    int sel_edge = dc_gl_viewport_get_selected_edge(vp);
+    int wireframe = dc_gl_viewport_get_wireframe(vp);
+    static const char *mode_names[] = {"object", "face", "edge"};
 
     DC_StringBuilder *sb = dc_sb_new();
     if (!sb) return strdup("{\"error\":\"alloc\"}\n");
@@ -554,9 +559,15 @@ cmd_gl_state(void)
         ortho ? "true" : "false");
 
     dc_sb_appendf(sb,
-        "\"display\":{\"grid\":%s,\"axes\":%s},",
+        "\"display\":{\"grid\":%s,\"axes\":%s,\"wireframe\":%s},",
         grid ? "true" : "false",
-        axes ? "true" : "false");
+        axes ? "true" : "false",
+        wireframe ? "true" : "false");
+
+    dc_sb_appendf(sb,
+        "\"selection\":{\"mode\":\"%s\",\"object\":%d,"
+        "\"face\":%d,\"edge\":%d},",
+        mode_names[smode], sel, sel_face, sel_edge);
 
     dc_sb_appendf(sb,
         "\"objects\":{\"count\":%d,\"selected\":%d}}\n",
@@ -637,6 +648,68 @@ cmd_gl_select(const char *args)
 
     dc_gl_viewport_select_object(vp, idx);
     return strdup("{\"ok\":true}\n");
+}
+
+static char *
+cmd_gl_select_mode(const char *args)
+{
+    DC_GlViewport *vp = get_viewport();
+    if (!vp) return strdup("{\"error\":\"no gl viewport\"}\n");
+
+    if (!args || !*args) {
+        /* No args = cycle mode */
+        dc_gl_viewport_cycle_select_mode(vp);
+    } else {
+        char mode[16] = {0};
+        sscanf(args, "%15s", mode);
+        if (strcmp(mode, "object") == 0)
+            dc_gl_viewport_set_select_mode(vp, DC_SEL_OBJECT);
+        else if (strcmp(mode, "face") == 0)
+            dc_gl_viewport_set_select_mode(vp, DC_SEL_FACE);
+        else if (strcmp(mode, "edge") == 0)
+            dc_gl_viewport_set_select_mode(vp, DC_SEL_EDGE);
+        else
+            return strdup("{\"error\":\"usage: gl_select_mode [object|face|edge]\"}\n");
+    }
+
+    static const char *names[] = {"object", "face", "edge"};
+    DC_SelectMode m = dc_gl_viewport_get_select_mode(vp);
+    char *buf = malloc(128);
+    snprintf(buf, 128, "{\"ok\":true,\"mode\":\"%s\"}\n", names[m]);
+    return buf;
+}
+
+static char *
+cmd_gl_wireframe(void)
+{
+    DC_GlViewport *vp = get_viewport();
+    if (!vp) return strdup("{\"error\":\"no gl viewport\"}\n");
+
+    dc_gl_viewport_toggle_wireframe(vp);
+    int on = dc_gl_viewport_get_wireframe(vp);
+    char *buf = malloc(64);
+    snprintf(buf, 64, "{\"ok\":true,\"wireframe\":%s}\n", on ? "true" : "false");
+    return buf;
+}
+
+static char *
+cmd_gl_topo(const char *args)
+{
+    DC_GlViewport *vp = get_viewport();
+    if (!vp) return strdup("{\"error\":\"no gl viewport\"}\n");
+
+    int idx;
+    if (!args || sscanf(args, "%d", &idx) != 1) {
+        idx = dc_gl_viewport_get_selected(vp);
+        if (idx < 0)
+            return strdup("{\"error\":\"no object selected — usage: gl_topo [index]\"}\n");
+    }
+
+    int faces = dc_gl_viewport_get_face_count(vp, idx);
+    int edges = dc_gl_viewport_get_edge_count(vp, idx);
+    char *buf = malloc(128);
+    snprintf(buf, 128, "{\"object\":%d,\"faces\":%d,\"edges\":%d}\n", idx, faces, edges);
+    return buf;
 }
 
 static char *
@@ -834,6 +907,9 @@ cmd_help(void)
         "\"gl_grid\","
         "\"gl_axes\","
         "\"gl_select <index>\","
+        "\"gl_select_mode [object|face|edge]\","
+        "\"gl_wireframe\","
+        "\"gl_topo [index]\","
         "\"gl_load <stl_path>\","
         "\"gl_clear\","
         "\"gl_capture <png_path>\""
@@ -912,6 +988,9 @@ dispatch(const char *cmd)
     if (strcmp(name, "gl_grid")   == 0) return cmd_gl_grid();
     if (strcmp(name, "gl_axes")   == 0) return cmd_gl_axes();
     if (strcmp(name, "gl_select") == 0) return cmd_gl_select(args);
+    if (strcmp(name, "gl_select_mode") == 0) return cmd_gl_select_mode(args);
+    if (strcmp(name, "gl_wireframe") == 0) return cmd_gl_wireframe();
+    if (strcmp(name, "gl_topo")   == 0) return cmd_gl_topo(args);
     if (strcmp(name, "gl_load")   == 0) return cmd_gl_load(args);
     if (strcmp(name, "gl_clear")  == 0) return cmd_gl_clear();
     if (strcmp(name, "gl_capture") == 0) return cmd_gl_capture(args);
