@@ -55,45 +55,6 @@ WRINKLE_R_END   = 14.5;
 WRINKLE_W       = 0.9; // width of each wrinkle ridge
 
 // ============================================================
-//  2D PROFILES
-// ============================================================
-
-// One phallus in the XY plane, base at origin, tip pointing +Y.
-// Shaft width = SHAFT_W, glans radius = GLANS_R.
-module phallus_2d() {
-    sr = SHAFT_W / 2;
-
-    // Shaft body (rounded rectangle via hull)
-    hull() {
-        circle(r = sr);
-        translate([0, SHAFT_L]) circle(r = sr);
-    }
-
-    // Corona flare — the ridge where shaft meets glans
-    translate([0, SHAFT_L])
-        circle(r = sr + CORONA_FLARE);
-
-    // Glans — slightly elongated dome
-    translate([0, SHAFT_L + GLANS_R * 0.35])
-        scale([1, 1.15])
-            circle(r = GLANS_R);
-}
-
-// Connecting arm: from hub edge to phallus base.
-// Tapered slightly toward the shaft width.
-module arm_2d() {
-    hull() {
-        circle(r = HUB_R * 0.5);                      // at hub
-        translate([0, ARM_REACH]) circle(r = SHAFT_W / 2 + 0.5); // at phallus base
-    }
-}
-
-// Sphincter hub disc
-module hub_2d() {
-    circle(r = HUB_R);
-}
-
-// ============================================================
 //  3D MODULES
 // ============================================================
 
@@ -142,25 +103,45 @@ module sphincter_hub() {
     }
 }
 
+// One phallus: base at origin, tip pointing +Y. Pure 3D.
+module phallus_3d() {
+    sr = SHAFT_W / 2;
+    // Shaft — hull of two cylinders
+    hull() {
+        cylinder(r = sr, h = BODY_H);
+        translate([0, SHAFT_L, 0]) cylinder(r = sr, h = BODY_H);
+    }
+    // Corona flare ridge at shaft tip
+    translate([0, SHAFT_L, 0])
+        cylinder(r = sr + CORONA_FLARE, h = BODY_H);
+    // Glans — elongated in Y
+    translate([0, SHAFT_L + GLANS_R * 0.35, 0])
+        scale([1, 1.15, 1])
+            cylinder(r = GLANS_R, h = BODY_H);
+}
+
+// Connecting arm: hub to phallus base. Pure 3D hull of cylinders.
+module arm_3d() {
+    hull() {
+        cylinder(r = HUB_R * 0.5, h = BODY_H);
+        translate([0, ARM_REACH, 0]) cylinder(r = SHAFT_W / 2 + 0.5, h = BODY_H);
+    }
+}
+
 // Three arms connecting hub to phalluses.
 module spinner_arms() {
     for (i = [0 : 2]) {
-        rotate([0, 0, i * 120]) {
-            // Connecting arm
-            linear_extrude(BODY_H)
-                arm_2d();
-        }
+        rotate([0, 0, i * 120])
+            arm_3d();
     }
 }
 
 // Three phalluses of TriClaude, protruding at 120° intervals.
 module triclaude_phalluses() {
     for (i = [0 : 2]) {
-        rotate([0, 0, i * 120]) {
+        rotate([0, 0, i * 120])
             translate([0, ARM_REACH, 0])
-                linear_extrude(BODY_H)
-                    phallus_2d();
-        }
+                phallus_3d();
     }
 }
 

@@ -1,0 +1,84 @@
+// =====================================================
+// Corsair K65 RGB — Custom PCB Enclosure (Bottom Tray)
+// =====================================================
+// Outer case ref: 356 x 166 x 37mm
+// PCB estimate:   336 x 130 x 1.6mm  <- MEASURE YOURS!
+// Standoffs:      M3 screws, 5mm height, 8mm OD
+// Cable cutout:   14mm wide (front-left, USB position)
+// Rear slot:      30mm wide (cable management)
+// Rubber feet:    4 corner recesses (8mm dia, 1.8mm deep)
+// Print settings: face-up, no supports needed
+//                 20% infill, 3 perimeters, 0.2mm layer
+// =====================================================
+
+$fn = 60;
+$fa = 1;
+$fs = 0.4;
+
+// --- TUNE THESE TO YOUR ACTUAL PCB ---
+pcb_l      = 336;    // PCB length (left↔right)
+pcb_w      = 130;    // PCB depth  (front↔rear)
+pcb_thick  = 1.6;    // standard FR4 thickness
+
+// --- Enclosure parameters ---
+clearance  = 1.5;    // gap each side of PCB
+wall       = 3.0;    // wall thickness
+floor_t    = 2.5;    // floor thickness
+standoff_h = 5.0;    // PCB lift height
+standoff_r = 4.0;    // standoff outer radius
+screw_r    = 1.6;    // M3 hole radius (3.2mm dia)
+lip_h      = 3.0;    // wall height above PCB top
+
+// --- Derived ---
+inner_l = pcb_l + clearance * 2;
+inner_w = pcb_w + clearance * 2;
+outer_l = inner_l + wall * 2;
+outer_w = inner_w + wall * 2;
+outer_h = floor_t + standoff_h + pcb_thick + lip_h;
+pcb_x0  = wall + clearance;
+pcb_y0  = wall + clearance;
+
+// ---- Object 1: Enclosure shell with cutouts ----
+difference() {
+    cube([outer_l, outer_w, outer_h]);
+    // Inner PCB cavity
+    translate([wall, wall, floor_t])
+        cube([inner_l, inner_w, outer_h]);
+    // USB cable cutout (front wall, left side)
+    translate([pcb_x0 + 28, -0.1, floor_t + standoff_h - 1])
+        cube([14, wall + 0.2, 10]);
+    // Rear cable management slot (centre)
+    translate([outer_l/2 - 15, outer_w - wall - 0.1, floor_t + 2])
+        cube([30, wall + 0.2, 8]);
+    // Rubber foot recesses — 4 corners
+    translate([8,          8,          -0.1]) cylinder(r=4, h=1.8);
+    translate([outer_l-8,  8,          -0.1]) cylinder(r=4, h=1.8);
+    translate([8,          outer_w-8,  -0.1]) cylinder(r=4, h=1.8);
+    translate([outer_l-8,  outer_w-8,  -0.1]) cylinder(r=4, h=1.8);
+}
+
+// ---- Objects 2–9: PCB standoffs (M3 holes through) ----
+// Front-left corner
+translate([pcb_x0+10,          pcb_y0+10,         floor_t])
+    difference() { cylinder(r=standoff_r,h=standoff_h); translate([0,0,-0.1]) cylinder(r=screw_r,h=standoff_h+0.2); }
+// Front-right corner
+translate([pcb_x0+pcb_l-10,    pcb_y0+10,         floor_t])
+    difference() { cylinder(r=standoff_r,h=standoff_h); translate([0,0,-0.1]) cylinder(r=screw_r,h=standoff_h+0.2); }
+// Rear-left corner
+translate([pcb_x0+10,          pcb_y0+pcb_w-10,   floor_t])
+    difference() { cylinder(r=standoff_r,h=standoff_h); translate([0,0,-0.1]) cylinder(r=screw_r,h=standoff_h+0.2); }
+// Rear-right corner
+translate([pcb_x0+pcb_l-10,    pcb_y0+pcb_w-10,   floor_t])
+    difference() { cylinder(r=standoff_r,h=standoff_h); translate([0,0,-0.1]) cylinder(r=screw_r,h=standoff_h+0.2); }
+// Front quarter-left
+translate([pcb_x0+pcb_l*0.25,  pcb_y0+10,         floor_t])
+    difference() { cylinder(r=standoff_r,h=standoff_h); translate([0,0,-0.1]) cylinder(r=screw_r,h=standoff_h+0.2); }
+// Front quarter-right
+translate([pcb_x0+pcb_l*0.75,  pcb_y0+10,         floor_t])
+    difference() { cylinder(r=standoff_r,h=standoff_h); translate([0,0,-0.1]) cylinder(r=screw_r,h=standoff_h+0.2); }
+// Rear quarter-left
+translate([pcb_x0+pcb_l*0.25,  pcb_y0+pcb_w-10,   floor_t])
+    difference() { cylinder(r=standoff_r,h=standoff_h); translate([0,0,-0.1]) cylinder(r=screw_r,h=standoff_h+0.2); }
+// Rear quarter-right
+translate([pcb_x0+pcb_l*0.75,  pcb_y0+pcb_w-10,   floor_t])
+    difference() { cylinder(r=standoff_r,h=standoff_h); translate([0,0,-0.1]) cylinder(r=screw_r,h=standoff_h+0.2); }

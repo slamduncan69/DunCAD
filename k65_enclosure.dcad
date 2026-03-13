@@ -1,0 +1,145 @@
+$fn = 60;
+$fa = 1;
+$fs = 0.4;
+
+// ============================================================
+//  Corsair K65 TKL — Custom Drop-In PCB Enclosure
+//  Open-top tray. PCB drops in on M3 standoffs.
+//  Split L/R at centreline for printing on standard beds.
+//
+//  KEY PARAMS TO MEASURE AND ADJUST:
+//    pcb_w  — measure your PCB left-to-right (typ ~350-355mm)
+//    pcb_d  — measure PCB front-to-back   (typ ~128-135mm)
+//    usb_ox — USB offset from left edge of PCB (measure on board)
+// ============================================================
+
+pcb_w      = 352;   // PCB width  (left-right)
+pcb_d      = 130;   // PCB depth  (front-back)
+pcb_thick  = 1.6;   // standard PCB thickness
+clearance  = 1.2;   // clearance gap around PCB on all sides
+wall       = 3.5;   // wall thickness
+floor_h    = 3.0;   // floor thickness
+standoff_h = 4.0;   // standoff post height (PCB sits this high off floor)
+standoff_r = 3.5;   // standoff outer radius
+screw_r    = 1.6;   // M3 screw hole radius (tap or use heat-set insert)
+lip        = 5.0;   // wall height above PCB surface (to retain board)
+cr         = 4.0;   // exterior corner radius
+usb_w      = 15;    // USB-A port cutout width
+usb_h      = 8;     // USB-A port cutout height
+pin_r      = 2.0;   // split alignment pin radius
+pin_h      = 12.0;  // split alignment pin height
+
+// --- Derived dimensions ---
+inner_w = pcb_w + clearance * 2;
+inner_d = pcb_d + clearance * 2;
+outer_w = inner_w + wall * 2;
+outer_d = inner_d + wall * 2;
+total_h = floor_h + standoff_h + pcb_thick + lip;
+pcb_z   = floor_h + standoff_h;
+split_x = outer_w / 2;
+
+// USB cutout: ~30% from PCB left edge (K65 cable exit point)
+usb_ox = wall + clearance + pcb_w * 0.3;
+
+// ============================================================
+//  Rounded box — explicit 4-corner hull (no nested for loops)
+// ============================================================
+module rbox(w, d, h) {
+    hull() {
+        translate([cr,     cr,     0]) cylinder(r=cr, h=h);
+        translate([w - cr, cr,     0]) cylinder(r=cr, h=h);
+        translate([cr,     d - cr, 0]) cylinder(r=cr, h=h);
+        translate([w - cr, d - cr, 0]) cylinder(r=cr, h=h);
+    }
+}
+
+// ============================================================
+//  PCB standoff post (M3 threaded hole or heat-set)
+//  px/py = position relative to PCB corner [0,0]
+// ============================================================
+module standoff(px, py) {
+    ox = wall + clearance + px;
+    oy = wall + clearance + py;
+    translate([ox, oy, floor_h])
+        difference() {
+            cylinder(r=standoff_r, h=standoff_h);
+            translate([0, 0, -0.1]) cylinder(r=screw_r, h=standoff_h + 0.2);
+        }
+}
+
+// ============================================================
+//  Full assembled shell (we'll intersect this to make halves)
+// ============================================================
+module full_shell() {
+    difference() {
+        union() {
+            // Outer shell with inner cavity
+            difference() {
+                rbox(outer_w, outer_d, total_h);
+                translate([wall, wall, floor_h])
+                    cube([inner_w, inner_d, total_h]);
+            }
+            // 8-point standoff grid
+            standoff(6,              6);
+            standoff(pcb_w - 6,      6);
+            standoff(6,              pcb_d - 6);
+            standoff(pcb_w - 6,      pcb_d - 6);
+            standoff(pcb_w * 0.33,   6);
+            standoff(pcb_w * 0.66,   6);
+            standoff(pcb_w * 0.33,   pcb_d - 6);
+            standoff(pcb_w * 0.66,   pcb_d - 6);
+        }
+        // USB-A cutout on rear wall
+        translate([usb_ox - usb_w/2, outer_d - wall - 0.1, pcb_z + 2])
+            cube([usb_w, wall + 0.2, usb_h]);
+        // 4x corner bolt holes through floor (M3, for desk mount / bottom plate)
+        translate([cr + 1.5,         cr + 1.5,         -0.1]) cylinder(r=screw_r, h=floor_h + 0.2);
+        translate([outer_w - cr - 1.5, cr + 1.5,       -0.1]) cylinder(r=screw_r, h=floor_h + 0.2);
+        translate([cr + 1.5,         outer_d - cr - 1.5, -0.1]) cylinder(r=screw_r, h=floor_h + 0.2);
+        translate([outer_w - cr - 1.5, outer_d - cr - 1.5, -0.1]) cylinder(r=screw_r, h=floor_h + 0.2);
+    }
+}
+
+// ============================================================
+//  LEFT HALF  — male alignment pins on split face
+//  Print this piece. Front-left of keyboard.
+// ============================================================
+module left_half() {
+    intersection() {
+        full_shell();
+        translate([-1, -1, -1])
+            cube([split_x + 1, outer_d + 2, total_h + 2]);
+    }
+    // Male pins
+    translate([split_x - 0.1, outer_d * 0.25, floor_h + 2])
+        cylinder(r=pin_r, h=pin_h);
+    translate([split_x - 0.1, outer_d * 0.75, floor_h + 2])
+        cylinder(r=pin_r, h=pin_h);
+}
+
+// ============================================================
+//  RIGHT HALF — female alignment sockets on split face
+//  Print this piece. Front-right of keyboard.
+// ============================================================
+module right_half() {
+    difference() {
+        intersection() {
+            full_shell();
+            translate([split_x, -1, -1])
+                cube([outer_w + 2, outer_d + 2, total_h + 2]);
+        }
+        // Female sockets
+        translate([split_x - 0.1, outer_d * 0.25, floor_h + 2])
+            cylinder(r=pin_r + 0.3, h=pin_h + 1);
+        translate([split_x - 0.1, outer_d * 0.75, floor_h + 2])
+            cylinder(r=pin_r + 0.3, h=pin_h + 1);
+    }
+}
+
+// ============================================================
+//  RENDER — both halves assembled for preview
+//  To export for printing, comment out the other half
+//  and render each separately.
+// ============================================================
+left_half();
+right_half();

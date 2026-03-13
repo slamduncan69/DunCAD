@@ -92,6 +92,26 @@ static inline void ts_val_free(ts_val *v) {
     }
 }
 
+/* Deep-copy a ts_val so the caller owns an independent copy.
+ * Scalars/ranges are value types — returned as-is.
+ * Vectors and strings are heap-allocated — we allocate fresh storage. */
+static inline ts_val ts_val_clone(ts_val v);
+static inline ts_val ts_val_clone(ts_val v) {
+    if (v.type == TS_VAL_STRING && v.str != NULL) {
+        ts_val r = v;
+        r.str = strdup(v.str);
+        return r;
+    }
+    if (v.type == TS_VAL_VECTOR && v.count > 0 && v.items != NULL) {
+        ts_val r = v;
+        r.items = (ts_val *)malloc((size_t)v.count * sizeof(ts_val));
+        for (int i = 0; i < v.count; i++)
+            r.items[i] = ts_val_clone(v.items[i]);
+        return r;
+    }
+    return v;  /* NUMBER, BOOL, RANGE, UNDEF — plain value copy */
+}
+
 static inline double ts_val_vec_get(ts_val v, int idx) {
     if (v.type == TS_VAL_VECTOR && idx >= 0 && idx < v.count)
         return ts_val_to_num(v.items[idx]);
@@ -342,7 +362,8 @@ static ts_val ts_eval_expr(ts_ast *node, ts_env *env) {
             }
         } else if (iter.type == TS_VAL_VECTOR) {
             for (int i = 0; i < iter.count; i++) {
-                ts_env_set(cenv, node->iter_var, iter.items[i]);
+                /* Clone: ts_env_set takes ownership and will free on next set */
+                ts_env_set(cenv, node->iter_var, ts_val_clone(iter.items[i]));
                 if (node->cond) {
                     ts_val c = ts_eval_expr(node->cond, cenv);
                     if (!ts_val_is_true(c)) continue;
@@ -956,7 +977,8 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
         } else if (range.type == TS_VAL_VECTOR) {
             for (int i = 0; i < range.count; i++) {
                 if (ts_env_cancelled(env)) break;
-                ts_env_set(loop_env, node->iter_var, range.items[i]);
+                /* Clone: ts_env_set takes ownership and will free on next set */
+                ts_env_set(loop_env, node->iter_var, ts_val_clone(range.items[i]));
                 ts_mesh child = ts_eval_geometry(node->body, loop_env, xform);
                 ts_mesh_append(&result, &child);
                 ts_mesh_free(&child);

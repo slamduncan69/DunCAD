@@ -49,6 +49,7 @@
 #include "ts_extrude.h"
 #include "ts_random.h"
 #include "ts_opencl.h"
+#include "ts_eval.h"   /* for ts_interpret_ex in Minkowski interp tests */
 
 /* Global GPU context — initialized in main */
 static ts_gpu_ctx g_gpu;
@@ -1376,6 +1377,394 @@ static void test_csg_minkowski_red(void) {
     TS_PASS();
 }
 
+/* --- MINKOWSKI RIGOROUS SUITE --- */
+/* Helper: check mesh is watertight (every edge shared by exactly 2 tris) */
+static int mesh_is_watertight(const ts_mesh *m) {
+    /* Build edge table: for each directed edge (a,b), count occurrences.
+     * A watertight mesh has each undirected edge in exactly 2 triangles,
+     * meaning for each (a,b) there exists (b,a). */
+    typedef struct { int a, b; } edge_t;
+    int ne = m->tri_count * 3;
+    edge_t *edges = (edge_t *)malloc((size_t)ne * sizeof(edge_t));
+    if (!edges) return 0;
+
+    for (int i = 0; i < m->tri_count; i++) {
+        int *idx = m->tris[i].idx;
+        edges[i*3+0] = (edge_t){ idx[0], idx[1] };
+        edges[i*3+1] = (edge_t){ idx[1], idx[2] };
+        edges[i*3+2] = (edge_t){ idx[2], idx[0] };
+    }
+
+    /* For each directed edge, search for its reverse */
+    int unpaired = 0;
+    for (int i = 0; i < ne; i++) {
+        int found = 0;
+        for (int j = 0; j < ne; j++) {
+            if (i == j) continue;
+            if (edges[i].a == edges[j].b && edges[i].b == edges[j].a) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) unpaired++;
+    }
+
+    free(edges);
+    return unpaired == 0;
+}
+
+/* Helper: check all triangle normals face outward (positive signed volume) */
+static int mesh_has_consistent_normals(const ts_mesh *m) {
+    double vol = mesh_signed_volume(m);
+    return vol > 0.0;  /* positive = outward-facing CCW winding */
+}
+
+/* Helper: compute axis-aligned bounding box */
+static void mesh_aabb(const ts_mesh *m, double min[3], double max[3]) {
+    min[0] = min[1] = min[2] = 1e30;
+    max[0] = max[1] = max[2] = -1e30;
+    for (int i = 0; i < m->vert_count; i++) {
+        for (int j = 0; j < 3; j++) {
+            if (m->verts[i].pos[j] < min[j]) min[j] = m->verts[i].pos[j];
+            if (m->verts[i].pos[j] > max[j]) max[j] = m->verts[i].pos[j];
+        }
+    }
+}
+
+/* GREEN: Minkowski of cube + sphere = rounded cube.
+ * Volume must be between sphere vol and (cube_side + sphere_diam)^3.
+ * This is the core fidget-spinner shape operation. */
+static void test_mink_cube_sphere_green(void) {
+    ts_mesh cube = ts_mesh_init(), sphere = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(2, 2, 2, &cube);       /* 2x2x2 cube centered at origin */
+    ts_gen_sphere(0.5, 16, &sphere);    /* r=0.5 sphere (diameter=1) */
+
+    int ret = ts_csg_minkowski(&cube, &sphere, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    /* Minkowski(2x2x2 cube, r=0.5 sphere) = rounded cube with:
+     * - body: 3x3x3 = 27 (cube expanded by diameter in each axis)
+     * - minus corners (replaced by sphere octants) and edges (cylinder segments)
+     * Exact: 27 - corner_excess + edge_cylinders... but bounded:
+     * Lower bound: original cube vol = 8
+     * Upper bound: (2+1)^3 = 27 (bounding box) */
+    TS_ASSERT_TRUE(vol > 8.0);
+    TS_ASSERT_TRUE(vol < 27.0);
+
+    /* AABB should be 3x3x3 (cube side + sphere diameter in each axis) */
+    double mn[3], mx[3];
+    mesh_aabb(&out, mn, mx);
+    for (int i = 0; i < 3; i++) {
+        TS_ASSERT_NEAR(mx[i] - mn[i], 3.0, 0.15);
+    }
+
+    ts_mesh_free(&cube); ts_mesh_free(&sphere); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: Minkowski of cylinder + small sphere = rounded cylinder.
+ * Fidget spinner arms are exactly this operation. */
+static void test_mink_cylinder_sphere_green(void) {
+    ts_mesh cyl = ts_mesh_init(), sph = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cylinder(10.0, 2.0, 2.0, 24, &cyl);  /* h=10, r=2, fn=24 */
+    ts_gen_sphere(0.3, 12, &sph);                 /* small rounding sphere */
+
+    int ret = ts_csg_minkowski(&cyl, &sph, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    /* Original cylinder vol = pi * r^2 * h = pi * 4 * 10 = ~125.66 */
+    double cyl_vol = M_PI * 2.0 * 2.0 * 10.0;
+    /* Rounded cylinder must be larger than original */
+    TS_ASSERT_TRUE(vol > cyl_vol);
+    /* But not absurdly large — bounded by (r+0.3)^2 * pi * (h+0.6) */
+    double max_vol = M_PI * 2.3 * 2.3 * 10.6;
+    TS_ASSERT_TRUE(vol < max_vol * 1.1);
+
+    /* Height should increase by sphere diameter */
+    double mn[3], mx[3];
+    mesh_aabb(&out, mn, mx);
+    double height = mx[2] - mn[2];
+    TS_ASSERT_NEAR(height, 10.6, 0.3);
+
+    ts_mesh_free(&cyl); ts_mesh_free(&sph); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: Minkowski of two spheres = larger sphere.
+ * Minkowski(sphere(r1), sphere(r2)) = sphere(r1+r2). */
+static void test_mink_sphere_sphere_green(void) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_sphere(1.0, 16, &a);   /* r=1 */
+    ts_gen_sphere(0.5, 12, &b);   /* r=0.5 */
+
+    int ret = ts_csg_minkowski(&a, &b, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    /* Expected: sphere of r=1.5, vol = (4/3)*pi*1.5^3 = ~14.137 */
+    double expected = (4.0/3.0) * M_PI * 1.5 * 1.5 * 1.5;
+    /* Hull of discrete sphere vertices won't be perfect, allow 15% */
+    TS_ASSERT_NEAR(vol, expected, expected * 0.15);
+
+    /* AABB should be ~3x3x3 (diameter = 2*1.5 = 3) */
+    double mn[3], mx[3];
+    mesh_aabb(&out, mn, mx);
+    for (int i = 0; i < 3; i++) {
+        TS_ASSERT_NEAR(mx[i] - mn[i], 3.0, 0.4);
+    }
+
+    ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: Asymmetric Minkowski — rectangle + small cube = expanded box.
+ * Tests non-uniform scaling correctness. */
+static void test_mink_asymmetric_green(void) {
+    ts_mesh rect = ts_mesh_init(), small = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(4, 2, 1, &rect);        /* 4x2x1 box */
+    ts_gen_cube(0.5, 0.5, 0.5, &small); /* 0.5x0.5x0.5 cube */
+
+    int ret = ts_csg_minkowski(&rect, &small, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    /* Minkowski of two boxes = box with dimensions (4+0.5) x (2+0.5) x (1+0.5) */
+    double expected = 4.5 * 2.5 * 1.5;  /* = 16.875 */
+    TS_ASSERT_NEAR(vol, expected, 0.5);
+
+    /* Verify AABB dimensions */
+    double mn[3], mx[3];
+    mesh_aabb(&out, mn, mx);
+    TS_ASSERT_NEAR(mx[0] - mn[0], 4.5, 0.1);
+    TS_ASSERT_NEAR(mx[1] - mn[1], 2.5, 0.1);
+    TS_ASSERT_NEAR(mx[2] - mn[2], 1.5, 0.1);
+
+    ts_mesh_free(&rect); ts_mesh_free(&small); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: Mesh topology — Minkowski output must be watertight.
+ * Uses small meshes so the O(n^2) edge check is feasible. */
+static void test_mink_watertight_green(void) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(0.5, 0.5, 0.5, &b);
+
+    int ret = ts_csg_minkowski(&a, &b, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    /* Quickhull output should be watertight */
+    TS_ASSERT_TRUE(mesh_is_watertight(&out));
+
+    /* Normals should face outward (positive signed volume) */
+    TS_ASSERT_TRUE(mesh_has_consistent_normals(&out));
+
+    ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: Minkowski with translated inputs.
+ * Result center should be sum of input centers. */
+static void test_mink_translated_green(void) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    ts_gen_cube(1, 1, 1, &b);
+
+    /* Translate a to [3,0,0] and b to [0,2,0] */
+    for (int i = 0; i < a.vert_count; i++) a.verts[i].pos[0] += 3.0;
+    for (int i = 0; i < b.vert_count; i++) b.verts[i].pos[1] += 2.0;
+
+    int ret = ts_csg_minkowski(&a, &b, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    /* Volume should still be 8 (two unit cubes) */
+    double vol = fabs(mesh_signed_volume(&out));
+    TS_ASSERT_NEAR(vol, 8.0, 0.5);
+
+    /* Center of result AABB should be at (3, 2, 0) */
+    double mn[3], mx[3];
+    mesh_aabb(&out, mn, mx);
+    double cx = (mn[0] + mx[0]) * 0.5;
+    double cy = (mn[1] + mx[1]) * 0.5;
+    double cz = (mn[2] + mx[2]) * 0.5;
+    TS_ASSERT_NEAR(cx, 3.0, 0.1);
+    TS_ASSERT_NEAR(cy, 2.0, 0.1);
+    TS_ASSERT_NEAR(cz, 0.0, 0.1);
+
+    ts_mesh_free(&a); ts_mesh_free(&b); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: High-resolution Minkowski — cube + sphere with fn=32.
+ * Tests that higher vertex counts don't corrupt the hull. */
+static void test_mink_highres_green(void) {
+    ts_mesh cube = ts_mesh_init(), sphere = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &cube);
+    ts_gen_sphere(0.25, 32, &sphere);  /* fn=32, 561 verts */
+
+    int ret = ts_csg_minkowski(&cube, &sphere, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    TS_ASSERT_TRUE(out.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&out));
+    /* Cube 1x1x1 + sphere r=0.25 -> rounded box ~1.5^3 = 3.375 max */
+    TS_ASSERT_TRUE(vol > 1.0);   /* bigger than original cube */
+    TS_ASSERT_TRUE(vol < 3.375); /* smaller than bounding box */
+
+    /* Hull should produce a clean mesh */
+    TS_ASSERT_TRUE(mesh_has_consistent_normals(&out));
+
+    ts_mesh_free(&cube); ts_mesh_free(&sphere); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: Minkowski commutativity — minkowski(A,B) == minkowski(B,A).
+ * Volume must be identical regardless of argument order. */
+static void test_mink_commutative_green(void) {
+    ts_mesh a = ts_mesh_init(), b = ts_mesh_init();
+    ts_mesh out_ab = ts_mesh_init(), out_ba = ts_mesh_init();
+    ts_gen_cube(2, 1, 1, &a);
+    ts_gen_sphere(0.3, 12, &b);
+
+    int ret1 = ts_csg_minkowski(&a, &b, &out_ab);
+    int ret2 = ts_csg_minkowski(&b, &a, &out_ba);
+    TS_ASSERT_EQ_INT(ret1, TS_CSG_OK);
+    TS_ASSERT_EQ_INT(ret2, TS_CSG_OK);
+
+    double vol_ab = fabs(mesh_signed_volume(&out_ab));
+    double vol_ba = fabs(mesh_signed_volume(&out_ba));
+    /* Volumes should match within hull discretization tolerance */
+    TS_ASSERT_NEAR(vol_ab, vol_ba, vol_ab * 0.05);
+
+    ts_mesh_free(&a); ts_mesh_free(&b);
+    ts_mesh_free(&out_ab); ts_mesh_free(&out_ba);
+    TS_PASS();
+}
+
+/* GREEN: Minkowski with zero-size operand returns empty.
+ * Edge case: one mesh has no geometry. */
+static void test_mink_empty_input_green(void) {
+    ts_mesh a = ts_mesh_init(), empty = ts_mesh_init(), out = ts_mesh_init();
+    ts_gen_cube(1, 1, 1, &a);
+    /* empty stays with 0 verts, 0 tris */
+
+    int ret = ts_csg_minkowski(&a, &empty, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_OK);
+    /* Should return empty — can't minkowski with nothing */
+    TS_ASSERT_EQ_INT(out.tri_count, 0);
+
+    ts_mesh_free(&a); ts_mesh_free(&empty); ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: Minkowski with NULL inputs returns error. */
+static void test_mink_null_input_green(void) {
+    ts_mesh out = ts_mesh_init();
+    int ret = ts_csg_minkowski(NULL, NULL, &out);
+    TS_ASSERT_EQ_INT(ret, TS_CSG_ERROR);
+    ts_mesh_free(&out);
+    TS_PASS();
+}
+
+/* GREEN: End-to-end Minkowski via interpreter.
+ * This is the actual code path that crashed on the fidget spinner. */
+static void test_mink_interp_cube_sphere_green(void) {
+    const char *scad =
+        "$fn = 16;\n"
+        "minkowski() {\n"
+        "    cube([2,2,2], center=true);\n"
+        "    sphere(r=0.5);\n"
+        "}\n";
+
+    ts_parse_error err = {0};
+    ts_interpret_opts opts = {0};
+    opts.fn_override = 16;
+    opts.fa_override = 12;
+    opts.fs_override = 2;
+    opts.force_quality = 1;
+    ts_mesh result = ts_interpret_ex(scad, &err, &opts);
+    TS_ASSERT_TRUE(err.msg[0] == '\0');  /* no parse error */
+    TS_ASSERT_TRUE(result.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&result));
+    /* Same as direct test: must be > cube vol, < bounding box */
+    TS_ASSERT_TRUE(vol > 8.0);
+    TS_ASSERT_TRUE(vol < 27.0);
+
+    ts_mesh_free(&result);
+    TS_PASS();
+}
+
+/* GREEN: End-to-end Minkowski cylinder+sphere via interpreter.
+ * The fidget spinner arm shape. */
+static void test_mink_interp_cyl_sphere_green(void) {
+    const char *scad =
+        "$fn = 16;\n"
+        "minkowski() {\n"
+        "    cylinder(h=10, r=2, center=true);\n"
+        "    sphere(r=0.3);\n"
+        "}\n";
+
+    ts_parse_error err = {0};
+    ts_interpret_opts opts = {0};
+    opts.fn_override = 16;
+    opts.fa_override = 12;
+    opts.fs_override = 2;
+    opts.force_quality = 1;
+    ts_mesh result = ts_interpret_ex(scad, &err, &opts);
+    TS_ASSERT_TRUE(err.msg[0] == '\0');
+    TS_ASSERT_TRUE(result.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&result));
+    double cyl_vol = M_PI * 2.0 * 2.0 * 10.0;
+    TS_ASSERT_TRUE(vol > cyl_vol * 0.9);  /* at least ~cylinder vol */
+
+    ts_mesh_free(&result);
+    TS_PASS();
+}
+
+/* GREEN: End-to-end fidget spinner pattern:
+ * union of arms + bearing holes, all with minkowski rounding. */
+static void test_mink_interp_fidget_pattern_green(void) {
+    const char *scad =
+        "$fn = 12;\n"
+        "minkowski() {\n"
+        "    union() {\n"
+        "        cylinder(h=5, r=10, center=true);\n"
+        "        for (a = [0, 120, 240])\n"
+        "            rotate([0, 0, a])\n"
+        "                translate([20, 0, 0])\n"
+        "                    cylinder(h=5, r=8, center=true);\n"
+        "    }\n"
+        "    sphere(r=0.5);\n"
+        "}\n";
+
+    ts_parse_error err = {0};
+    ts_interpret_opts opts = {0};
+    opts.fn_override = 12;
+    opts.fa_override = 12;
+    opts.fs_override = 2;
+    opts.force_quality = 1;
+    ts_mesh result = ts_interpret_ex(scad, &err, &opts);
+    TS_ASSERT_TRUE(err.msg[0] == '\0');
+    TS_ASSERT_TRUE(result.tri_count > 0);
+
+    double vol = fabs(mesh_signed_volume(&result));
+    /* Must produce real geometry with positive volume */
+    TS_ASSERT_TRUE(vol > 100.0);
+
+    ts_mesh_free(&result);
+    TS_PASS();
+}
+
 /* ================================================================
  * SECTION 8: EXTRUSION TESTS
  * Linear extrude + rotate extrude
@@ -2367,6 +2756,23 @@ static void run_all_tests(void) {
     ts_section("CSG: minkowski (convex sum + hull)", TS_PAR_GPU);
     ts_run_test("csg_minkowski_green", test_csg_minkowski_green);
     ts_run_test("csg_minkowski_red", test_csg_minkowski_red);
+
+    ts_section("MINKOWSKI: rigorous shape tests", TS_PAR_GPU);
+    ts_run_test("mink_cube_sphere", test_mink_cube_sphere_green);
+    ts_run_test("mink_cylinder_sphere", test_mink_cylinder_sphere_green);
+    ts_run_test("mink_sphere_sphere", test_mink_sphere_sphere_green);
+    ts_run_test("mink_asymmetric_boxes", test_mink_asymmetric_green);
+    ts_run_test("mink_watertight", test_mink_watertight_green);
+    ts_run_test("mink_translated_inputs", test_mink_translated_green);
+    ts_run_test("mink_highres_fn32", test_mink_highres_green);
+    ts_run_test("mink_commutative", test_mink_commutative_green);
+    ts_run_test("mink_empty_input", test_mink_empty_input_green);
+    ts_run_test("mink_null_input", test_mink_null_input_green);
+
+    ts_section("MINKOWSKI: interpreter end-to-end", TS_PAR_SEQUENTIAL);
+    ts_run_test("mink_interp_cube_sphere", test_mink_interp_cube_sphere_green);
+    ts_run_test("mink_interp_cyl_sphere", test_mink_interp_cyl_sphere_green);
+    ts_run_test("mink_interp_fidget_pattern", test_mink_interp_fidget_pattern_green);
 
     /* --- Extrusion --- */
     ts_section("EXTRUDE: linear_extrude", TS_PAR_GPU);

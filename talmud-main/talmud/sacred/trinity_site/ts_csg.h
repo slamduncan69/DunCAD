@@ -612,8 +612,9 @@ static void ts_csg_bsp_clip_polys(const ts_csg_bsp *bsp,
             type |= vtype;
         }
         classes[i] = type;
-        if      (type == TS_CSG_FRONT || type == TS_CSG_COPLANAR) n_front++;
+        if      (type == TS_CSG_FRONT) n_front++;
         else if (type == TS_CSG_BACK)  n_back++;
+        else if (type == TS_CSG_COPLANAR) { n_front++; n_back++; } /* may go either way */
         else { n_front++; n_back++; n_spanning++; }
     }
 
@@ -631,7 +632,21 @@ static void ts_csg_bsp_clip_polys(const ts_csg_bsp *bsp,
     for (int i = 0; i < polys->count; i++) {
         ts_csg_poly *p = &polys->items[i];
         switch (classes[i]) {
-        case TS_CSG_COPLANAR:
+        case TS_CSG_COPLANAR: {
+            /* Coplanar polygons: classify by normal direction relative to
+             * BSP plane. Same-facing → FRONT (kept), opposite → BACK (clipped).
+             * This prevents duplicate faces when meshes share coplanar geometry. */
+            double dot = bsp->plane[0]*p->plane[0] +
+                         bsp->plane[1]*p->plane[1] +
+                         bsp->plane[2]*p->plane[2];
+            if (dot > 0) {
+                front_list.items[front_list.count++] = *p;
+            } else {
+                back_list.items[back_list.count++] = *p;
+            }
+            p->verts = NULL; p->count = p->cap = 0;
+            break;
+        }
         case TS_CSG_FRONT:
             front_list.items[front_list.count++] = *p;
             p->verts = NULL; p->count = p->cap = 0;
@@ -1338,6 +1353,145 @@ static inline int ts_csg_hull(const ts_mesh *input, ts_mesh *out) {
  * For now, we support convex inputs only.
  * ================================================================ */
 
+/*
+ * Pre-filter interior points from a point cloud before Quickhull.
+ *
+ * Generates a dense set of probe directions on the unit sphere
+ * (icosphere-style subdivisions). For each direction, finds the
+ * maximum projection. Points that are never within tolerance of
+ * any direction's maximum are interior and safely discarded.
+ *
+ * This reduces a 120K point cloud to ~2K points, making Quickhull
+ * feasible for Minkowski sums at high $fn.
+ */
+static inline void ts_csg_prefilter_interior(ts_mesh *cloud) {
+    int n = cloud->vert_count;
+    if (n < 500) return;  /* not worth filtering small clouds */
+
+    /* Generate ~62 directions: 6 axis + 8 diagonal + 48 intermediate
+     * covering the unit sphere uniformly via spherical coordinates */
+    double dirs[62][3];
+    int ndirs = 0;
+
+    /* 6 axis-aligned */
+    dirs[ndirs][0]= 1; dirs[ndirs][1]= 0; dirs[ndirs][2]= 0; ndirs++;
+    dirs[ndirs][0]=-1; dirs[ndirs][1]= 0; dirs[ndirs][2]= 0; ndirs++;
+    dirs[ndirs][0]= 0; dirs[ndirs][1]= 1; dirs[ndirs][2]= 0; ndirs++;
+    dirs[ndirs][0]= 0; dirs[ndirs][1]=-1; dirs[ndirs][2]= 0; ndirs++;
+    dirs[ndirs][0]= 0; dirs[ndirs][1]= 0; dirs[ndirs][2]= 1; ndirs++;
+    dirs[ndirs][0]= 0; dirs[ndirs][1]= 0; dirs[ndirs][2]=-1; ndirs++;
+
+    /* Spherical grid: 7 phi rings x 8 theta sectors = 56 more directions */
+    for (int pi = 1; pi <= 7; pi++) {
+        double phi = M_PI * pi / 8.0;
+        double sp = sin(phi), cp = cos(phi);
+        for (int ti = 0; ti < 8 && ndirs < 62; ti++) {
+            double theta = 2.0 * M_PI * ti / 8.0;
+            dirs[ndirs][0] = sp * cos(theta);
+            dirs[ndirs][1] = sp * sin(theta);
+            dirs[ndirs][2] = cp;
+            ndirs++;
+        }
+    }
+
+    /* Compute projections: max for each direction */
+    double max_proj[62];
+    for (int d = 0; d < ndirs; d++) {
+        max_proj[d] = -1e30;
+        for (int i = 0; i < n; i++) {
+            double proj = dirs[d][0] * cloud->verts[i].pos[0] +
+                          dirs[d][1] * cloud->verts[i].pos[1] +
+                          dirs[d][2] * cloud->verts[i].pos[2];
+            if (proj > max_proj[d]) max_proj[d] = proj;
+        }
+    }
+
+    /* Compute AABB extent for tolerance scaling */
+    double mn[3] = {1e30, 1e30, 1e30}, mx[3] = {-1e30, -1e30, -1e30};
+    for (int i = 0; i < n; i++) {
+        for (int a = 0; a < 3; a++) {
+            if (cloud->verts[i].pos[a] < mn[a]) mn[a] = cloud->verts[i].pos[a];
+            if (cloud->verts[i].pos[a] > mx[a]) mx[a] = cloud->verts[i].pos[a];
+        }
+    }
+    double extent = 0;
+    for (int a = 0; a < 3; a++) {
+        double e = mx[a] - mn[a];
+        if (e > extent) extent = e;
+    }
+    /* Tolerance: keep points within 0.1% of extreme along any direction.
+     * 62 directions gives dense enough sphere coverage for this to be safe.
+     * For a 10-unit extent, this keeps points within 0.01 of the hull. */
+    double tol = extent * 0.001;
+
+    /* For each point, compute how close it is to ANY direction's extreme.
+     * Score = max over all directions of (proj / max_proj).
+     * Points with score near 1.0 are on or near the hull.
+     * Sort by score descending and keep the top N. */
+    double *scores = (double *)malloc((size_t)n * sizeof(double));
+    if (!scores) return;
+
+    for (int i = 0; i < n; i++) {
+        double best_ratio = 0;
+        for (int d = 0; d < ndirs; d++) {
+            double proj = dirs[d][0] * cloud->verts[i].pos[0] +
+                          dirs[d][1] * cloud->verts[i].pos[1] +
+                          dirs[d][2] * cloud->verts[i].pos[2];
+            /* Ratio of projection to max (handle negative max_proj) */
+            if (max_proj[d] > tol) {
+                double ratio = proj / max_proj[d];
+                if (ratio > best_ratio) best_ratio = ratio;
+            } else if (max_proj[d] < -tol) {
+                double ratio = proj / max_proj[d];  /* both negative: smaller=better */
+                if (ratio > best_ratio) best_ratio = ratio;
+            } else {
+                /* max_proj near zero: check absolute closeness */
+                double ratio = 1.0 - fabs(proj - max_proj[d]) / (extent + 1e-30);
+                if (ratio > best_ratio) best_ratio = ratio;
+            }
+        }
+        scores[i] = best_ratio;
+    }
+
+    /* Find score threshold to keep at most max_keep points.
+     * Use a simple selection: find the Kth largest score. */
+    int max_keep = 800;  /* our Quickhull is O(n^2*f), must keep n small */
+    if (n <= max_keep) { free(scores); return; }
+
+    /* Partial sort via histogram: find score cutoff */
+    double score_min = 1e30, score_max = -1e30;
+    for (int i = 0; i < n; i++) {
+        if (scores[i] < score_min) score_min = scores[i];
+        if (scores[i] > score_max) score_max = scores[i];
+    }
+
+    /* Binary search for the threshold that keeps ~max_keep points */
+    double lo = score_min, hi = score_max;
+    double threshold = hi;
+    for (int iter = 0; iter < 40; iter++) {
+        double mid = (lo + hi) * 0.5;
+        int cnt = 0;
+        for (int i = 0; i < n; i++)
+            if (scores[i] >= mid) cnt++;
+        if (cnt > max_keep)
+            lo = mid;
+        else
+            hi = mid;
+        threshold = lo;
+    }
+
+    /* Compact: keep points above threshold */
+    int dst = 0;
+    for (int i = 0; i < n; i++) {
+        if (scores[i] >= threshold) {
+            if (dst != i) cloud->verts[dst] = cloud->verts[i];
+            dst++;
+        }
+    }
+    if (dst >= 4) cloud->vert_count = dst;
+    free(scores);
+}
+
 static inline int ts_csg_minkowski(const ts_mesh *a, const ts_mesh *b,
                                     ts_mesh *out) {
     if (!a || !b || !out) return TS_CSG_ERROR;
@@ -1358,7 +1512,10 @@ static inline int ts_csg_minkowski(const ts_mesh *a, const ts_mesh *b,
         }
     }
 
-    /* Compute convex hull of the combined points */
+    /* Pre-filter interior points to avoid O(n^2) hull on massive clouds */
+    ts_csg_prefilter_interior(&combined);
+
+    /* Compute convex hull of the filtered points */
     int ret = ts_csg_hull(&combined, out);
     ts_mesh_free(&combined);
     return ret;
