@@ -159,4 +159,26 @@ int dc_gl_viewport_get_edge_count(DC_GlViewport *vp, int obj_idx);
 void dc_gl_viewport_toggle_wireframe(DC_GlViewport *vp);
 int  dc_gl_viewport_get_wireframe(DC_GlViewport *vp);
 
+/* ---- Face geometry queries ---- */
+
+/* Get the averaged normal of a face group (in mesh/GL space).
+ * Returns 0 on success, -1 if invalid. */
+int dc_gl_viewport_get_face_normal(DC_GlViewport *vp, int obj_idx, int face_idx,
+                                    float *nx, float *ny, float *nz);
+
+/* Get the centroid of a face group (in mesh/GL space).
+ * Averaged position of all triangle vertices. Returns 0 on success. */
+int dc_gl_viewport_get_face_centroid(DC_GlViewport *vp, int obj_idx, int face_idx,
+                                      float *cx, float *cy, float *cz);
+
+/* Get the boundary polygon of a face group projected onto its plane.
+ * Returns malloc'd array of [x,y] pairs in 2D (caller frees).
+ * Sets *count to number of vertices. Returns NULL on failure.
+ * Also outputs the 3D centroid and rotation angles (Euler ZYX, degrees)
+ * needed to orient the extrusion along the face normal. */
+float *dc_gl_viewport_get_face_boundary(DC_GlViewport *vp, int obj_idx,
+                                         int face_idx, int *count,
+                                         float *centroid_out,
+                                         float *rot_angles_out);
+
 #endif /* DC_GL_VIEWPORT_H */

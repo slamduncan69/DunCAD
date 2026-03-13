@@ -4000,6 +4000,60 @@ static const char HELP_MEMORY_ACTIVE_SESSION_S017[] =
 "  - Three walls needed to override system prompt defaults.\n"
 "  - Language design before implementation saves rework.\n";
 
+static const char HELP_MEMORY_ACTIVE_SESSION_S018[] =
+"Session s018 (Face Extrude from Viewport)\n"
+"\n"
+"Session s018 — Right-Click Face Extrude + Boundary Extraction\n"
+"\n"
+"DATE: 2026-03-13\n"
+"\n"
+"FEATURES ADDED:\n"
+"  1. Face extrude context menu (shape_menu.c)\n"
+"     Right-click in Face mode with selected face shows\n"
+"     'Face Operations > Extrude Face...' in popover.\n"
+"     Only appears when sel_mode==DC_SEL_FACE && face>=0.\n"
+"\n"
+"  2. Extrude parameter dialog (shape_menu.c)\n"
+"     GtkPopover with spin buttons: Height, Taper, Twist.\n"
+"     Checkboxes: Center, Inward (cut).\n"
+"     Confirm generates code + triggers re-render.\n"
+"     Cancel closes popover. Auto-cleanup on close.\n"
+"\n"
+"  3. Face geometry query API (gl_viewport.h/c)\n"
+"     dc_gl_viewport_get_face_normal() — SCAD-space normal\n"
+"     dc_gl_viewport_get_face_centroid() — SCAD-space center\n"
+"     dc_gl_viewport_get_face_boundary() — 2D polygon on\n"
+"       face plane + centroid + Euler rotation angles.\n"
+"     GL-to-SCAD transform: x=x, y=-z, z=y.\n"
+"\n"
+"  4. Boundary polygon extraction (gl_viewport.c)\n"
+"     Half-edge algorithm: collect all tri edges in face\n"
+"     group, cancel interior edges (reverse pairs), chain\n"
+"     remaining boundary edges into ordered polygon.\n"
+"     Project to 2D via local coordinate frame (U,V on\n"
+"     face plane). Round to 3 decimal places.\n"
+"\n"
+"  5. SCAD code generation (shape_menu.c)\n"
+"     Generates: translate + rotate + linear_extrude +\n"
+"     polygon. Wraps with union() or difference() (inward).\n"
+"     Inward adds mirror([0,0,1]) to reverse direction.\n"
+"     Indents both original and extrude code in CSG block.\n"
+"\n"
+"TECHNICAL DETAILS:\n"
+"  - Rotation: ry=atan2(Nx,Nz), rx=-atan2(Ny,horiz)\n"
+"  - Forward decls for close_popover, get_selected_line_range\n"
+"  - ExtrudeCtx owns boundary_2d (freed on popover close)\n"
+"  - Re-render via dc_scad_preview_render() after insert\n"
+"\n"
+"FILES: gl_viewport.h, gl_viewport.c, shape_menu.c\n"
+"\n"
+"TESTS: 9/9 pass, 0 failures\n"
+"\n"
+"LESSONS:\n"
+"  - Half-edge boundary: cancel reverse pairs, chain rest.\n"
+"  - GL Y-up vs SCAD Z-up: x=x, y=-z, z=y for all geom.\n"
+"  - Popover lifecycle: free ExtrudeCtx in closed signal.\n";
+
 static const char HELP_REFERENCE_DOCTRINE_PERSISTENCE[] =
 "The Persistence Doctrine\n"
 "\n"
@@ -4354,6 +4408,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s015", HELP_MEMORY_ACTIVE_SESSION_S015 },
     { "memory.active.session-s016", HELP_MEMORY_ACTIVE_SESSION_S016 },
     { "memory.active.session-s017", HELP_MEMORY_ACTIVE_SESSION_S017 },
+    { "memory.active.session-s018", HELP_MEMORY_ACTIVE_SESSION_S018 },
     { "reference.cubeiform", HELP_REFERENCE_CUBEIFORM },
     { "reference.cubeiform.primitives", HELP_REFERENCE_CUBEIFORM_PRIMITIVES },
     { "reference.cubeiform.transforms", HELP_REFERENCE_CUBEIFORM_TRANSFORMS },

@@ -2293,3 +2293,243 @@ dc_gl_viewport_get_wireframe(DC_GlViewport *vp)
 {
     return vp ? vp->show_wireframe : 0;
 }
+
+/* =========================================================================
+ * Face geometry queries
+ * ========================================================================= */
+
+int
+dc_gl_viewport_get_face_normal(DC_GlViewport *vp, int obj_idx, int face_idx,
+                                float *nx, float *ny, float *nz)
+{
+    if (!vp || obj_idx < 0 || obj_idx >= vp->obj_count) return -1;
+    ensure_topo(vp, obj_idx);
+    DC_Topo *t = vp->objects[obj_idx].topo;
+    if (!t || face_idx < 0 || face_idx >= t->face_count) return -1;
+
+    /* Mesh data is in GL space (STL loader swaps Y/Z):
+     *   GL_x = SCAD_x, GL_y = SCAD_z, GL_z = -SCAD_y
+     * Convert back: SCAD_x = GL_x, SCAD_y = -GL_z, SCAD_z = GL_y */
+    DC_FaceGroup *fg = &t->face_groups[face_idx];
+    *nx =  fg->normal[0];
+    *ny = -fg->normal[2];
+    *nz =  fg->normal[1];
+    return 0;
+}
+
+int
+dc_gl_viewport_get_face_centroid(DC_GlViewport *vp, int obj_idx, int face_idx,
+                                  float *cx, float *cy, float *cz)
+{
+    if (!vp || obj_idx < 0 || obj_idx >= vp->obj_count) return -1;
+    ensure_topo(vp, obj_idx);
+    DC_Topo *t = vp->objects[obj_idx].topo;
+    if (!t || face_idx < 0 || face_idx >= t->face_count) return -1;
+
+    DC_StlMesh *m = vp->objects[obj_idx].mesh;
+    if (!m) return -1;
+
+    DC_FaceGroup *fg = &t->face_groups[face_idx];
+    float sx = 0, sy = 0, sz = 0;
+    int count = 0;
+    for (int i = 0; i < fg->tri_count; i++) {
+        int tri = fg->tri_indices[i];
+        for (int v = 0; v < 3; v++) {
+            float pos[3];
+            dc_topo_tri_vert(m->data, tri, v, pos);
+            sx += pos[0]; sy += pos[1]; sz += pos[2];
+            count++;
+        }
+    }
+    if (count == 0) return -1;
+
+    /* Convert from GL space to SCAD space */
+    *cx =  sx / count;
+    *cy = -sz / count;
+    *cz =  sy / count;
+    return 0;
+}
+
+float *
+dc_gl_viewport_get_face_boundary(DC_GlViewport *vp, int obj_idx,
+                                  int face_idx, int *count,
+                                  float *centroid_out,
+                                  float *rot_angles_out)
+{
+    if (!vp || !count || obj_idx < 0 || obj_idx >= vp->obj_count) return NULL;
+    ensure_topo(vp, obj_idx);
+    DC_Topo *t = vp->objects[obj_idx].topo;
+    if (!t || face_idx < 0 || face_idx >= t->face_count) return NULL;
+
+    DC_StlMesh *m = vp->objects[obj_idx].mesh;
+    if (!m) return NULL;
+
+    DC_FaceGroup *fg = &t->face_groups[face_idx];
+
+    /* Step 1: Collect all half-edges of triangles in this face group.
+     * Boundary edges appear exactly once (interior edges appear twice
+     * in opposite directions and cancel out). */
+    int max_edges = fg->tri_count * 3;
+    /* Store half-edges as pairs of quantized vertex keys for matching */
+    typedef struct { int ax, ay, az, bx, by, bz; float a[3], b[3]; } HE;
+    HE *halfs = (HE *)malloc((size_t)max_edges * sizeof(HE));
+    if (!halfs) return NULL;
+
+    int he_count = 0;
+    for (int i = 0; i < fg->tri_count; i++) {
+        int tri = fg->tri_indices[i];
+        float v[3][3];
+        for (int vi = 0; vi < 3; vi++)
+            dc_topo_tri_vert(m->data, tri, vi, v[vi]);
+        int pairs[3][2] = {{0,1},{1,2},{2,0}};
+        for (int e = 0; e < 3; e++) {
+            int a = pairs[e][0], b = pairs[e][1];
+            HE *h = &halfs[he_count++];
+            h->ax = dc_topo_quant(v[a][0]); h->ay = dc_topo_quant(v[a][1]); h->az = dc_topo_quant(v[a][2]);
+            h->bx = dc_topo_quant(v[b][0]); h->by = dc_topo_quant(v[b][1]); h->bz = dc_topo_quant(v[b][2]);
+            memcpy(h->a, v[a], 3 * sizeof(float));
+            memcpy(h->b, v[b], 3 * sizeof(float));
+        }
+    }
+
+    /* Step 2: Find boundary half-edges (those without a matching reverse) */
+    /* Mark each half-edge: if its reverse exists, cancel both */
+    int *is_boundary = (int *)calloc((size_t)he_count, sizeof(int));
+    if (!is_boundary) { free(halfs); return NULL; }
+    for (int i = 0; i < he_count; i++) is_boundary[i] = 1;
+
+    for (int i = 0; i < he_count; i++) {
+        if (!is_boundary[i]) continue;
+        for (int j = i + 1; j < he_count; j++) {
+            if (!is_boundary[j]) continue;
+            /* Check if j is the reverse of i */
+            if (halfs[i].ax == halfs[j].bx && halfs[i].ay == halfs[j].by && halfs[i].az == halfs[j].bz &&
+                halfs[i].bx == halfs[j].ax && halfs[i].by == halfs[j].ay && halfs[i].bz == halfs[j].az) {
+                is_boundary[i] = 0;
+                is_boundary[j] = 0;
+                break;
+            }
+        }
+    }
+
+    /* Collect boundary half-edges */
+    int bcount = 0;
+    for (int i = 0; i < he_count; i++)
+        if (is_boundary[i]) bcount++;
+
+    if (bcount == 0) {
+        /* No boundary — closed surface (sphere). Can't extrude. */
+        free(is_boundary); free(halfs);
+        *count = 0;
+        return NULL;
+    }
+
+    /* Step 3: Chain boundary edges into an ordered polygon.
+     * Start from first boundary edge, follow b→a links. */
+    float *verts3d = (float *)malloc((size_t)bcount * 3 * sizeof(float));
+    if (!verts3d) { free(is_boundary); free(halfs); return NULL; }
+
+    int *used = (int *)calloc((size_t)he_count, sizeof(int));
+    if (!used) { free(verts3d); free(is_boundary); free(halfs); return NULL; }
+
+    /* Find first boundary edge */
+    int first = -1;
+    for (int i = 0; i < he_count; i++)
+        if (is_boundary[i]) { first = i; break; }
+
+    verts3d[0] = halfs[first].a[0];
+    verts3d[1] = halfs[first].a[1];
+    verts3d[2] = halfs[first].a[2];
+    used[first] = 1;
+    int cur_bx = halfs[first].bx, cur_by = halfs[first].by, cur_bz = halfs[first].bz;
+    float cur_b[3]; memcpy(cur_b, halfs[first].b, 3 * sizeof(float));
+    int nv = 1;
+
+    for (int step = 1; step < bcount; step++) {
+        verts3d[nv*3+0] = cur_b[0];
+        verts3d[nv*3+1] = cur_b[1];
+        verts3d[nv*3+2] = cur_b[2];
+        nv++;
+
+        /* Find next boundary edge whose a == current b */
+        int found = 0;
+        for (int i = 0; i < he_count; i++) {
+            if (!is_boundary[i] || used[i]) continue;
+            if (halfs[i].ax == cur_bx && halfs[i].ay == cur_by && halfs[i].az == cur_bz) {
+                used[i] = 1;
+                cur_bx = halfs[i].bx; cur_by = halfs[i].by; cur_bz = halfs[i].bz;
+                memcpy(cur_b, halfs[i].b, 3 * sizeof(float));
+                found = 1;
+                break;
+            }
+        }
+        if (!found) break;
+    }
+
+    free(used);
+    free(is_boundary);
+    free(halfs);
+
+    /* Step 4: Compute centroid (in GL space) */
+    float gcx = 0, gcy = 0, gcz = 0;
+    for (int i = 0; i < nv; i++) {
+        gcx += verts3d[i*3+0]; gcy += verts3d[i*3+1]; gcz += verts3d[i*3+2];
+    }
+    gcx /= nv; gcy /= nv; gcz /= nv;
+
+    /* Convert centroid to SCAD space */
+    if (centroid_out) {
+        centroid_out[0] =  gcx;
+        centroid_out[1] = -gcz;
+        centroid_out[2] =  gcy;
+    }
+
+    /* Step 5: Build local coordinate frame on the face plane.
+     * Face normal (GL space) */
+    float N[3] = { fg->normal[0], fg->normal[1], fg->normal[2] };
+
+    /* Choose U axis: cross(N, arbitrary) */
+    float arb[3] = {0, 0, 1};
+    if (fabsf(vec3_dot(N, arb)) > 0.9f) { arb[0] = 1; arb[1] = 0; arb[2] = 0; }
+    float U[3], V[3];
+    vec3_cross(U, N, arb);
+    vec3_normalize(U);
+    vec3_cross(V, N, U);
+    vec3_normalize(V);
+
+    /* Step 6: Project boundary vertices onto face plane → 2D coords */
+    float *pts2d = (float *)malloc((size_t)nv * 2 * sizeof(float));
+    if (!pts2d) { free(verts3d); return NULL; }
+
+    for (int i = 0; i < nv; i++) {
+        float d[3] = { verts3d[i*3+0] - gcx,
+                        verts3d[i*3+1] - gcy,
+                        verts3d[i*3+2] - gcz };
+        pts2d[i*2+0] = vec3_dot(d, U);
+        pts2d[i*2+1] = vec3_dot(d, V);
+    }
+    free(verts3d);
+
+    /* Step 7: Compute rotation angles to orient extrusion along face normal.
+     * In SCAD space: normal is (Ns_x, Ns_y, Ns_z).
+     * We need Euler angles that rotate [0,0,1] onto the normal.
+     * Using: ry = atan2(Ns_x, Ns_z), rx = -atan2(Ns_y, sqrt(Ns_x^2+Ns_z^2)) */
+    if (rot_angles_out) {
+        float ns_x =  N[0];
+        float ns_y = -N[2];
+        float ns_z =  N[1];
+        float horiz = sqrtf(ns_x * ns_x + ns_z * ns_z);
+        float rx = -atan2f(ns_y, horiz) * 180.0f / (float)M_PI;
+        float ry =  atan2f(ns_x, ns_z) * 180.0f / (float)M_PI;
+        rot_angles_out[0] = rx;
+        rot_angles_out[1] = ry;
+        rot_angles_out[2] = 0;
+    }
+
+    /* Round 2D points to 3 decimal places for clean SCAD output */
+    for (int i = 0; i < nv * 2; i++)
+        pts2d[i] = roundf(pts2d[i] * 1000.0f) / 1000.0f;
+
+    *count = nv;
+    return pts2d;
+}

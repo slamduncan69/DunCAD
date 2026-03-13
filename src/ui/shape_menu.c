@@ -7,6 +7,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 /* -------------------------------------------------------------------------
  * Context state — attached to the viewport widget via g_object_set_data
@@ -267,6 +268,338 @@ on_modify_minkowski(GSimpleAction *action, GVariant *param, gpointer data)
         "    sphere(r=1);\n}");
 }
 
+/* Forward declarations */
+static void close_popover(ShapeMenuCtx *ctx);
+static int  get_selected_line_range(ShapeMenuCtx *ctx, int *line_start, int *line_end);
+
+/* -------------------------------------------------------------------------
+ * Face extrude — dialog + code generation
+ * ---------------------------------------------------------------------- */
+
+typedef struct {
+    ShapeMenuCtx *ctx;
+    GtkWidget    *popover;      /* the extrude parameter popover */
+    GtkWidget    *spin_height;
+    GtkWidget    *spin_taper;
+    GtkWidget    *spin_twist;
+    GtkWidget    *chk_center;
+    GtkWidget    *chk_inward;
+    /* Face geometry */
+    float        *boundary_2d;   /* malloc'd [x,y] pairs */
+    int           boundary_count;
+    float         centroid[3];   /* SCAD space */
+    float         rot_angles[3]; /* Euler angles (degrees) */
+} ExtrudeCtx;
+
+static void
+extrude_ctx_free(ExtrudeCtx *ec)
+{
+    if (!ec) return;
+    free(ec->boundary_2d);
+    free(ec);
+}
+
+static void
+on_extrude_cancel(GtkButton *btn, gpointer data)
+{
+    (void)btn;
+    ExtrudeCtx *ec = data;
+    if (ec->popover)
+        gtk_popover_popdown(GTK_POPOVER(ec->popover));
+}
+
+static void
+on_extrude_confirm(GtkButton *btn, gpointer data)
+{
+    (void)btn;
+    ExtrudeCtx *ec = data;
+    ShapeMenuCtx *ctx = ec->ctx;
+
+    double height = gtk_spin_button_get_value(GTK_SPIN_BUTTON(ec->spin_height));
+    double taper  = gtk_spin_button_get_value(GTK_SPIN_BUTTON(ec->spin_taper));
+    double twist  = gtk_spin_button_get_value(GTK_SPIN_BUTTON(ec->spin_twist));
+    int center    = gtk_check_button_get_active(GTK_CHECK_BUTTON(ec->chk_center));
+    int inward    = gtk_check_button_get_active(GTK_CHECK_BUTTON(ec->chk_inward));
+
+    if (height <= 0) height = 1.0;
+
+    /* Build the polygon points string */
+    char *pts_buf = malloc((size_t)ec->boundary_count * 40 + 64);
+    if (!pts_buf) return;
+    int pos = 0;
+    pos += sprintf(pts_buf + pos, "[");
+    for (int i = 0; i < ec->boundary_count; i++) {
+        if (i > 0) pos += sprintf(pts_buf + pos, ", ");
+        pos += sprintf(pts_buf + pos, "[%.3f, %.3f]",
+                       (double)ec->boundary_2d[i*2+0],
+                       (double)ec->boundary_2d[i*2+1]);
+    }
+    pos += sprintf(pts_buf + pos, "]");
+
+    /* Build the extrude SCAD code */
+    /* Max: translate + rotate + linear_extrude + polygon — generous buffer */
+    size_t code_sz = (size_t)pos + 512;
+    char *code = malloc(code_sz);
+    if (!code) { free(pts_buf); return; }
+
+    int cp = 0;
+
+    /* Wrapping: if inward, use difference(); if outward, use union() */
+    int ls, le;
+    int have_sel = get_selected_line_range(ctx, &ls, &le);
+    const char *csg_open = inward ? "difference() {\n" : "union() {\n";
+    const char *csg_close = "}";
+
+    /* Build the extrude statement itself */
+    char extrude_stmt[1024];
+    int ep = 0;
+    ep += sprintf(extrude_stmt + ep, "translate([%.3f, %.3f, %.3f])\n",
+                  (double)ec->centroid[0], (double)ec->centroid[1], (double)ec->centroid[2]);
+
+    /* Only add rotate if angles are non-trivial */
+    if (fabsf(ec->rot_angles[0]) > 0.01f || fabsf(ec->rot_angles[1]) > 0.01f) {
+        ep += sprintf(extrude_stmt + ep, "rotate([%.1f, %.1f, %.1f])\n",
+                      (double)ec->rot_angles[0], (double)ec->rot_angles[1],
+                      (double)ec->rot_angles[2]);
+    }
+
+    ep += sprintf(extrude_stmt + ep, "linear_extrude(height=%.3f", height);
+    if (fabs(taper - 1.0) > 0.001) ep += sprintf(extrude_stmt + ep, ", scale=%.3f", taper);
+    if (fabs(twist) > 0.01)        ep += sprintf(extrude_stmt + ep, ", twist=%.1f", twist);
+    if (center)                     ep += sprintf(extrude_stmt + ep, ", center=true");
+    ep += sprintf(extrude_stmt + ep, ")\n");
+
+    if (inward) {
+        /* Mirror the extrude direction inward (negate the normal) */
+        ep += sprintf(extrude_stmt + ep, "mirror([0, 0, 1])\n");
+    }
+
+    ep += sprintf(extrude_stmt + ep, "polygon(%s);", pts_buf);
+
+    if (have_sel) {
+        /* Wrap existing code with union/difference + extrude */
+        cp += sprintf(code + cp, "%s", csg_open);
+
+        /* We'll use wrap_selected-style insertion. But simpler: just
+         * append the extrude after the selected object's code. */
+        char *text = dc_code_editor_get_text(ctx->code_ed);
+        if (text) {
+            /* Find line positions */
+            int line = 1;
+            const char *p = text;
+            const char *start_ptr = NULL;
+            const char *end_ptr = NULL;
+            while (*p) {
+                if (line == ls && !start_ptr) start_ptr = p;
+                if (*p == '\n') {
+                    if (line == le) { end_ptr = p + 1; break; }
+                    line++;
+                }
+                p++;
+            }
+            if (!start_ptr) start_ptr = text;
+            if (!end_ptr) end_ptr = text + strlen(text);
+
+            /* Build: before + csg_open + indented_original + indented_extrude + csg_close + after */
+            size_t before_len = (size_t)(start_ptr - text);
+            size_t sel_len = (size_t)(end_ptr - start_ptr);
+            size_t after_len = strlen(end_ptr);
+            size_t csg_open_len = strlen(csg_open);
+            size_t csg_close_len = strlen(csg_close);
+
+            /* Indent original and extrude */
+            char *full = malloc(before_len + csg_open_len + sel_len * 2 + (size_t)ep * 2 + csg_close_len + after_len + 256);
+            if (full) {
+                size_t fp = 0;
+                memcpy(full + fp, text, before_len); fp += before_len;
+                memcpy(full + fp, csg_open, csg_open_len); fp += csg_open_len;
+
+                /* Indent original code */
+                full[fp++] = ' '; full[fp++] = ' '; full[fp++] = ' '; full[fp++] = ' ';
+                for (size_t i = 0; i < sel_len; i++) {
+                    full[fp++] = start_ptr[i];
+                    if (start_ptr[i] == '\n' && i + 1 < sel_len) {
+                        full[fp++] = ' '; full[fp++] = ' ';
+                        full[fp++] = ' '; full[fp++] = ' ';
+                    }
+                }
+                if (fp > 0 && full[fp-1] != '\n') full[fp++] = '\n';
+
+                /* Indent extrude statement */
+                full[fp++] = ' '; full[fp++] = ' '; full[fp++] = ' '; full[fp++] = ' ';
+                for (int i = 0; i < ep; i++) {
+                    full[fp++] = extrude_stmt[i];
+                    if (extrude_stmt[i] == '\n' && i + 1 < ep) {
+                        full[fp++] = ' '; full[fp++] = ' ';
+                        full[fp++] = ' '; full[fp++] = ' ';
+                    }
+                }
+                if (fp > 0 && full[fp-1] != '\n') full[fp++] = '\n';
+
+                memcpy(full + fp, csg_close, csg_close_len); fp += csg_close_len;
+                full[fp++] = '\n';
+                memcpy(full + fp, end_ptr, after_len); fp += after_len;
+                full[fp] = '\0';
+
+                dc_code_editor_set_text(ctx->code_ed, full);
+                free(full);
+            }
+            free(text);
+        }
+    } else {
+        /* No selection — just append the extrude code */
+        insert_shape(ctx, extrude_stmt);
+    }
+
+    free(code);
+    free(pts_buf);
+
+    /* Trigger re-render */
+    if (ctx->preview)
+        dc_scad_preview_render(ctx->preview);
+
+    /* Close the popover */
+    if (ec->popover)
+        gtk_popover_popdown(GTK_POPOVER(ec->popover));
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "shape_menu: face extrude applied (h=%.1f, taper=%.2f, twist=%.1f, %s)",
+           height, taper, twist, inward ? "inward" : "outward");
+}
+
+static void
+on_extrude_popover_closed(GtkPopover *popover, gpointer data)
+{
+    ExtrudeCtx *ec = data;
+    gtk_widget_unparent(GTK_WIDGET(popover));
+    ec->popover = NULL;
+    extrude_ctx_free(ec);
+}
+
+static void
+show_extrude_dialog(ShapeMenuCtx *ctx, double click_x, double click_y)
+{
+    if (!ctx->gl_vp || !ctx->code_ed) return;
+
+    int obj_idx = dc_gl_viewport_get_selected(ctx->gl_vp);
+    int face_idx = dc_gl_viewport_get_selected_face(ctx->gl_vp);
+    if (obj_idx < 0 || face_idx < 0) return;
+
+    ExtrudeCtx *ec = calloc(1, sizeof(*ec));
+    if (!ec) return;
+    ec->ctx = ctx;
+
+    /* Get face boundary polygon */
+    ec->boundary_2d = dc_gl_viewport_get_face_boundary(
+        ctx->gl_vp, obj_idx, face_idx, &ec->boundary_count,
+        ec->centroid, ec->rot_angles);
+
+    if (!ec->boundary_2d || ec->boundary_count < 3) {
+        dc_log(DC_LOG_WARN, DC_LOG_EVENT_APP,
+               "shape_menu: cannot extrude face — no boundary polygon (%d verts)",
+               ec->boundary_count);
+        extrude_ctx_free(ec);
+        return;
+    }
+
+    /* Build the parameter popover */
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 6);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 8);
+    gtk_widget_set_margin_start(grid, 10);
+    gtk_widget_set_margin_end(grid, 10);
+    gtk_widget_set_margin_top(grid, 10);
+    gtk_widget_set_margin_bottom(grid, 10);
+
+    /* Title */
+    GtkWidget *title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(title), "<b>Extrude Face</b>");
+    gtk_widget_set_halign(title, GTK_ALIGN_START);
+    gtk_grid_attach(GTK_GRID(grid), title, 0, 0, 2, 1);
+
+    int row = 1;
+
+    /* Height */
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Height:"), 0, row, 1, 1);
+    ec->spin_height = gtk_spin_button_new_with_range(0.1, 1000.0, 1.0);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ec->spin_height), 10.0);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(ec->spin_height), 2);
+    gtk_grid_attach(GTK_GRID(grid), ec->spin_height, 1, row++, 1, 1);
+
+    /* Taper */
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Taper:"), 0, row, 1, 1);
+    ec->spin_taper = gtk_spin_button_new_with_range(0.0, 10.0, 0.1);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ec->spin_taper), 1.0);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(ec->spin_taper), 2);
+    gtk_grid_attach(GTK_GRID(grid), ec->spin_taper, 1, row++, 1, 1);
+
+    /* Twist */
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Twist:"), 0, row, 1, 1);
+    ec->spin_twist = gtk_spin_button_new_with_range(-360.0, 360.0, 15.0);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ec->spin_twist), 0.0);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(ec->spin_twist), 1);
+    gtk_grid_attach(GTK_GRID(grid), ec->spin_twist, 1, row++, 1, 1);
+
+    /* Center checkbox */
+    ec->chk_center = gtk_check_button_new_with_label("Center");
+    gtk_grid_attach(GTK_GRID(grid), ec->chk_center, 0, row++, 2, 1);
+
+    /* Inward (subtraction) checkbox */
+    ec->chk_inward = gtk_check_button_new_with_label("Inward (cut)");
+    gtk_grid_attach(GTK_GRID(grid), ec->chk_inward, 0, row++, 2, 1);
+
+    /* Info: polygon vertex count */
+    char info[64];
+    snprintf(info, sizeof(info), "Face: %d boundary vertices", ec->boundary_count);
+    GtkWidget *info_label = gtk_label_new(info);
+    gtk_widget_set_halign(info_label, GTK_ALIGN_START);
+    gtk_widget_add_css_class(info_label, "dim-label");
+    gtk_grid_attach(GTK_GRID(grid), info_label, 0, row++, 2, 1);
+
+    /* Buttons */
+    GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign(btn_box, GTK_ALIGN_END);
+
+    GtkWidget *cancel_btn = gtk_button_new_with_label("Cancel");
+    g_signal_connect(cancel_btn, "clicked", G_CALLBACK(on_extrude_cancel), ec);
+    gtk_box_append(GTK_BOX(btn_box), cancel_btn);
+
+    GtkWidget *ok_btn = gtk_button_new_with_label("Extrude");
+    gtk_widget_add_css_class(ok_btn, "suggested-action");
+    g_signal_connect(ok_btn, "clicked", G_CALLBACK(on_extrude_confirm), ec);
+    gtk_box_append(GTK_BOX(btn_box), ok_btn);
+
+    gtk_grid_attach(GTK_GRID(grid), btn_box, 0, row, 2, 1);
+
+    /* Create popover */
+    GtkWidget *gl_widget = dc_gl_viewport_widget(ctx->gl_vp);
+    ec->popover = gtk_popover_new();
+    gtk_popover_set_child(GTK_POPOVER(ec->popover), grid);
+    gtk_popover_set_autohide(GTK_POPOVER(ec->popover), TRUE);
+    gtk_widget_set_parent(ec->popover, gl_widget);
+
+    g_signal_connect(ec->popover, "closed",
+                     G_CALLBACK(on_extrude_popover_closed), ec);
+
+    GdkRectangle rect = { (int)click_x, (int)click_y, 1, 1 };
+    gtk_popover_set_pointing_to(GTK_POPOVER(ec->popover), &rect);
+    gtk_popover_set_has_arrow(GTK_POPOVER(ec->popover), TRUE);
+
+    gtk_popover_popup(GTK_POPOVER(ec->popover));
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "shape_menu: extrude dialog shown (face=%d, %d verts)",
+           face_idx, ec->boundary_count);
+}
+
+static void on_btn_extrude_face(GtkButton *btn, gpointer data)
+{
+    (void)btn;
+    ShapeMenuCtx *ctx = data;
+    close_popover(ctx);
+    show_extrude_dialog(ctx, ctx->click_x, ctx->click_y);
+}
+
 /* -------------------------------------------------------------------------
  * Right-click gesture handler — builds and shows popover
  * ---------------------------------------------------------------------- */
@@ -397,6 +730,21 @@ on_right_click(GtkGestureClick *gesture, int n_press,
                        G_CALLBACK(on_btn_modify_scale), ctx));
         gtk_box_append(GTK_BOX(vbox), menu_button("  Minkowski",
                        G_CALLBACK(on_btn_modify_minkowski), ctx));
+    }
+
+    /* Section: Face Operations (only in face mode with a selected face) */
+    DC_SelectMode sel_mode = ctx->gl_vp ? dc_gl_viewport_get_select_mode(ctx->gl_vp) : DC_SEL_OBJECT;
+    int sel_face = ctx->gl_vp ? dc_gl_viewport_get_selected_face(ctx->gl_vp) : -1;
+    if (sel_mode == DC_SEL_FACE && sel_face >= 0 && ctx->sel_obj >= 0) {
+        gtk_box_append(GTK_BOX(vbox), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+
+        GtkWidget *face_label = gtk_label_new(NULL);
+        gtk_label_set_markup(GTK_LABEL(face_label), "<b>Face Operations</b>");
+        gtk_widget_set_halign(face_label, GTK_ALIGN_START);
+        gtk_box_append(GTK_BOX(vbox), face_label);
+
+        gtk_box_append(GTK_BOX(vbox), menu_button("  Extrude Face...",
+                       G_CALLBACK(on_btn_extrude_face), ctx));
     }
 
     GtkWidget *gl_widget = dc_gl_viewport_widget(ctx->gl_vp);
