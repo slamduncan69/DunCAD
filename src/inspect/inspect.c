@@ -948,11 +948,26 @@ on_incoming(GSocketService *service, GSocketConnection *conn,
     GInputStream  *in  = g_io_stream_get_input_stream(G_IO_STREAM(conn));
     GOutputStream *out = g_io_stream_get_output_stream(G_IO_STREAM(conn));
 
-    /* Read one line (command) */
-    char buf[4096];
-    gssize n = g_input_stream_read(in, buf, sizeof(buf) - 1, NULL, NULL);
-    if (n <= 0) return TRUE;
-    buf[n] = '\0';
+    /* Read full command (may exceed 4K for large set_code payloads) */
+    gsize buf_cap = 8192;
+    gsize buf_len = 0;
+    char *buf = malloc(buf_cap);
+    if (!buf) return TRUE;
+
+    for (;;) {
+        gssize n = g_input_stream_read(in, buf + buf_len,
+                                       buf_cap - buf_len - 1, NULL, NULL);
+        if (n <= 0) break;
+        buf_len += (gsize)n;
+        if ((gsize)n < buf_cap - buf_len - 1) break; /* got less than asked = done */
+        buf_cap *= 2;
+        char *tmp = realloc(buf, buf_cap);
+        if (!tmp) break;
+        buf = tmp;
+    }
+    if (buf_len == 0) { free(buf); return TRUE; }
+    buf[buf_len] = '\0';
+    gssize n = (gssize)buf_len;
 
     /* Strip trailing newline/carriage return */
     while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
@@ -968,6 +983,7 @@ on_incoming(GSocketService *service, GSocketConnection *conn,
         free(response);
     }
 
+    free(buf);
     return TRUE;
 }
 

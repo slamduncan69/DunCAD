@@ -52,4 +52,10 @@ void dc_code_editor_insert_at_cursor(DC_CodeEditor *ed, const char *text);
 /* Get the underlying GtkSourceBuffer (borrowed). */
 GtkTextBuffer *dc_code_editor_get_buffer(DC_CodeEditor *ed);
 
+/* Undo/redo — wraps GtkSourceBuffer built-in undo system. */
+void dc_code_editor_undo(DC_CodeEditor *ed);
+void dc_code_editor_redo(DC_CodeEditor *ed);
+int  dc_code_editor_can_undo(DC_CodeEditor *ed);
+int  dc_code_editor_can_redo(DC_CodeEditor *ed);
+
 #endif /* DC_CODE_EDITOR_H */

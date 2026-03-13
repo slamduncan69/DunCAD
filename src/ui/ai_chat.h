@@ -20,6 +20,11 @@ void dc_ai_chat_set_response_callback(DC_AiChat *chat,
 void dc_ai_chat_set_tool_callback(DC_AiChat *chat,
                                    DC_AiChatToolCb cb, void *data);
 
+/* Callback when AI finishes (process exits). */
+typedef void (*DC_AiChatDoneCb)(void *userdata);
+void dc_ai_chat_set_done_callback(DC_AiChat *chat,
+                                   DC_AiChatDoneCb cb, void *data);
+
 /* Send a user message (async — responses arrive via callbacks). */
 void dc_ai_chat_send(DC_AiChat *chat, const char *message);
 

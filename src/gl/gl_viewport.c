@@ -247,6 +247,9 @@ struct DC_GlViewport {
     /* Screenshot capture (set path, render reads pixels after drawing) */
     char        *capture_path;      /* non-NULL = capture on next render */
     int          capture_result;    /* 0=success after capture */
+
+    /* Interaction lock (AI working — block picking/moving) */
+    int          locked;
 };
 
 /* =========================================================================
@@ -678,7 +681,7 @@ on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data)
         /* Pan: right/middle click or shift+click */
         vp->dragging = 2;
         memcpy(vp->drag_center, vp->cam_center, sizeof(vp->drag_center));
-    } else if (button == 1 && vp->last_pick_reselect &&
+    } else if (button == 1 && !vp->locked && vp->last_pick_reselect &&
                vp->selected_obj >= 0 && vp->move_cb) {
         /* Move: left-drag on already-selected object */
         vp->dragging = 3;
@@ -1028,7 +1031,7 @@ on_click_pressed(GtkGestureClick *gesture, int n_press,
     (void)gesture; (void)n_press;
     DC_GlViewport *vp = data;
 
-    if (vp->obj_count == 0) return;
+    if (vp->locked || vp->obj_count == 0) return;
 
     int old_sel = vp->selected_obj;
     int obj = do_pick(vp, (int)x, (int)y);
@@ -1509,4 +1512,16 @@ dc_gl_viewport_capture_png(DC_GlViewport *vp, const char *path)
     }
 
     return vp->capture_result;
+}
+
+void
+dc_gl_viewport_set_locked(DC_GlViewport *vp, int locked)
+{
+    if (vp) vp->locked = locked;
+}
+
+int
+dc_gl_viewport_get_locked(DC_GlViewport *vp)
+{
+    return vp ? vp->locked : 0;
 }

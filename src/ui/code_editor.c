@@ -495,3 +495,36 @@ dc_code_editor_get_buffer(DC_CodeEditor *ed)
     if (!ed) return NULL;
     return GTK_TEXT_BUFFER(ed->buffer);
 }
+
+/* -------------------------------------------------------------------------
+ * Undo / Redo — GTK4 GtkTextBuffer built-in support
+ * ---------------------------------------------------------------------- */
+void
+dc_code_editor_undo(DC_CodeEditor *ed)
+{
+    if (!ed) return;
+    if (gtk_text_buffer_get_can_undo(GTK_TEXT_BUFFER(ed->buffer)))
+        gtk_text_buffer_undo(GTK_TEXT_BUFFER(ed->buffer));
+}
+
+void
+dc_code_editor_redo(DC_CodeEditor *ed)
+{
+    if (!ed) return;
+    if (gtk_text_buffer_get_can_redo(GTK_TEXT_BUFFER(ed->buffer)))
+        gtk_text_buffer_redo(GTK_TEXT_BUFFER(ed->buffer));
+}
+
+int
+dc_code_editor_can_undo(DC_CodeEditor *ed)
+{
+    if (!ed) return 0;
+    return gtk_text_buffer_get_can_undo(GTK_TEXT_BUFFER(ed->buffer));
+}
+
+int
+dc_code_editor_can_redo(DC_CodeEditor *ed)
+{
+    if (!ed) return 0;
+    return gtk_text_buffer_get_can_redo(GTK_TEXT_BUFFER(ed->buffer));
+}

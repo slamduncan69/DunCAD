@@ -42,6 +42,7 @@ struct DC_ScadPreview {
     int             hq_running;     /* is HQ task in flight? */
     ts_progress     progress;       /* shared progress — worker writes, UI reads */
     int             camera_fitted;  /* 1 after first fit — skip auto-fit on re-renders */
+    int             render_pending; /* 1 = re-render queued (dropped while busy) */
 };
 
 /* -------------------------------------------------------------------------
@@ -98,6 +99,14 @@ is_preamble(const char *stmt)
     const char *p = stmt;
     while (*p && isspace((unsigned char)*p)) p++;
     if (!*p) return 1; /* empty = skip */
+
+    /* Skip leading single-line comments so "// comment\nmodule foo()" is
+     * correctly identified as a module definition, not geometry. */
+    while (p[0] == '/' && p[1] == '/') {
+        while (*p && *p != '\n') p++;
+        while (*p && isspace((unsigned char)*p)) p++;
+    }
+    if (!*p) return 1; /* comment-only statement */
 
     /* include/use directives */
     if (strncmp(p, "include", 7) == 0 &&
@@ -330,8 +339,9 @@ render_thread_func(GTask *task, gpointer source_obj,
     g_task_return_pointer(task, res, NULL);
 }
 
-/* Forward declaration */
+/* Forward declarations */
 static void launch_hq_render(DC_ScadPreview *pv, const char *source);
+static void do_render(DC_ScadPreview *pv);
 
 /* Main thread callback for BOTH preview and HQ results */
 static void
@@ -423,11 +433,23 @@ render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
                            "No geometry loaded");
     }
 
-    /* If preview just completed, launch HQ in background */
-    if (!res->is_hq && res->obj_count > 0) {
-        RenderTaskData *td = g_task_get_task_data(G_TASK(result));
-        if (td && td->source) {
-            launch_hq_render(pv, td->source);
+    /* If preview just completed, check for queued re-render or launch HQ */
+    if (!res->is_hq) {
+        if (pv->render_pending) {
+            /* A render was requested while we were busy — re-render with
+             * fresh code (user may have moved objects since we started) */
+            pv->render_pending = 0;
+            render_result_free(res);
+            dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+                   "executing queued re-render");
+            do_render(pv);
+            return;
+        }
+        if (res->obj_count > 0) {
+            RenderTaskData *td = g_task_get_task_data(G_TASK(result));
+            if (td && td->source) {
+                launch_hq_render(pv, td->source);
+            }
         }
     }
 
@@ -437,9 +459,11 @@ render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
 static void
 launch_hq_render(DC_ScadPreview *pv, const char *source)
 {
-    /* Cancel any existing HQ render */
+    /* Cancel any existing HQ render.
+     * Don't reset immediately — old thread needs time to see the flag.
+     * Reset only after setting up the new task, right before spawning it.
+     * Old HQ results are discarded by generation counter anyway. */
     pv->hq_cancel = 1;
-    pv->hq_cancel = 0;  /* reset for new HQ task */
 
     /* Reset progress for HQ pass */
     pv->progress.done  = 0;
@@ -453,6 +477,9 @@ launch_hq_render(DC_ScadPreview *pv, const char *source)
     td->progress = &pv->progress;
 
     pv->hq_running = 1;
+
+    /* Reset cancel flag just before launch — old HQ had time to see =1 */
+    pv->hq_cancel = 0;
 
     GTask *task = g_task_new(NULL, NULL, render_done_cb, pv);
     g_task_set_task_data(task, td, render_task_data_free);
@@ -470,7 +497,12 @@ do_render(DC_ScadPreview *pv)
         gtk_label_set_text(GTK_LABEL(pv->status_label), "No code editor connected");
         return;
     }
-    if (pv->rendering) return;
+    if (pv->rendering) {
+        pv->render_pending = 1;
+        dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP,
+               "render queued (busy), will re-render on completion");
+        return;
+    }
 
     char *text = dc_code_editor_get_text(pv->code_ed);
     if (!text || !*text) {

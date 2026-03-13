@@ -14,6 +14,14 @@ on_activate(GtkApplication *app, gpointer user_data)
 {
     (void)user_data;
 
+    /* If a window already exists (re-activation from D-Bus), just present it */
+    GtkWindow *existing = gtk_application_get_active_window(app);
+    if (existing) {
+        gtk_window_present(existing);
+        dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "DunCAD re-activated (existing window)");
+        return;
+    }
+
     GtkWidget *window = dc_app_window_create(app);
     gtk_window_present(GTK_WINDOW(window));
 

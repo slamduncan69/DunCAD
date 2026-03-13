@@ -122,4 +122,9 @@ void dc_gl_viewport_fit_all_objects(DC_GlViewport *vp);
  * Must be called from the GTK main thread. */
 int dc_gl_viewport_capture_png(DC_GlViewport *vp, const char *path);
 
+/* Lock/unlock user interaction (picking, object moving).
+ * Camera orbit/pan/zoom still work. Used when AI is building. */
+void dc_gl_viewport_set_locked(DC_GlViewport *vp, int locked);
+int  dc_gl_viewport_get_locked(DC_GlViewport *vp);
+
 #endif /* DC_GL_VIEWPORT_H */

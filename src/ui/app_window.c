@@ -235,7 +235,29 @@ on_transform_enter(void *userdata)
 typedef struct {
     DC_TerminalPanel *term;
     DC_AiChat        *ai;
+    DC_GlViewport    *gl_vp;
+    DC_CodeEditor    *code_ed;
+    GtkWidget        *status_label;
 } TermCtx;
+
+static void
+ai_lock_ui(TermCtx *ctx, int lock)
+{
+    if (ctx->gl_vp)
+        dc_gl_viewport_set_locked(ctx->gl_vp, lock);
+    if (ctx->status_label) {
+        gtk_label_set_text(GTK_LABEL(ctx->status_label),
+                           lock ? "AI working — interaction locked"
+                                : "Ready");
+    }
+}
+
+static void
+on_ai_done(void *userdata)
+{
+    TermCtx *ctx = userdata;
+    ai_lock_ui(ctx, 0);
+}
 
 static void
 on_ai_response(const char *text, void *userdata)
@@ -280,6 +302,7 @@ on_terminal_command(const char *command, void *userdata)
             return;
         }
         dc_terminal_panel_append(ctx->term, "...\n");
+        ai_lock_ui(ctx, 1);
         dc_ai_chat_send(ctx->ai, command);
     } else {
         /* No AI available — fall back to inspect */
@@ -287,6 +310,25 @@ on_terminal_command(const char *command, void *userdata)
             "AI not available (claude CLI not found). "
             "Use /command for inspect commands.\n");
     }
+}
+
+/* -------------------------------------------------------------------------
+ * Undo/Redo action callbacks
+ * ---------------------------------------------------------------------- */
+static void
+on_undo_activate(GSimpleAction *action, GVariant *param, gpointer data)
+{
+    (void)action; (void)param;
+    DC_CodeEditor *ed = data;
+    dc_code_editor_undo(ed);
+}
+
+static void
+on_redo_activate(GSimpleAction *action, GVariant *param, gpointer data)
+{
+    (void)action; (void)param;
+    DC_CodeEditor *ed = data;
+    dc_code_editor_redo(ed);
 }
 
 /* -------------------------------------------------------------------------
@@ -483,8 +525,11 @@ dc_app_window_create(GtkApplication *app)
             "claude CLI not found. /command for inspect.\n\n");
     }
     TermCtx *term_ctx = malloc(sizeof(TermCtx));
+    memset(term_ctx, 0, sizeof(*term_ctx));
     term_ctx->term = terminal;
     term_ctx->ai = ai_chat;
+    term_ctx->code_ed = code_ed;
+    term_ctx->status_label = status_label;
     dc_terminal_panel_set_command_callback(terminal, on_terminal_command, term_ctx);
     g_object_set_data_full(G_OBJECT(window), "dc-terminal", terminal,
                            (GDestroyNotify)dc_terminal_panel_free);
@@ -494,6 +539,10 @@ dc_app_window_create(GtkApplication *app)
 
     /* Wire pick callback: viewport click → code editor + transform panel */
     DC_GlViewport *gl_vp = dc_scad_preview_get_viewport(preview);
+    term_ctx->gl_vp = gl_vp;
+    if (ai_chat) {
+        dc_ai_chat_set_done_callback(ai_chat, on_ai_done, term_ctx);
+    }
     if (gl_vp) {
         /* PickCtx lives as long as the window (freed via destroy-notify) */
         PickCtx *pick_ctx = malloc(sizeof(PickCtx));
@@ -524,6 +573,27 @@ dc_app_window_create(GtkApplication *app)
                                               "dc-shape-action-group");
         if (sg) gtk_widget_insert_action_group(window, "shape", sg);
     }
+
+    /* --- Undo/Redo actions --- */
+    {
+        GSimpleAction *undo_action = g_simple_action_new("undo", NULL);
+        g_signal_connect(undo_action, "activate",
+                         G_CALLBACK(on_undo_activate), code_ed);
+        g_action_map_add_action(G_ACTION_MAP(window), G_ACTION(undo_action));
+        g_object_unref(undo_action);
+
+        GSimpleAction *redo_action = g_simple_action_new("redo", NULL);
+        g_signal_connect(redo_action, "activate",
+                         G_CALLBACK(on_redo_activate), code_ed);
+        g_action_map_add_action(G_ACTION_MAP(window), G_ACTION(redo_action));
+        g_object_unref(redo_action);
+    }
+
+    /* Keyboard shortcuts: Ctrl+Z = undo, Ctrl+Shift+Z = redo */
+    gtk_application_set_accels_for_action(app, "win.undo",
+        (const char *[]){ "<Control>z", NULL });
+    gtk_application_set_accels_for_action(app, "win.redo",
+        (const char *[]){ "<Control><Shift>z", NULL });
 
     /* F5 = Render preview (window-level shortcut) */
     g_object_set_data(G_OBJECT(window), "dc-scad-preview-ref", preview);
