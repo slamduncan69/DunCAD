@@ -1209,6 +1209,7 @@ static const char HELP_SESSIONS[] =
 "  duncad-docs sessions s009   2026-03-06  Multi-object picking + transform panel\n"
 "  duncad-docs sessions s010   2026-03-07  FAILED: Bezier live sync to code editor\n"
 "  duncad-docs sessions s011   2026-03-08  Inline bezier SCAD module + Insert button\n"
+"  duncad-docs sessions s012   2026-03-13  AI agent hardening + interaction lock\n"
 "\n"
 "SEE ALSO:\n"
 "  duncad-docs phases   Phase status and scheduled work\n"
@@ -1836,6 +1837,69 @@ static const char HELP_SESSIONS_S011[] =
 "  duncad-docs sessions s010   Previous failed attempt (lessons learned)\n"
 "  duncad-docs scad export     Updated export documentation\n";
 
+static const char HELP_SESSIONS_S012[] =
+"SESSIONS: S012 -- 2026-03-13: AI Agent Hardening + Interaction Lock\n"
+"\n"
+"PLATFORM: Claude Code (Opus 4.6)\n"
+"STATUS: COMPLETE. All tests pass. Manually verified.\n"
+"\n"
+"GOAL:\n"
+"  Fix multiple issues with the embedded AI assistant: crash from\n"
+"  inspect buffer overflow, orphaned subprocess persistence across\n"
+"  restarts, user accidentally breaking AI-generated geometry, and\n"
+"  lack of visibility into AI reasoning. Also add undo/redo.\n"
+"\n"
+"BUGS FIXED:\n"
+"  1. Inspect socket buffer overflow (CRASH)\n"
+"     on_incoming() used char buf[4096]. Large set_code truncated,\n"
+"     malformed SCAD crashed Trinity Site.\n"
+"     Fix: dynamic malloc/realloc read loop, no size limit.\n"
+"\n"
+"  2. Orphaned claude subprocess (GHOST COMMANDS)\n"
+"     Inner claude survived DunCAD crash, reconnected to new socket.\n"
+"     Fix: pkill orphans on dc_ai_chat_new() startup.\n"
+"\n"
+"  3. Inner claude launching DunCAD (WINDOW KILL)\n"
+"     Inner claude ran ./build/bin/duncad, GTK D-Bus killed old window.\n"
+"     Fix: system prompt forbids launching binaries/killing processes.\n"
+"\n"
+"  4. Render queue drops (CYLINDER CHUNKING)\n"
+"     do_render() dropped requests while busy. Transform panel\n"
+"     triggered rapid re-renders that were lost.\n"
+"     Fix: render_pending flag + HQ cancel race fix.\n"
+"\n"
+"  5. Double window on re-activation\n"
+"     on_activate() created new window on D-Bus re-activation.\n"
+"     Fix: check gtk_application_get_active_window() first.\n"
+"\n"
+"FEATURES ADDED:\n"
+"  1. AI interaction lock — blocks picking/moving while AI busy,\n"
+"     status bar indicator, camera still works. done_cb unlocks.\n"
+"  2. Undo/redo — Ctrl+Z / Ctrl+Shift+Z via GtkTextBuffer.\n"
+"  3. AI streaming — stream-json parser, thinking/text/tool display,\n"
+"     session persistence via --resume, (thinking...) indicator.\n"
+"  4. AI chat log — duncad-ai-chat.log with [USER], [THINKING],\n"
+"     [RESPONSE], [tool:], [FULL TOOL OUTPUT], [SESSION_ID].\n"
+"\n"
+"FILES CHANGED:\n"
+"  src/inspect/inspect.c         Dynamic buffer for socket reads\n"
+"  src/ui/ai_chat.c/.h           Streaming, logging, done_cb, orphans\n"
+"  src/ui/app_window.c           AI lock wiring, undo/redo actions\n"
+"  src/ui/code_editor.c/.h       undo/redo API\n"
+"  src/gl/gl_viewport.c/.h       locked flag, set/get_locked API\n"
+"  src/ui/scad_preview.c         Render queue (render_pending)\n"
+"  src/main.c                    Double-window fix\n"
+"\n"
+"LESSONS LEARNED:\n"
+"  - Inner agents with shell access WILL do unexpected things.\n"
+"  - GTK unique-app D-Bus silently kills windows on second launch.\n"
+"  - Subprocess orphans survive parent crashes. Kill on startup.\n"
+"  - Fixed-size socket buffers are time bombs with AI payloads.\n"
+"  - Always log AI conversations to disk for post-mortem analysis.\n"
+"\n"
+"SEE ALSO:\n"
+"  duncad-docs sessions s011   Previous session (inline bezier)\n";
+
 
 /* ---- TREE REGISTRY ---- */
 
@@ -1925,6 +1989,7 @@ static const struct help_node TREE[] = {
     { "sessions.s009",               HELP_SESSIONS_S009 },
     { "sessions.s010",               HELP_SESSIONS_S010 },
     { "sessions.s011",               HELP_SESSIONS_S011 },
+    { "sessions.s012",               HELP_SESSIONS_S012 },
 
     /* add new nodes above this line */
     { NULL, NULL }
