@@ -650,7 +650,7 @@ dc_app_window_create(GtkApplication *app)
         GtkWidget *gl_widget = dc_gl_viewport_widget(gl_vp);
         dc_shape_menu_attach(gl_widget, code_ed, gl_vp,
                              dc_scad_preview_get_transform(preview),
-                             preview);
+                             preview, editor);
 
         /* Install shape actions on window so menu bar "Insert" can find them */
         GActionGroup *sg = g_object_get_data(G_OBJECT(gl_widget),

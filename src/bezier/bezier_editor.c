@@ -52,6 +52,11 @@ struct DC_BezierEditor {
     gulong           entry_x_hid;  /* "activate" signal handler ID */
     gulong           entry_y_hid;
     DC_CodeEditor   *code_ed;      /* borrowed, for Insert SCAD */
+    /* Edge profile editing */
+    DC_ProfileMeta   profile_meta;
+    DC_ProfileApplyCb profile_apply_cb;
+    void            *profile_apply_data;
+    GtkWidget       *apply_profile_btn;  /* shown when profile is active */
 };
 
 /* -------------------------------------------------------------------------
@@ -977,6 +982,9 @@ editor_destroy_notify(gpointer data)
     dc_bezier_editor_free(data);
 }
 
+/* Forward declaration for profile button callback (defined in profile section below) */
+static void on_apply_profile_clicked(GtkButton *btn, gpointer data);
+
 /* -------------------------------------------------------------------------
  * Public API
  * ---------------------------------------------------------------------- */
@@ -1085,6 +1093,17 @@ dc_bezier_editor_new(void)
     g_signal_connect(insert_btn, "clicked",
                      G_CALLBACK(on_insert_clicked), ed);
     gtk_box_append(GTK_BOX(toolbar), insert_btn);
+
+    /* Apply Profile button — hidden by default, shown when profile is loaded */
+    ed->apply_profile_btn = gtk_button_new_with_label("Apply Profile");
+    gtk_widget_set_focusable(ed->apply_profile_btn, FALSE);
+    gtk_widget_set_tooltip_text(ed->apply_profile_btn,
+        "Apply the modified profile back to the 3D object");
+    gtk_widget_add_css_class(ed->apply_profile_btn, "suggested-action");
+    g_signal_connect(ed->apply_profile_btn, "clicked",
+                     G_CALLBACK(on_apply_profile_clicked), ed);
+    gtk_box_append(GTK_BOX(toolbar), ed->apply_profile_btn);
+    gtk_widget_set_visible(ed->apply_profile_btn, FALSE);
 
     gtk_box_append(GTK_BOX(ed->container), toolbar);
 
@@ -1588,4 +1607,119 @@ dc_bezier_editor_get_canvas(DC_BezierEditor *editor)
 {
     if (!editor) return NULL;
     return editor->canvas;
+}
+
+/* =========================================================================
+ * Edge profile editing
+ * ========================================================================= */
+
+static void
+on_apply_profile_clicked(GtkButton *btn, gpointer data)
+{
+    (void)btn;
+    DC_BezierEditor *ed = data;
+    if (!ed->profile_meta.active) return;
+    if (ed->profile_apply_cb) {
+        ed->profile_apply_cb(ed, &ed->profile_meta, ed->profile_apply_data);
+    }
+}
+
+int
+dc_bezier_editor_load_profile(DC_BezierEditor *editor,
+                               const double *points, int count,
+                               int closed,
+                               const DC_ProfileMeta *meta)
+{
+    if (!editor || !points || count < 4) return -1;
+
+    /* Clear existing points */
+    dc_array_clear(editor->pts);
+    dc_array_clear(editor->junctures);
+    editor->selected = -1;
+    editor->closed = 0;
+
+    /* Load points */
+    for (int i = 0; i < count; i++) {
+        DC_Point2 pt = { points[i*2], points[i*2+1] };
+        dc_array_push(editor->pts, &pt);
+
+        /* Even indices are on-curve (junctures), odd are controls */
+        uint8_t junc = (i % 2 == 0) ? 1 : 0;
+        dc_array_push(editor->junctures, &junc);
+    }
+
+    /* Set closed if requested */
+    if (closed && count >= 4) {
+        editor->closed = 1;
+    }
+
+    /* Copy metadata */
+    if (meta) {
+        editor->profile_meta = *meta;
+        editor->profile_meta.active = 1;
+    }
+
+    /* Show the "Apply Profile" button if not already visible */
+    if (editor->apply_profile_btn) {
+        gtk_widget_set_visible(editor->apply_profile_btn, TRUE);
+    }
+
+    /* Refresh display */
+    update_chain_button(editor);
+    update_status(editor);
+    refresh_panel(editor);
+
+    /* Fit the view to the loaded curve */
+    if (count > 0) {
+        double min_x = points[0], max_x = points[0];
+        double min_y = points[1], max_y = points[1];
+        for (int i = 1; i < count; i++) {
+            if (points[i*2] < min_x) min_x = points[i*2];
+            if (points[i*2] > max_x) max_x = points[i*2];
+            if (points[i*2+1] < min_y) min_y = points[i*2+1];
+            if (points[i*2+1] > max_y) max_y = points[i*2+1];
+        }
+        double span = fmax(max_x - min_x, max_y - min_y);
+        if (span > 0) {
+            /* Zoom to fit with some padding */
+            double center_x = (min_x + max_x) / 2.0;
+            double center_y = (min_y + max_y) / 2.0;
+            dc_bezier_canvas_set_pan(editor->canvas, center_x, center_y);
+            dc_bezier_canvas_set_zoom(editor->canvas, 200.0 / span);
+        }
+    }
+
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(editor->canvas));
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "bezier_editor: loaded profile (%d points, %s)",
+           count, closed ? "closed" : "open");
+    return 0;
+}
+
+const DC_ProfileMeta *
+dc_bezier_editor_get_profile_meta(const DC_BezierEditor *editor)
+{
+    if (!editor || !editor->profile_meta.active) return NULL;
+    return &editor->profile_meta;
+}
+
+void
+dc_bezier_editor_clear_profile(DC_BezierEditor *editor)
+{
+    if (!editor) return;
+    editor->profile_meta.active = 0;
+    if (editor->apply_profile_btn) {
+        gtk_widget_set_visible(editor->apply_profile_btn, FALSE);
+    }
+}
+
+void
+dc_bezier_editor_set_profile_apply_cb(DC_BezierEditor *editor,
+                                       DC_ProfileApplyCb cb,
+                                       void *userdata)
+{
+    if (!editor) return;
+    editor->profile_apply_cb = cb;
+    editor->profile_apply_data = userdata;
 }

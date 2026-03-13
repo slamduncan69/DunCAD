@@ -76,4 +76,49 @@ void             dc_bezier_editor_set_code_editor(DC_BezierEditor *editor,
 int              dc_bezier_editor_insert_scad(DC_BezierEditor *editor,
                                                DC_Error *err);
 
+/* ---- Edge profile editing ---- */
+
+/* Profile metadata — stored when loading an edge profile for editing.
+ * Contains the info needed to generate replacement code on apply. */
+typedef struct {
+    float  centroid[3];     /* SCAD-space centroid of the face */
+    float  rot_angles[3];  /* Euler angles to orient extrusion along face normal */
+    int    obj_idx;         /* GL viewport object index */
+    int    face_idx;        /* face group index */
+    int    line_start;      /* source code line range of original object */
+    int    line_end;
+    int    active;          /* 1 = profile editing mode is active */
+} DC_ProfileMeta;
+
+/* Load a 2D profile into the bezier editor, replacing current points.
+ * points: array of {x,y} pairs, alternating on-curve/off-curve.
+ * count: total number of points (must be even for closed shapes).
+ * closed: 1 if the profile is a closed loop.
+ * meta: profile metadata for code generation on apply (copied).
+ * Returns 0 on success, -1 on failure. */
+int dc_bezier_editor_load_profile(DC_BezierEditor *editor,
+                                   const double *points, int count,
+                                   int closed,
+                                   const DC_ProfileMeta *meta);
+
+/* Get the profile metadata (borrowed pointer, NULL if not in profile mode). */
+const DC_ProfileMeta *dc_bezier_editor_get_profile_meta(
+    const DC_BezierEditor *editor);
+
+/* Clear profile editing mode. Doesn't clear the points. */
+void dc_bezier_editor_clear_profile(DC_BezierEditor *editor);
+
+/* Profile apply callback — called when user clicks "Apply Profile".
+ * editor: the bezier editor with the modified curve.
+ * meta: the profile metadata (centroid, rotation, line range, etc.).
+ * userdata: user-provided context. */
+typedef void (*DC_ProfileApplyCb)(DC_BezierEditor *editor,
+                                   const DC_ProfileMeta *meta,
+                                   void *userdata);
+
+/* Set the callback for profile apply. */
+void dc_bezier_editor_set_profile_apply_cb(DC_BezierEditor *editor,
+                                             DC_ProfileApplyCb cb,
+                                             void *userdata);
+
 #endif /* DC_BEZIER_EDITOR_H */

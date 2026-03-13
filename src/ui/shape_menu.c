@@ -2,7 +2,9 @@
 #include "ui/code_editor.h"
 #include "ui/transform_panel.h"
 #include "ui/scad_preview.h"
+#include "bezier/bezier_editor.h"
 #include "gl/gl_viewport.h"
+#include "gl/edge_profile.h"
 #include "core/log.h"
 
 #include <string.h>
@@ -17,6 +19,7 @@ typedef struct {
     DC_GlViewport     *gl_vp;     /* borrowed */
     DC_TransformPanel *transform; /* borrowed, may be NULL */
     DC_ScadPreview    *preview;   /* borrowed, may be NULL */
+    DC_BezierEditor   *bez_ed;   /* borrowed, may be NULL */
     GtkWidget         *popover;   /* owned by GTK (attached to widget) */
     double             click_x;   /* right-click position */
     double             click_y;
@@ -268,9 +271,8 @@ on_modify_minkowski(GSimpleAction *action, GVariant *param, gpointer data)
         "    sphere(r=1);\n}");
 }
 
-/* Forward declarations */
+/* Forward declaration (defined below, needed by on_btn_extrude_face) */
 static void close_popover(ShapeMenuCtx *ctx);
-static int  get_selected_line_range(ShapeMenuCtx *ctx, int *line_start, int *line_end);
 
 /* -------------------------------------------------------------------------
  * Face extrude — dialog + code generation
@@ -601,6 +603,212 @@ static void on_btn_extrude_face(GtkButton *btn, gpointer data)
 }
 
 /* -------------------------------------------------------------------------
+ * Edge profile editing — load face boundary into bezier editor
+ * ---------------------------------------------------------------------- */
+
+static void
+on_profile_applied(DC_BezierEditor *editor, const DC_ProfileMeta *meta,
+                   void *userdata)
+{
+    ShapeMenuCtx *ctx = userdata;
+    if (!ctx->code_ed || !meta) return;
+
+    /* Sample the bezier curve to get polygon points */
+    int npts = dc_bezier_editor_point_count(editor);
+    if (npts < 4) return;
+
+    /* Tessellate the curve: evaluate each quadratic segment */
+    int n_seg = npts / 2;  /* closed: n_seg segments from 2*n_seg points */
+    int samples_per_seg = 16;
+    int total_samples = n_seg * samples_per_seg;
+
+    /* Build polygon points string */
+    char *pts_buf = malloc((size_t)total_samples * 40 + 64);
+    if (!pts_buf) return;
+    int pos = 0;
+    pos += sprintf(pts_buf + pos, "[");
+
+    int sample_count = 0;
+    for (int seg = 0; seg < n_seg; seg++) {
+        int i0 = seg * 2;
+        int i1 = seg * 2 + 1;
+        int i2 = (seg * 2 + 2) % npts;
+
+        double p0x, p0y, p1x, p1y, p2x, p2y;
+        dc_bezier_editor_get_point(editor, i0, &p0x, &p0y);
+        dc_bezier_editor_get_point(editor, i1, &p1x, &p1y);
+        dc_bezier_editor_get_point(editor, i2, &p2x, &p2y);
+
+        /* Don't include last point of last segment (wraps to first) */
+        int end = (seg == n_seg - 1) ? samples_per_seg : samples_per_seg;
+        for (int s = 0; s < end; s++) {
+            double t = (double)s / samples_per_seg;
+            double u = 1.0 - t;
+            double bx = u*u*p0x + 2*u*t*p1x + t*t*p2x;
+            double by = u*u*p0y + 2*u*t*p1y + t*t*p2y;
+
+            if (sample_count > 0) pos += sprintf(pts_buf + pos, ", ");
+            pos += sprintf(pts_buf + pos, "[%.3f, %.3f]", bx, by);
+            sample_count++;
+        }
+    }
+    pos += sprintf(pts_buf + pos, "]");
+
+    /* Build SCAD code */
+    char code[2048];
+    int cp = 0;
+    cp += sprintf(code + cp, "translate([%.3f, %.3f, %.3f])\n",
+                  (double)meta->centroid[0], (double)meta->centroid[1],
+                  (double)meta->centroid[2]);
+
+    if (fabsf(meta->rot_angles[0]) > 0.01f || fabsf(meta->rot_angles[1]) > 0.01f) {
+        cp += sprintf(code + cp, "rotate([%.1f, %.1f, %.1f])\n",
+                      (double)meta->rot_angles[0], (double)meta->rot_angles[1],
+                      (double)meta->rot_angles[2]);
+    }
+
+    cp += sprintf(code + cp, "linear_extrude(height=1)\n");
+    cp += sprintf(code + cp, "polygon(%s);", pts_buf);
+    free(pts_buf);
+
+    /* Replace the original object's code with the new profile extrude */
+    char *text = dc_code_editor_get_text(ctx->code_ed);
+    if (!text) return;
+
+    int ls = meta->line_start, le = meta->line_end;
+    int line = 1;
+    const char *p = text;
+    const char *start_ptr = NULL;
+    const char *end_ptr = NULL;
+    while (*p) {
+        if (line == ls && !start_ptr) start_ptr = p;
+        if (*p == '\n') {
+            if (line == le) { end_ptr = p + 1; break; }
+            line++;
+        }
+        p++;
+    }
+    if (!start_ptr) start_ptr = text;
+    if (!end_ptr) end_ptr = text + strlen(text);
+
+    size_t before_len = (size_t)(start_ptr - text);
+    size_t after_len = strlen(end_ptr);
+    size_t code_len = strlen(code);
+
+    char *buf = malloc(before_len + code_len + after_len + 4);
+    if (buf) {
+        size_t bp = 0;
+        memcpy(buf + bp, text, before_len); bp += before_len;
+        memcpy(buf + bp, code, code_len); bp += code_len;
+        if (bp > 0 && buf[bp-1] != '\n') buf[bp++] = '\n';
+        memcpy(buf + bp, end_ptr, after_len); bp += after_len;
+        buf[bp] = '\0';
+        dc_code_editor_set_text(ctx->code_ed, buf);
+        free(buf);
+    }
+    free(text);
+
+    /* Clear profile mode */
+    dc_bezier_editor_clear_profile(editor);
+
+    /* Re-render */
+    if (ctx->preview)
+        dc_scad_preview_render(ctx->preview);
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "shape_menu: profile applied (%d sample points)", sample_count);
+}
+
+static void
+show_edit_profile(ShapeMenuCtx *ctx)
+{
+    if (!ctx->gl_vp || !ctx->bez_ed) return;
+
+    int obj_idx = dc_gl_viewport_get_selected(ctx->gl_vp);
+    int face_idx = dc_gl_viewport_get_selected_face(ctx->gl_vp);
+    if (obj_idx < 0 || face_idx < 0) return;
+
+    /* Get face boundary */
+    float centroid[3], rot_angles[3];
+    int boundary_count;
+    float *boundary = dc_gl_viewport_get_face_boundary(
+        ctx->gl_vp, obj_idx, face_idx, &boundary_count,
+        centroid, rot_angles);
+
+    if (!boundary || boundary_count < 3) {
+        dc_log(DC_LOG_WARN, DC_LOG_EVENT_APP,
+               "shape_menu: cannot edit profile — no boundary (%d verts)",
+               boundary_count);
+        free(boundary);
+        return;
+    }
+
+    /* Analyze shape */
+    DC_EdgeProfile prof;
+    dc_edge_profile_analyze(boundary, boundary_count, &prof);
+
+    /* Generate bezier points */
+    DC_EP_Point *bez_pts = NULL;
+    int bez_count = 0;
+
+    if (prof.type == DC_PROFILE_CIRCLE) {
+        /* Use a proper bezier circle approximation */
+        bez_pts = dc_edge_profile_circle_bezier(
+            prof.circle.cx, prof.circle.cy, prof.circle.radius,
+            8, &bez_count);
+        dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+               "shape_menu: detected circle (r=%.2f, err=%.4f)",
+               prof.circle.radius, prof.circle.fit_error);
+    } else {
+        /* Use polygon→bezier conversion */
+        bez_pts = dc_edge_profile_polygon_bezier(boundary, boundary_count,
+                                                  &bez_count);
+        dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+               "shape_menu: freeform profile (%d verts)", boundary_count);
+    }
+    free(boundary);
+
+    if (!bez_pts || bez_count < 4) {
+        free(bez_pts);
+        return;
+    }
+
+    /* Build metadata */
+    DC_ProfileMeta meta = {0};
+    memcpy(meta.centroid, centroid, sizeof(centroid));
+    memcpy(meta.rot_angles, rot_angles, sizeof(rot_angles));
+    meta.obj_idx = obj_idx;
+    meta.face_idx = face_idx;
+    meta.line_start = ctx->sel_line_start;
+    meta.line_end = ctx->sel_line_end;
+
+    /* Convert to double array for the editor */
+    double *dpts = malloc((size_t)bez_count * 2 * sizeof(double));
+    if (!dpts) { free(bez_pts); return; }
+    for (int i = 0; i < bez_count; i++) {
+        dpts[i*2] = bez_pts[i].x;
+        dpts[i*2+1] = bez_pts[i].y;
+    }
+    free(bez_pts);
+
+    /* Set apply callback */
+    dc_bezier_editor_set_profile_apply_cb(ctx->bez_ed,
+                                           on_profile_applied, ctx);
+
+    /* Load into bezier editor */
+    dc_bezier_editor_load_profile(ctx->bez_ed, dpts, bez_count, 1, &meta);
+    free(dpts);
+}
+
+static void on_btn_edit_profile(GtkButton *btn, gpointer data)
+{
+    (void)btn;
+    ShapeMenuCtx *ctx = data;
+    close_popover(ctx);
+    show_edit_profile(ctx);
+}
+
+/* -------------------------------------------------------------------------
  * Right-click gesture handler — builds and shows popover
  * ---------------------------------------------------------------------- */
 
@@ -745,6 +953,10 @@ on_right_click(GtkGestureClick *gesture, int n_press,
 
         gtk_box_append(GTK_BOX(vbox), menu_button("  Extrude Face...",
                        G_CALLBACK(on_btn_extrude_face), ctx));
+        if (ctx->bez_ed) {
+            gtk_box_append(GTK_BOX(vbox), menu_button("  Edit Profile...",
+                           G_CALLBACK(on_btn_edit_profile), ctx));
+        }
     }
 
     GtkWidget *gl_widget = dc_gl_viewport_widget(ctx->gl_vp);
@@ -774,7 +986,8 @@ dc_shape_menu_attach(GtkWidget *gl_widget,
                       DC_CodeEditor *code_ed,
                       DC_GlViewport *gl_vp,
                       DC_TransformPanel *transform,
-                      DC_ScadPreview *preview)
+                      DC_ScadPreview *preview,
+                      DC_BezierEditor *bez_ed)
 {
     ShapeMenuCtx *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return;
@@ -782,6 +995,7 @@ dc_shape_menu_attach(GtkWidget *gl_widget,
     ctx->gl_vp     = gl_vp;
     ctx->transform = transform;
     ctx->preview   = preview;
+    ctx->bez_ed    = bez_ed;
     ctx->sel_obj   = -1;
 
     /* Register actions — shared group installed on both GL widget and window */

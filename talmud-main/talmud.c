@@ -4054,6 +4054,60 @@ static const char HELP_MEMORY_ACTIVE_SESSION_S018[] =
 "  - GL Y-up vs SCAD Z-up: x=x, y=-z, z=y for all geom.\n"
 "  - Popover lifecycle: free ExtrudeCtx in closed signal.\n";
 
+static const char HELP_MEMORY_ACTIVE_SESSION_S019[] =
+"Session s019 (Edge Profile Editing Pipeline)\n"
+"\n"
+"Session s019 — Edge-to-Bezier Profile Editing\n"
+"\n"
+"DATE: 2026-03-13\n"
+"\n"
+"FEATURES ADDED:\n"
+"  1. Edge profile analysis (edge_profile.h — header-only)\n"
+"     dc_edge_profile_analyze(): detects circle vs freeform\n"
+"     from 2D polygon. Circle: max deviation <5% from avg\n"
+"     radius with >=8 pts. Freeform: everything else.\n"
+"\n"
+"  2. Bezier point generation (edge_profile.h)\n"
+"     dc_edge_profile_circle_bezier(): N-segment quadratic\n"
+"     circle. Control pt at r/cos(da/2) along bisector.\n"
+"     8 segments = 0.31% max arc error.\n"
+"     dc_edge_profile_polygon_bezier(): on-curve at vertices,\n"
+"     off-curve at edge midpoints (linear, user curves it).\n"
+"\n"
+"  3. Profile editing API (bezier_editor.h/c)\n"
+"     DC_ProfileMeta: centroid, rot_angles, obj/face idx,\n"
+"     line_start/end, active flag.\n"
+"     dc_bezier_editor_load_profile(): clears pts, loads\n"
+"     new curve, sets closed, copies meta, fits view.\n"
+"     'Apply Profile' button (blue, hidden until loaded).\n"
+"     DC_ProfileApplyCb callback on apply click.\n"
+"\n"
+"  4. Right-click 'Edit Profile...' (shape_menu.c)\n"
+"     Added to Face Operations section alongside Extrude.\n"
+"     Pipeline: get_face_boundary -> analyze -> gen bezier\n"
+"     -> load_profile into bezier editor.\n"
+"     On apply: tessellate (16 samples/seg), gen polygon\n"
+"     SCAD with translate+rotate+linear_extrude, replace\n"
+"     original code lines, re-render.\n"
+"\n"
+"  5. API wiring (shape_menu.h, app_window.c)\n"
+"     dc_shape_menu_attach() now accepts DC_BezierEditor*.\n"
+"     app_window passes bezier editor to shape_menu.\n"
+"\n"
+"TESTS: 10/10 pass (14 edge_profile subtests)\n"
+"  - circle detection (32/64/8 pts, rect rejection)\n"
+"  - bezier circle (count, on-curve, controls, <0.5% arc)\n"
+"  - polygon bezier (count, on-curve, midpoint controls)\n"
+"\n"
+"FILES: edge_profile.h, bezier_editor.h/c, shape_menu.h/c,\n"
+"       app_window.c, test_edge_profile.c, CMakeLists.txt\n"
+"\n"
+"LESSONS:\n"
+"  - Quadratic bezier circle: ctrl at r/cos(da/2) bisector\n"
+"  - Forward decls needed when callback defined after use\n"
+"  - Profile pipeline is analyze->generate->load->sculpt->\n"
+"    tessellate->codegen — each step independently testable\n";
+
 static const char HELP_REFERENCE_DOCTRINE_PERSISTENCE[] =
 "The Persistence Doctrine\n"
 "\n"
@@ -4409,6 +4463,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s016", HELP_MEMORY_ACTIVE_SESSION_S016 },
     { "memory.active.session-s017", HELP_MEMORY_ACTIVE_SESSION_S017 },
     { "memory.active.session-s018", HELP_MEMORY_ACTIVE_SESSION_S018 },
+    { "memory.active.session-s019", HELP_MEMORY_ACTIVE_SESSION_S019 },
     { "reference.cubeiform", HELP_REFERENCE_CUBEIFORM },
     { "reference.cubeiform.primitives", HELP_REFERENCE_CUBEIFORM_PRIMITIVES },
     { "reference.cubeiform.transforms", HELP_REFERENCE_CUBEIFORM_TRANSFORMS },

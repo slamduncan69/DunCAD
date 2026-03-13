@@ -166,6 +166,19 @@ set_tests_properties(test_topo PROPERTIES
     ENVIRONMENT "ASAN_OPTIONS=detect_leaks=1"
 )
 
+# Edge profile test — pure C, no GTK dependency
+add_executable(test_edge_profile tests/test_edge_profile.c)
+target_include_directories(test_edge_profile PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_edge_profile
+    PRIVATE m
+    PRIVATE dc_compiler_flags
+    PRIVATE dc_asan_flags
+)
+add_test(NAME test_edge_profile COMMAND test_edge_profile)
+set_tests_properties(test_edge_profile PROPERTIES
+    ENVIRONMENT "ASAN_OPTIONS=detect_leaks=1"
+)
+
 # Bezier canvas test — needs GTK4 + canvas + editor sources
 add_executable(test_bezier_canvas
     tests/test_bezier_canvas.c
@@ -264,6 +277,6 @@ set_tests_properties(test_scad_runner PROPERTIES
 # ---------------------------------------------------------------------------
 add_custom_target(tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_scad_export test_topo test_bezier_canvas test_bezier_editor test_scad_runner
+    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_scad_export test_topo test_edge_profile test_bezier_canvas test_bezier_editor test_scad_runner
     COMMENT "Building and running all DunCAD tests"
 )
