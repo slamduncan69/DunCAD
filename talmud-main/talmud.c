@@ -48,8 +48,8 @@ static const char HELP_ROOT[] =
 "REQUIREMENTS:\n"
 "  gcc (C11)\n"
 "\n"
-">>> BRIS DETECTED — READ THIS FIRST:\n"
-"  talmud bris                      You have been inducted. Start here.\n"
+"WHAT TO WORK ON:\n"
+"  talmud purgatory                 Numbered priority queue of plans\n"
 "\n"
 "START HERE -- Search first, always:\n"
 "  talmud --search <terms...>       Ranked results, top 9 shown\n"
@@ -3391,6 +3391,54 @@ static const char HELP_MEMORY_ACTIVE_SESSION_S014[] =
 "ZERO STUBS REMAINING in trinity_site.\n"
 "All OpenSCAD math functions now have pure C implementations.\n";
 
+static const char HELP_MEMORY_ACTIVE_SESSION_S015[] =
+"Session s015 (AI Agent Hardening)\n"
+"\n"
+"Session s015 — AI Agent Hardening + Interaction Lock\n"
+"\n"
+"DATE: 2026-03-13\n"
+"COMMITS: 4a1210b, fcdbc56\n"
+"\n"
+"BUGS FIXED:\n"
+"  1. Inspect socket buffer overflow (CRASH)\n"
+"     on_incoming() char buf[4096] truncated large set_code.\n"
+"     Fix: dynamic malloc/realloc read loop.\n"
+"\n"
+"  2. Orphaned claude subprocess (GHOST COMMANDS)\n"
+"     Inner claude survived DunCAD crash, replayed on new socket.\n"
+"     Fix: pkill orphans on dc_ai_chat_new() startup.\n"
+"\n"
+"  3. Inner claude launching DunCAD (WINDOW KILL)\n"
+"     GTK D-Bus unique-app killed old window on second launch.\n"
+"     Fix: system prompt forbids launching binaries.\n"
+"\n"
+"  4. Render queue drops (CYLINDER CHUNKING)\n"
+"     do_render() dropped requests while busy.\n"
+"     Fix: render_pending flag + HQ cancel race fix.\n"
+"\n"
+"  5. Double window on re-activation\n"
+"     Fix: check gtk_application_get_active_window() first.\n"
+"\n"
+"FEATURES ADDED:\n"
+"  1. AI interaction lock — blocks picking/moving while busy,\n"
+"     status bar indicator, done_cb unlocks automatically.\n"
+"     API: dc_gl_viewport_set_locked() / get_locked()\n"
+"  2. Undo/redo — Ctrl+Z / Ctrl+Shift+Z via GtkTextBuffer.\n"
+"  3. AI streaming — stream-json parser, thinking/text/tool,\n"
+"     session persistence via --resume <session_id>.\n"
+"  4. AI chat log — duncad-ai-chat.log with [USER], [THINKING],\n"
+"     [RESPONSE], [tool:], [FULL TOOL OUTPUT], [SESSION_ID].\n"
+"\n"
+"FILES: inspect.c, ai_chat.c/h, app_window.c, code_editor.c/h,\n"
+"  gl_viewport.c/h, scad_preview.c, main.c, duncad_docs.c\n"
+"\n"
+"LESSONS:\n"
+"  - Inner agents with shell access WILL do unexpected things.\n"
+"  - GTK unique-app D-Bus silently kills windows on 2nd launch.\n"
+"  - Subprocess orphans survive parent crashes. Kill on startup.\n"
+"  - Fixed-size socket buffers + AI payloads = time bomb.\n"
+"  - Always log AI conversations to disk for post-mortem.\n";
+
 static const char HELP_REFERENCE_DOCTRINE_HOLY_PATH[] =
 "The Visual Inspection Rite\n"
 "\n"
@@ -3702,6 +3750,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s012", HELP_MEMORY_ACTIVE_SESSION_S012 },
     { "memory.active.session-s013", HELP_MEMORY_ACTIVE_SESSION_S013 },
     { "memory.active.session-s014", HELP_MEMORY_ACTIVE_SESSION_S014 },
+    { "memory.active.session-s015", HELP_MEMORY_ACTIVE_SESSION_S015 },
     { "reference.doctrine.holy-path", HELP_REFERENCE_DOCTRINE_HOLY_PATH },
     { "reference.doctrine.holy-path-ii", HELP_REFERENCE_DOCTRINE_HOLY_PATH_II },
     { "reference.doctrine.holy-path-iii", HELP_REFERENCE_DOCTRINE_HOLY_PATH_III },
