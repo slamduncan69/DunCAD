@@ -137,6 +137,79 @@ on_object_picked(int obj_idx, int line_start, int line_end, void *userdata)
 }
 
 /* -------------------------------------------------------------------------
+ * Code cursor → GL selection (reverse of pick → select_lines)
+ * ---------------------------------------------------------------------- */
+static void
+on_cursor_changed(GtkTextBuffer *buffer, GtkTextIter *location,
+                  GtkTextMark *mark, gpointer data)
+{
+    PickCtx *ctx = data;
+    if (!ctx->gl_vp) return;
+
+    /* Only react to the insert mark (cursor), not selection-bound etc. */
+    if (mark != gtk_text_buffer_get_insert(buffer)) return;
+
+    /* Don't fight with GL-initiated selections (check if GL has focus) */
+    GtkWidget *gl_widget = dc_gl_viewport_widget(ctx->gl_vp);
+    if (gl_widget && gtk_widget_has_focus(gl_widget)) return;
+
+    int cursor_line = gtk_text_iter_get_line(location) + 1; /* 1-based */
+
+    /* Find which object covers this line */
+    int count = dc_gl_viewport_get_object_count(ctx->gl_vp);
+    int best = -1;
+    for (int i = 0; i < count; i++) {
+        int ls, le;
+        if (dc_gl_viewport_get_object_lines(ctx->gl_vp, i, &ls, &le) == 0) {
+            if (cursor_line >= ls && cursor_line <= le) {
+                best = i;
+                break;
+            }
+        }
+    }
+
+    /* Select the object (or deselect if cursor is outside all objects).
+     * Use select_object_quiet to avoid feedback loop (no pick callback). */
+    int current = dc_gl_viewport_get_selected(ctx->gl_vp);
+    if (best != current) {
+        dc_gl_viewport_select_object_quiet(ctx->gl_vp, best);
+
+        /* Update transform panel */
+        if (best >= 0 && ctx->transform) {
+            int ls, le;
+            dc_gl_viewport_get_object_lines(ctx->gl_vp, best, &ls, &le);
+            char *full = dc_code_editor_get_text(ctx->code_ed);
+            if (full) {
+                int line = 1;
+                const char *p = full;
+                const char *sp = NULL, *ep = NULL;
+                while (*p) {
+                    if (line == ls && !sp) sp = p;
+                    if (*p == '\n') {
+                        if (line == le) { ep = p; break; }
+                        line++;
+                    }
+                    p++;
+                }
+                if (!sp) sp = full;
+                if (!ep) ep = full + strlen(full);
+                size_t len = (size_t)(ep - sp);
+                char *stmt = malloc(len + 1);
+                if (stmt) {
+                    memcpy(stmt, sp, len);
+                    stmt[len] = '\0';
+                    dc_transform_panel_show(ctx->transform, stmt, ls, le);
+                    free(stmt);
+                }
+                free(full);
+            }
+        } else if (best < 0 && ctx->transform) {
+            dc_transform_panel_hide(ctx->transform);
+        }
+    }
+}
+
+/* -------------------------------------------------------------------------
  * Move callback — viewport object drag → live translate update
  * ---------------------------------------------------------------------- */
 static void
@@ -554,6 +627,13 @@ dc_app_window_create(GtkApplication *app)
         dc_gl_viewport_set_pick_callback(gl_vp, on_object_picked, pick_ctx);
         dc_gl_viewport_set_move_callback(gl_vp, on_object_moved, pick_ctx);
         g_object_set_data_full(G_OBJECT(window), "dc-pick-ctx", pick_ctx, free);
+
+        /* Code cursor → GL selection (reverse direction) */
+        GtkTextBuffer *buf = dc_code_editor_get_buffer(code_ed);
+        if (buf) {
+            g_signal_connect(buf, "mark-set",
+                             G_CALLBACK(on_cursor_changed), pick_ctx);
+        }
 
         /* Enter in transform panel entries → trigger render */
         dc_transform_panel_set_enter_callback(

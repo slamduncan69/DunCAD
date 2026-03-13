@@ -44,4 +44,10 @@ struct DC_GlViewport *dc_scad_preview_get_viewport(DC_ScadPreview *pv);
 /* Get the transform panel (for pick callback wiring). Borrowed pointer. */
 struct DC_TransformPanel *dc_scad_preview_get_transform(DC_ScadPreview *pv);
 
+/* Get the current render status text (borrowed, from status label). */
+const char *dc_scad_preview_get_status(DC_ScadPreview *pv);
+
+/* Returns 1 if a render (preview or HQ) is in progress. */
+int dc_scad_preview_is_rendering(DC_ScadPreview *pv);
+
 #endif /* DC_SCAD_PREVIEW_H */

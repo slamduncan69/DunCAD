@@ -708,3 +708,17 @@ dc_scad_preview_get_transform(DC_ScadPreview *pv)
 {
     return pv ? pv->transform : NULL;
 }
+
+const char *
+dc_scad_preview_get_status(DC_ScadPreview *pv)
+{
+    if (!pv || !pv->status_label) return "";
+    return gtk_label_get_text(GTK_LABEL(pv->status_label));
+}
+
+int
+dc_scad_preview_is_rendering(DC_ScadPreview *pv)
+{
+    if (!pv) return 0;
+    return pv->rendering || pv->hq_running;
+}

@@ -370,6 +370,23 @@ cmd_preview_render(void)
     return strdup("{\"ok\":true}\n");
 }
 
+static char *
+cmd_render_status(void)
+{
+    DC_ScadPreview *pv = get_preview();
+    if (!pv) return strdup("{\"error\":\"no scad preview\"}\n");
+
+    const char *status = dc_scad_preview_get_status(pv);
+    int busy = dc_scad_preview_is_rendering(pv);
+
+    /* Build JSON response */
+    size_t len = strlen(status) + 128;
+    char *buf = malloc(len);
+    snprintf(buf, len, "{\"rendering\":%s,\"status\":\"%s\"}\n",
+             busy ? "true" : "false", status);
+    return buf;
+}
+
 /* =========================================================================
  * CODE EDITOR COMMANDS
  * ========================================================================= */
@@ -805,7 +822,8 @@ cmd_help(void)
         "\"scad\":["
         "\"render_scad <scad_path> [png_path]\","
         "\"open_scad <path>\","
-        "\"preview_render\""
+        "\"preview_render\","
+        "\"render_status\""
         "],"
 
         "\"gl\":["
@@ -884,6 +902,7 @@ dispatch(const char *cmd)
     if (strcmp(name, "render_scad")   == 0) return cmd_render_scad(args);
     if (strcmp(name, "open_scad")     == 0) return cmd_open_scad(args);
     if (strcmp(name, "preview_render") == 0) return cmd_preview_render();
+    if (strcmp(name, "render_status")  == 0) return cmd_render_status();
 
     /* GL viewport */
     if (strcmp(name, "gl_state")  == 0) return cmd_gl_state();

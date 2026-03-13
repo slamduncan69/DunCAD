@@ -670,6 +670,9 @@ on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data)
 {
     DC_GlViewport *vp = data;
 
+    /* Grab focus so key events (axis constraints) go to GL, not code editor */
+    gtk_widget_grab_focus(vp->gl_area);
+
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(gesture));
     GdkModifierType mods = gdk_event_get_modifier_state(event);
     guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
@@ -685,8 +688,6 @@ on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data)
                vp->selected_obj >= 0 && vp->move_cb) {
         /* Move: left-drag on already-selected object */
         vp->dragging = 3;
-        /* Grab keyboard focus for axis constraint keys (Z/X/C) */
-        gtk_widget_grab_focus(vp->gl_area);
         /* Signal move start (phase 0) */
         vp->move_cb(vp->selected_obj, 0, 0.0f, 0.0f, 0.0f, vp->move_cb_data);
     } else {
@@ -1030,6 +1031,9 @@ on_click_pressed(GtkGestureClick *gesture, int n_press,
 {
     (void)gesture; (void)n_press;
     DC_GlViewport *vp = data;
+
+    /* Always grab focus so axis constraint keys go here, not code editor */
+    gtk_widget_grab_focus(vp->gl_area);
 
     if (vp->locked || vp->obj_count == 0) return;
 
@@ -1512,6 +1516,15 @@ dc_gl_viewport_capture_png(DC_GlViewport *vp, const char *path)
     }
 
     return vp->capture_result;
+}
+
+void
+dc_gl_viewport_select_object_quiet(DC_GlViewport *vp, int obj_idx)
+{
+    if (!vp) return;
+    if (obj_idx >= vp->obj_count) return;
+    vp->selected_obj = obj_idx;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
 }
 
 void
