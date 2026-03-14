@@ -83,6 +83,7 @@ int              dc_bezier_editor_insert_scad(DC_BezierEditor *editor,
 typedef struct {
     float  centroid[3];     /* SCAD-space centroid of the face */
     float  rot_angles[3];  /* Euler angles to orient extrusion along face normal */
+    float  height;          /* object extent along face normal (for extrude height) */
     int    obj_idx;         /* GL viewport object index */
     int    face_idx;        /* face group index */
     int    line_start;      /* source code line range of original object */

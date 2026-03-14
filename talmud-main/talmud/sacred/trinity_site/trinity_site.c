@@ -1074,6 +1074,111 @@ static void test_polyhedron_red(void) {
     TS_PASS();
 }
 
+/* --- Platonic solids --- */
+
+static void test_tetrahedron_green(void) {
+    ts_mesh m = ts_mesh_init();
+    ts_gen_tetrahedron(1.0, &m);
+    TS_ASSERT_EQ_INT(m.tri_count, 4);
+    TS_ASSERT_EQ_INT(m.vert_count, 12);
+    for (int i = 0; i < m.vert_count; i++) {
+        double r = sqrt(m.verts[i].pos[0]*m.verts[i].pos[0] +
+                        m.verts[i].pos[1]*m.verts[i].pos[1] +
+                        m.verts[i].pos[2]*m.verts[i].pos[2]);
+        TS_ASSERT_NEAR(r, 1.0, 1e-10);
+    }
+    ts_mesh_free(&m);
+    TS_PASS();
+}
+static void test_tetrahedron_red(void) {
+    ts_mesh m = ts_mesh_init();
+    ts_gen_tetrahedron(5.0, &m);
+    for (int i = 0; i < m.vert_count; i++) {
+        double r = sqrt(m.verts[i].pos[0]*m.verts[i].pos[0] +
+                        m.verts[i].pos[1]*m.verts[i].pos[1] +
+                        m.verts[i].pos[2]*m.verts[i].pos[2]);
+        TS_ASSERT_NEAR(r, 5.0, 1e-10);
+    }
+    ts_mesh_free(&m);
+    TS_PASS();
+}
+
+static void test_octahedron_green(void) {
+    ts_mesh m = ts_mesh_init();
+    ts_gen_octahedron(1.0, &m);
+    TS_ASSERT_EQ_INT(m.tri_count, 8);
+    TS_ASSERT_EQ_INT(m.vert_count, 24);
+    for (int i = 0; i < m.vert_count; i++) {
+        double r = sqrt(m.verts[i].pos[0]*m.verts[i].pos[0] +
+                        m.verts[i].pos[1]*m.verts[i].pos[1] +
+                        m.verts[i].pos[2]*m.verts[i].pos[2]);
+        TS_ASSERT_NEAR(r, 1.0, 1e-10);
+    }
+    ts_mesh_free(&m);
+    TS_PASS();
+}
+static void test_octahedron_red(void) {
+    ts_mesh m = ts_mesh_init();
+    ts_gen_octahedron(3.0, &m);
+    double mn[3], mx[3];
+    ts_mesh_bounds(&m, mn, mx);
+    TS_ASSERT_TRUE(mx[0] > 2.5);
+    ts_mesh_free(&m);
+    TS_PASS();
+}
+
+static void test_dodecahedron_green(void) {
+    ts_mesh m = ts_mesh_init();
+    ts_gen_dodecahedron(1.0, &m);
+    TS_ASSERT_EQ_INT(m.tri_count, 36);
+    TS_ASSERT_TRUE(m.vert_count > 0);
+    for (int i = 0; i < m.vert_count; i++) {
+        double r = sqrt(m.verts[i].pos[0]*m.verts[i].pos[0] +
+                        m.verts[i].pos[1]*m.verts[i].pos[1] +
+                        m.verts[i].pos[2]*m.verts[i].pos[2]);
+        TS_ASSERT_NEAR(r, 1.0, 0.01);
+    }
+    ts_mesh_free(&m);
+    TS_PASS();
+}
+static void test_dodecahedron_red(void) {
+    ts_mesh m = ts_mesh_init();
+    ts_gen_dodecahedron(10.0, &m);
+    double mn[3], mx[3];
+    ts_mesh_bounds(&m, mn, mx);
+    TS_ASSERT_TRUE(mx[0] > 5.0);
+    TS_ASSERT_TRUE(mn[0] < -5.0);
+    ts_mesh_free(&m);
+    TS_PASS();
+}
+
+static void test_icosahedron_green(void) {
+    ts_mesh m = ts_mesh_init();
+    ts_gen_icosahedron(1.0, &m);
+    TS_ASSERT_EQ_INT(m.tri_count, 20);
+    TS_ASSERT_EQ_INT(m.vert_count, 60);
+    for (int i = 0; i < m.vert_count; i++) {
+        double r = sqrt(m.verts[i].pos[0]*m.verts[i].pos[0] +
+                        m.verts[i].pos[1]*m.verts[i].pos[1] +
+                        m.verts[i].pos[2]*m.verts[i].pos[2]);
+        TS_ASSERT_NEAR(r, 1.0, 1e-10);
+    }
+    ts_mesh_free(&m);
+    TS_PASS();
+}
+static void test_icosahedron_red(void) {
+    ts_mesh m = ts_mesh_init();
+    ts_gen_icosahedron(7.0, &m);
+    for (int i = 0; i < m.vert_count; i++) {
+        double r = sqrt(m.verts[i].pos[0]*m.verts[i].pos[0] +
+                        m.verts[i].pos[1]*m.verts[i].pos[1] +
+                        m.verts[i].pos[2]*m.verts[i].pos[2]);
+        TS_ASSERT_NEAR(r, 7.0, 1e-10);
+    }
+    ts_mesh_free(&m);
+    TS_PASS();
+}
+
 /* ================================================================
  * SECTION 6: RANDOM NUMBER TESTS
  * OpenSCAD: rands(min, max, count, seed)
@@ -2725,6 +2830,22 @@ static void run_all_tests(void) {
     ts_section("GEO: polyhedron", TS_PAR_GPU);
     ts_run_test("polyhedron_green", test_polyhedron_green);
     ts_run_test("polyhedron_red", test_polyhedron_red);
+
+    ts_section("GEO: tetrahedron", TS_PAR_GPU);
+    ts_run_test("tetrahedron_green", test_tetrahedron_green);
+    ts_run_test("tetrahedron_red", test_tetrahedron_red);
+
+    ts_section("GEO: octahedron", TS_PAR_GPU);
+    ts_run_test("octahedron_green", test_octahedron_green);
+    ts_run_test("octahedron_red", test_octahedron_red);
+
+    ts_section("GEO: dodecahedron", TS_PAR_GPU);
+    ts_run_test("dodecahedron_green", test_dodecahedron_green);
+    ts_run_test("dodecahedron_red", test_dodecahedron_red);
+
+    ts_section("GEO: icosahedron", TS_PAR_GPU);
+    ts_run_test("icosahedron_green", test_icosahedron_green);
+    ts_run_test("icosahedron_red", test_icosahedron_red);
 
     /* --- Random --- */
     ts_section("RANDOM: rands", TS_PAR_TRIVIAL);

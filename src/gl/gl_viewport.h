@@ -181,4 +181,10 @@ float *dc_gl_viewport_get_face_boundary(DC_GlViewport *vp, int obj_idx,
                                          float *centroid_out,
                                          float *rot_angles_out);
 
+/* Compute the extent (height) of an object along a given direction.
+ * Projects all vertices onto the direction vector and returns max - min.
+ * Direction is in GL/mesh space (not SCAD space). Returns 0 on error. */
+float dc_gl_viewport_get_object_extent(DC_GlViewport *vp, int obj_idx,
+                                        float dx, float dy, float dz);
+
 #endif /* DC_GL_VIEWPORT_H */

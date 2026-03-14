@@ -2533,3 +2533,29 @@ dc_gl_viewport_get_face_boundary(DC_GlViewport *vp, int obj_idx,
     *count = nv;
     return pts2d;
 }
+
+float
+dc_gl_viewport_get_object_extent(DC_GlViewport *vp, int obj_idx,
+                                  float dx, float dy, float dz)
+{
+    if (!vp || obj_idx < 0 || obj_idx >= vp->obj_count) return 0;
+    DC_StlMesh *m = vp->objects[obj_idx].mesh;
+    if (!m || m->num_vertices < 3) return 0;
+
+    /* Normalize direction */
+    float len = sqrtf(dx*dx + dy*dy + dz*dz);
+    if (len < 1e-9f) return 0;
+    dx /= len; dy /= len; dz /= len;
+
+    float proj_min = 1e30f, proj_max = -1e30f;
+    for (int i = 0; i < m->num_vertices; i++) {
+        /* data layout: [nx,ny,nz, vx,vy,vz] per vertex */
+        float vx = m->data[i*6+3];
+        float vy = m->data[i*6+4];
+        float vz = m->data[i*6+5];
+        float proj = vx*dx + vy*dy + vz*dz;
+        if (proj < proj_min) proj_min = proj;
+        if (proj > proj_max) proj_max = proj;
+    }
+    return proj_max - proj_min;
+}

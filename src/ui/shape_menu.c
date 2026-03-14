@@ -87,6 +87,22 @@ on_insert_cylinder(GSimpleAction *action, GVariant *param, gpointer data)
     insert_shape(data, "cylinder(d=10, h=20, center=true);");
 }
 
+static void
+on_insert_tetrahedron(GSimpleAction *action, GVariant *param, gpointer data)
+{ (void)action; (void)param; insert_shape(data, "tetrahedron(r=10);"); }
+
+static void
+on_insert_octahedron(GSimpleAction *action, GVariant *param, gpointer data)
+{ (void)action; (void)param; insert_shape(data, "octahedron(r=10);"); }
+
+static void
+on_insert_dodecahedron(GSimpleAction *action, GVariant *param, gpointer data)
+{ (void)action; (void)param; insert_shape(data, "dodecahedron(r=10);"); }
+
+static void
+on_insert_icosahedron(GSimpleAction *action, GVariant *param, gpointer data)
+{ (void)action; (void)param; insert_shape(data, "icosahedron(r=10);"); }
+
 /* -------------------------------------------------------------------------
  * Shape modification — wraps selected object's code
  * ---------------------------------------------------------------------- */
@@ -617,12 +633,12 @@ on_profile_applied(DC_BezierEditor *editor, const DC_ProfileMeta *meta,
     int npts = dc_bezier_editor_point_count(editor);
     if (npts < 4) return;
 
-    /* Tessellate the curve: evaluate each quadratic segment */
+    /* Tessellate the curve: evaluate each quadratic segment.
+     * 8 samples per segment — enough for smooth output without bloat. */
     int n_seg = npts / 2;  /* closed: n_seg segments from 2*n_seg points */
-    int samples_per_seg = 16;
+    int samples_per_seg = 8;
     int total_samples = n_seg * samples_per_seg;
 
-    /* Build polygon points string */
     char *pts_buf = malloc((size_t)total_samples * 40 + 64);
     if (!pts_buf) return;
     int pos = 0;
@@ -639,9 +655,7 @@ on_profile_applied(DC_BezierEditor *editor, const DC_ProfileMeta *meta,
         dc_bezier_editor_get_point(editor, i1, &p1x, &p1y);
         dc_bezier_editor_get_point(editor, i2, &p2x, &p2y);
 
-        /* Don't include last point of last segment (wraps to first) */
-        int end = (seg == n_seg - 1) ? samples_per_seg : samples_per_seg;
-        for (int s = 0; s < end; s++) {
+        for (int s = 0; s < samples_per_seg; s++) {
             double t = (double)s / samples_per_seg;
             double u = 1.0 - t;
             double bx = u*u*p0x + 2*u*t*p1x + t*t*p2x;
@@ -654,9 +668,31 @@ on_profile_applied(DC_BezierEditor *editor, const DC_ProfileMeta *meta,
     }
     pos += sprintf(pts_buf + pos, "]");
 
-    /* Build SCAD code */
-    char code[2048];
+    /* Build bezier comment: stores original control points for re-editing */
+    char *bez_comment = malloc((size_t)npts * 30 + 64);
+    if (!bez_comment) { free(pts_buf); return; }
+    int bc = 0;
+    bc += sprintf(bez_comment + bc, "// dc_bezier: %d", npts);
+    for (int i = 0; i < npts; i++) {
+        double bx, by;
+        dc_bezier_editor_get_point(editor, i, &bx, &by);
+        bc += sprintf(bez_comment + bc, " %.4f,%.4f", bx, by);
+    }
+    bc += sprintf(bez_comment + bc, "\n");
+
+    /* Build SCAD code — dynamic buffer since polygon string can be large */
+    size_t pts_len = strlen(pts_buf);
+    size_t bez_len = strlen(bez_comment);
+    size_t code_sz = pts_len + bez_len + 512;
+    char *code = malloc(code_sz);
+    if (!code) { free(pts_buf); free(bez_comment); return; }
     int cp = 0;
+
+    /* Emit bezier comment first (parsed on re-edit) */
+    memcpy(code, bez_comment, bez_len);
+    cp = (int)bez_len;
+    free(bez_comment);
+
     cp += sprintf(code + cp, "translate([%.3f, %.3f, %.3f])\n",
                   (double)meta->centroid[0], (double)meta->centroid[1],
                   (double)meta->centroid[2]);
@@ -667,7 +703,7 @@ on_profile_applied(DC_BezierEditor *editor, const DC_ProfileMeta *meta,
                       (double)meta->rot_angles[2]);
     }
 
-    cp += sprintf(code + cp, "linear_extrude(height=1)\n");
+    cp += sprintf(code + cp, "linear_extrude(height=%.3f)\n", (double)meta->height);
     cp += sprintf(code + cp, "polygon(%s);", pts_buf);
     free(pts_buf);
 
@@ -707,6 +743,7 @@ on_profile_applied(DC_BezierEditor *editor, const DC_ProfileMeta *meta,
         free(buf);
     }
     free(text);
+    free(code);
 
     /* Clear profile mode */
     dc_bezier_editor_clear_profile(editor);
@@ -719,6 +756,64 @@ on_profile_applied(DC_BezierEditor *editor, const DC_ProfileMeta *meta,
            "shape_menu: profile applied (%d sample points)", sample_count);
 }
 
+/* Try to parse a "// dc_bezier: N x0,y0 x1,y1 ..." comment from source code.
+ * Returns malloc'd double array of [x,y] pairs, sets *count. NULL if not found. */
+static double *
+parse_bezier_comment(const char *source, int line_start, int line_end, int *count)
+{
+    if (!source || line_start <= 0) return NULL;
+
+    /* Find the line range in the source text */
+    const char *p = source;
+    int line = 1;
+    const char *region_start = NULL;
+    const char *region_end = NULL;
+    while (*p) {
+        if (line == line_start && !region_start) region_start = p;
+        if (*p == '\n') {
+            if (line == line_end) { region_end = p + 1; break; }
+            line++;
+        }
+        p++;
+    }
+    if (!region_start) return NULL;
+    if (!region_end) region_end = source + strlen(source);
+
+    /* Search for "// dc_bezier:" in the region */
+    const char *marker = "// dc_bezier:";
+    size_t marker_len = strlen(marker);
+    const char *found = NULL;
+    for (const char *s = region_start; s < region_end - marker_len; s++) {
+        if (memcmp(s, marker, marker_len) == 0) { found = s + marker_len; break; }
+    }
+    if (!found) return NULL;
+
+    /* Parse: " N x0,y0 x1,y1 ..." */
+    int n = 0;
+    const char *cur = found;
+    while (*cur == ' ') cur++;
+    n = atoi(cur);
+    if (n < 4 || n > 10000) return NULL;
+    while (*cur && *cur != ' ' && *cur != '\n') cur++;
+
+    double *pts = malloc((size_t)n * 2 * sizeof(double));
+    if (!pts) return NULL;
+
+    for (int i = 0; i < n; i++) {
+        while (*cur == ' ') cur++;
+        if (!*cur || *cur == '\n') { free(pts); return NULL; }
+        char *end;
+        pts[i*2] = strtod(cur, &end);
+        if (*end != ',') { free(pts); return NULL; }
+        cur = end + 1;
+        pts[i*2+1] = strtod(cur, &end);
+        cur = end;
+    }
+
+    *count = n;
+    return pts;
+}
+
 static void
 show_edit_profile(ShapeMenuCtx *ctx)
 {
@@ -728,7 +823,7 @@ show_edit_profile(ShapeMenuCtx *ctx)
     int face_idx = dc_gl_viewport_get_selected_face(ctx->gl_vp);
     if (obj_idx < 0 || face_idx < 0) return;
 
-    /* Get face boundary */
+    /* Get face boundary (needed for centroid/rotation even if we have cached bezier) */
     float centroid[3], rot_angles[3];
     int boundary_count;
     float *boundary = dc_gl_viewport_get_face_boundary(
@@ -743,53 +838,72 @@ show_edit_profile(ShapeMenuCtx *ctx)
         return;
     }
 
-    /* Analyze shape */
-    DC_EdgeProfile prof;
-    dc_edge_profile_analyze(boundary, boundary_count, &prof);
+    /* Compute object height along face normal */
+    float nx, ny, nz;
+    dc_gl_viewport_get_face_normal(ctx->gl_vp, obj_idx, face_idx, &nx, &ny, &nz);
+    float height = dc_gl_viewport_get_object_extent(ctx->gl_vp, obj_idx, nx, ny, nz);
+    if (height < 0.001f) height = 1.0f;
 
-    /* Generate bezier points */
-    DC_EP_Point *bez_pts = NULL;
+    /* Try to recover original bezier control points from source code comment */
+    double *dpts = NULL;
     int bez_count = 0;
+    char *text = dc_code_editor_get_text(ctx->code_ed);
+    if (text && ctx->sel_line_start > 0) {
+        dpts = parse_bezier_comment(text, ctx->sel_line_start,
+                                     ctx->sel_line_end, &bez_count);
+        if (dpts) {
+            dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+                   "shape_menu: recovered %d bezier points from source comment",
+                   bez_count);
+        }
+    }
+    free(text);
 
-    if (prof.type == DC_PROFILE_CIRCLE) {
-        /* Use a proper bezier circle approximation */
-        bez_pts = dc_edge_profile_circle_bezier(
-            prof.circle.cx, prof.circle.cy, prof.circle.radius,
-            8, &bez_count);
-        dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-               "shape_menu: detected circle (r=%.2f, err=%.4f)",
-               prof.circle.radius, prof.circle.fit_error);
-    } else {
-        /* Use polygon→bezier conversion */
-        bez_pts = dc_edge_profile_polygon_bezier(boundary, boundary_count,
-                                                  &bez_count);
-        dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-               "shape_menu: freeform profile (%d verts)", boundary_count);
+    /* If no cached bezier, generate from mesh boundary */
+    if (!dpts) {
+        DC_EdgeProfile prof;
+        dc_edge_profile_analyze(boundary, boundary_count, &prof);
+
+        DC_EP_Point *bez_pts = NULL;
+        if (prof.type == DC_PROFILE_CIRCLE) {
+            bez_pts = dc_edge_profile_circle_bezier(
+                prof.circle.cx, prof.circle.cy, prof.circle.radius,
+                8, &bez_count);
+            dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+                   "shape_menu: detected circle (r=%.2f, err=%.4f)",
+                   prof.circle.radius, prof.circle.fit_error);
+        } else {
+            bez_pts = dc_edge_profile_polygon_bezier(boundary, boundary_count,
+                                                      &bez_count);
+            dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+                   "shape_menu: freeform profile (%d verts)", boundary_count);
+        }
+
+        if (!bez_pts || bez_count < 4) {
+            free(bez_pts);
+            free(boundary);
+            return;
+        }
+
+        dpts = malloc((size_t)bez_count * 2 * sizeof(double));
+        if (!dpts) { free(bez_pts); free(boundary); return; }
+        for (int i = 0; i < bez_count; i++) {
+            dpts[i*2] = bez_pts[i].x;
+            dpts[i*2+1] = bez_pts[i].y;
+        }
+        free(bez_pts);
     }
     free(boundary);
-
-    if (!bez_pts || bez_count < 4) {
-        free(bez_pts);
-        return;
-    }
 
     /* Build metadata */
     DC_ProfileMeta meta = {0};
     memcpy(meta.centroid, centroid, sizeof(centroid));
     memcpy(meta.rot_angles, rot_angles, sizeof(rot_angles));
+    meta.height = height;
     meta.obj_idx = obj_idx;
     meta.face_idx = face_idx;
     meta.line_start = ctx->sel_line_start;
     meta.line_end = ctx->sel_line_end;
-
-    /* Convert to double array for the editor */
-    double *dpts = malloc((size_t)bez_count * 2 * sizeof(double));
-    if (!dpts) { free(bez_pts); return; }
-    for (int i = 0; i < bez_count; i++) {
-        dpts[i*2] = bez_pts[i].x;
-        dpts[i*2+1] = bez_pts[i].y;
-    }
-    free(bez_pts);
 
     /* Set apply callback */
     dc_bezier_editor_set_profile_apply_cb(ctx->bez_ed,
@@ -838,6 +952,18 @@ static void on_btn_insert_sphere(GtkButton *btn, gpointer data)
 
 static void on_btn_insert_cylinder(GtkButton *btn, gpointer data)
 { (void)btn; ShapeMenuCtx *c = data; insert_shape(c, "cylinder(d=10, h=20, center=true);"); close_popover(c); }
+
+static void on_btn_insert_tetra(GtkButton *btn, gpointer data)
+{ (void)btn; ShapeMenuCtx *c = data; insert_shape(c, "tetrahedron(r=10);"); close_popover(c); }
+
+static void on_btn_insert_octa(GtkButton *btn, gpointer data)
+{ (void)btn; ShapeMenuCtx *c = data; insert_shape(c, "octahedron(r=10);"); close_popover(c); }
+
+static void on_btn_insert_dodeca(GtkButton *btn, gpointer data)
+{ (void)btn; ShapeMenuCtx *c = data; insert_shape(c, "dodecahedron(r=10);"); close_popover(c); }
+
+static void on_btn_insert_icosa(GtkButton *btn, gpointer data)
+{ (void)btn; ShapeMenuCtx *c = data; insert_shape(c, "icosahedron(r=10);"); close_popover(c); }
 
 static void on_btn_modify_difference(GtkButton *btn, gpointer data)
 {
@@ -918,6 +1044,10 @@ on_right_click(GtkGestureClick *gesture, int n_press,
     gtk_box_append(GTK_BOX(vbox), menu_button("  Cube", G_CALLBACK(on_btn_insert_cube), ctx));
     gtk_box_append(GTK_BOX(vbox), menu_button("  Sphere", G_CALLBACK(on_btn_insert_sphere), ctx));
     gtk_box_append(GTK_BOX(vbox), menu_button("  Cylinder", G_CALLBACK(on_btn_insert_cylinder), ctx));
+    gtk_box_append(GTK_BOX(vbox), menu_button("  Tetrahedron", G_CALLBACK(on_btn_insert_tetra), ctx));
+    gtk_box_append(GTK_BOX(vbox), menu_button("  Octahedron", G_CALLBACK(on_btn_insert_octa), ctx));
+    gtk_box_append(GTK_BOX(vbox), menu_button("  Dodecahedron", G_CALLBACK(on_btn_insert_dodeca), ctx));
+    gtk_box_append(GTK_BOX(vbox), menu_button("  Icosahedron", G_CALLBACK(on_btn_insert_icosa), ctx));
 
     /* Section: Modify Shape (only if selected) */
     if (ctx->sel_obj >= 0) {
@@ -1015,6 +1145,22 @@ dc_shape_menu_attach(GtkWidget *gl_widget,
     g_signal_connect(a, "activate", G_CALLBACK(on_insert_cylinder), ctx);
     g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(a));
 
+    a = g_simple_action_new("insert-tetrahedron", NULL);
+    g_signal_connect(a, "activate", G_CALLBACK(on_insert_tetrahedron), ctx);
+    g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(a));
+
+    a = g_simple_action_new("insert-octahedron", NULL);
+    g_signal_connect(a, "activate", G_CALLBACK(on_insert_octahedron), ctx);
+    g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(a));
+
+    a = g_simple_action_new("insert-dodecahedron", NULL);
+    g_signal_connect(a, "activate", G_CALLBACK(on_insert_dodecahedron), ctx);
+    g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(a));
+
+    a = g_simple_action_new("insert-icosahedron", NULL);
+    g_signal_connect(a, "activate", G_CALLBACK(on_insert_icosahedron), ctx);
+    g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(a));
+
     /* Modify actions */
     a = g_simple_action_new("modify-difference", NULL);
     g_signal_connect(a, "activate", G_CALLBACK(on_modify_difference), ctx);
@@ -1058,8 +1204,12 @@ GMenuModel *
 dc_shape_menu_build_insert_menu(void)
 {
     GMenu *insert_menu = g_menu_new();
-    g_menu_append(insert_menu, "Cube",     "shape.insert-cube");
-    g_menu_append(insert_menu, "Sphere",   "shape.insert-sphere");
-    g_menu_append(insert_menu, "Cylinder", "shape.insert-cylinder");
+    g_menu_append(insert_menu, "Cube",         "shape.insert-cube");
+    g_menu_append(insert_menu, "Sphere",       "shape.insert-sphere");
+    g_menu_append(insert_menu, "Cylinder",     "shape.insert-cylinder");
+    g_menu_append(insert_menu, "Tetrahedron",  "shape.insert-tetrahedron");
+    g_menu_append(insert_menu, "Octahedron",   "shape.insert-octahedron");
+    g_menu_append(insert_menu, "Dodecahedron", "shape.insert-dodecahedron");
+    g_menu_append(insert_menu, "Icosahedron",  "shape.insert-icosahedron");
     return G_MENU_MODEL(insert_menu);
 }

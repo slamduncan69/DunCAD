@@ -1057,6 +1057,39 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             return result;
         }
 
+        /* --- Platonic Solids --- */
+        if (strcmp(name, "tetrahedron") == 0) {
+            ts_val r_v = ts_arg_get(node, env, "r", 0, ts_val_num(1));
+            double r = ts_val_to_num(r_v);
+            ts_gen_tetrahedron(r, &result);
+            ts_apply_xform(&result, xform);
+            return result;
+        }
+
+        if (strcmp(name, "octahedron") == 0) {
+            ts_val r_v = ts_arg_get(node, env, "r", 0, ts_val_num(1));
+            double r = ts_val_to_num(r_v);
+            ts_gen_octahedron(r, &result);
+            ts_apply_xform(&result, xform);
+            return result;
+        }
+
+        if (strcmp(name, "dodecahedron") == 0) {
+            ts_val r_v = ts_arg_get(node, env, "r", 0, ts_val_num(1));
+            double r = ts_val_to_num(r_v);
+            ts_gen_dodecahedron(r, &result);
+            ts_apply_xform(&result, xform);
+            return result;
+        }
+
+        if (strcmp(name, "icosahedron") == 0) {
+            ts_val r_v = ts_arg_get(node, env, "r", 0, ts_val_num(1));
+            double r = ts_val_to_num(r_v);
+            ts_gen_icosahedron(r, &result);
+            ts_apply_xform(&result, xform);
+            return result;
+        }
+
         /* --- Transforms --- */
         if (strcmp(name, "translate") == 0) {
             ts_val v = ts_arg_get(node, env, "v", 0, ts_val_vec3(0,0,0));

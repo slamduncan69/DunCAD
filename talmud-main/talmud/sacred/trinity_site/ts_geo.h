@@ -229,6 +229,193 @@ static inline int ts_gen_cylinder(double h, double r1, double r2,
     return 0;
 }
 
+/* ================================================================
+ * Platonic Solids
+ *
+ * The 5 Platonic solids: tetrahedron, cube (already above),
+ * octahedron, dodecahedron, icosahedron.
+ * All centered at origin, circumscribed by sphere of given radius.
+ * ================================================================ */
+
+/* --- Tetrahedron --- */
+/* 4 vertices, 4 triangular faces. Circumradius = r. */
+static inline int ts_gen_tetrahedron(double r, ts_mesh *m) {
+    ts_mesh_reserve(m, m->vert_count + 12, m->tri_count + 4);
+
+    /* Vertices of a regular tetrahedron inscribed in sphere of radius r.
+     * Place one vertex at top (+Z), three below equally spaced. */
+    double a = r * (2.0 * sqrt(2.0) / 3.0); /* edge from circumradius */
+    (void)a;
+    /* Direct coordinates: */
+    double v0z = r;
+    double v1z = -r / 3.0;
+    double v1r = r * 2.0 * sqrt(2.0) / 3.0; /* horizontal radius of bottom triangle */
+
+    double verts[4][3] = {
+        { 0,          0,          v0z },
+        { v1r,        0,          v1z },
+        { -v1r * 0.5, v1r * sqrt(3.0) / 2.0, v1z },
+        { -v1r * 0.5, -v1r * sqrt(3.0) / 2.0, v1z }
+    };
+
+    /* Each face gets its own vertices with face normals */
+    int faces[4][3] = { {0,1,2}, {0,2,3}, {0,3,1}, {1,3,2} };
+
+    for (int f = 0; f < 4; f++) {
+        int i0 = faces[f][0], i1 = faces[f][1], i2 = faces[f][2];
+        /* Compute face normal */
+        double e1x = verts[i1][0]-verts[i0][0], e1y = verts[i1][1]-verts[i0][1], e1z = verts[i1][2]-verts[i0][2];
+        double e2x = verts[i2][0]-verts[i0][0], e2y = verts[i2][1]-verts[i0][1], e2z = verts[i2][2]-verts[i0][2];
+        double nx = e1y*e2z - e1z*e2y, ny = e1z*e2x - e1x*e2z, nz = e1x*e2y - e1y*e2x;
+        double nl = sqrt(nx*nx + ny*ny + nz*nz);
+        if (nl > 1e-12) { nx /= nl; ny /= nl; nz /= nl; }
+
+        int v = m->vert_count;
+        ts_mesh_add_vertex(m, verts[i0][0], verts[i0][1], verts[i0][2], nx, ny, nz);
+        ts_mesh_add_vertex(m, verts[i1][0], verts[i1][1], verts[i1][2], nx, ny, nz);
+        ts_mesh_add_vertex(m, verts[i2][0], verts[i2][1], verts[i2][2], nx, ny, nz);
+        ts_mesh_add_triangle(m, v, v+1, v+2);
+    }
+    return 0;
+}
+
+/* --- Octahedron --- */
+/* 6 vertices, 8 triangular faces. Circumradius = r. */
+static inline int ts_gen_octahedron(double r, ts_mesh *m) {
+    ts_mesh_reserve(m, m->vert_count + 24, m->tri_count + 8);
+
+    double verts[6][3] = {
+        { r, 0, 0}, {-r, 0, 0}, {0, r, 0}, {0,-r, 0}, {0, 0, r}, {0, 0,-r}
+    };
+    int faces[8][3] = {
+        {4,0,2}, {4,2,1}, {4,1,3}, {4,3,0},
+        {5,2,0}, {5,1,2}, {5,3,1}, {5,0,3}
+    };
+
+    for (int f = 0; f < 8; f++) {
+        int i0 = faces[f][0], i1 = faces[f][1], i2 = faces[f][2];
+        double e1x = verts[i1][0]-verts[i0][0], e1y = verts[i1][1]-verts[i0][1], e1z = verts[i1][2]-verts[i0][2];
+        double e2x = verts[i2][0]-verts[i0][0], e2y = verts[i2][1]-verts[i0][1], e2z = verts[i2][2]-verts[i0][2];
+        double nx = e1y*e2z - e1z*e2y, ny = e1z*e2x - e1x*e2z, nz = e1x*e2y - e1y*e2x;
+        double nl = sqrt(nx*nx + ny*ny + nz*nz);
+        if (nl > 1e-12) { nx /= nl; ny /= nl; nz /= nl; }
+
+        int v = m->vert_count;
+        ts_mesh_add_vertex(m, verts[i0][0], verts[i0][1], verts[i0][2], nx, ny, nz);
+        ts_mesh_add_vertex(m, verts[i1][0], verts[i1][1], verts[i1][2], nx, ny, nz);
+        ts_mesh_add_vertex(m, verts[i2][0], verts[i2][1], verts[i2][2], nx, ny, nz);
+        ts_mesh_add_triangle(m, v, v+1, v+2);
+    }
+    return 0;
+}
+
+/* --- Dodecahedron --- */
+/* 20 vertices, 12 pentagonal faces = 36 triangles. Circumradius = r.
+ * The sacred shape. Each face is a regular pentagon, triangulated as a fan. */
+static inline int ts_gen_dodecahedron(double r, ts_mesh *m) {
+    ts_mesh_reserve(m, m->vert_count + 108, m->tri_count + 36);
+
+    /* Golden ratio */
+    double phi = (1.0 + sqrt(5.0)) / 2.0;
+    double iphi = 1.0 / phi;
+
+    /* 20 vertices of a dodecahedron inscribed in a sphere.
+     * Unscaled circumradius = sqrt(3). Scale by r/sqrt(3). */
+    double s = r / sqrt(3.0);
+
+    double verts[20][3] = {
+        /* 8 cube vertices (+-1, +-1, +-1) */
+        { s, s, s}, { s, s,-s}, { s,-s, s}, { s,-s,-s},
+        {-s, s, s}, {-s, s,-s}, {-s,-s, s}, {-s,-s,-s},
+        /* 4 on YZ plane: (0, +-phi, +-1/phi) */
+        {0, s*phi, s*iphi}, {0, s*phi,-s*iphi},
+        {0,-s*phi, s*iphi}, {0,-s*phi,-s*iphi},
+        /* 4 on XZ plane: (+-1/phi, 0, +-phi) */
+        { s*iphi, 0, s*phi}, {-s*iphi, 0, s*phi},
+        { s*iphi, 0,-s*phi}, {-s*iphi, 0,-s*phi},
+        /* 4 on XY plane: (+-phi, +-1/phi, 0) */
+        { s*phi, s*iphi, 0}, { s*phi,-s*iphi, 0},
+        {-s*phi, s*iphi, 0}, {-s*phi,-s*iphi, 0}
+    };
+
+    /* 12 pentagonal faces (vertex indices, CCW from outside) */
+    int faces[12][5] = {
+        { 0, 12, 13,  4,  8},
+        { 0,  8,  9,  1, 16},
+        { 0, 16, 17,  2, 12},
+        { 1,  9,  5, 15, 14},
+        { 1, 14,  3, 17, 16},
+        { 2, 17,  3, 11, 10},
+        { 2, 10,  6, 13, 12},
+        { 4, 13,  6, 19, 18},
+        { 4, 18,  5,  9,  8},
+        { 7, 11,  3, 14, 15},
+        { 7, 15,  5, 18, 19},
+        { 7, 19,  6, 10, 11}
+    };
+
+    for (int f = 0; f < 12; f++) {
+        /* Compute face normal from first 3 vertices */
+        int i0 = faces[f][0], i1 = faces[f][1], i2 = faces[f][2];
+        double e1x = verts[i1][0]-verts[i0][0], e1y = verts[i1][1]-verts[i0][1], e1z = verts[i1][2]-verts[i0][2];
+        double e2x = verts[i2][0]-verts[i0][0], e2y = verts[i2][1]-verts[i0][1], e2z = verts[i2][2]-verts[i0][2];
+        double nx = e1y*e2z - e1z*e2y, ny = e1z*e2x - e1x*e2z, nz = e1x*e2y - e1y*e2x;
+        double nl = sqrt(nx*nx + ny*ny + nz*nz);
+        if (nl > 1e-12) { nx /= nl; ny /= nl; nz /= nl; }
+
+        /* Triangulate pentagon as fan from vertex 0 */
+        int base = m->vert_count;
+        for (int k = 0; k < 5; k++) {
+            int vi = faces[f][k];
+            ts_mesh_add_vertex(m, verts[vi][0], verts[vi][1], verts[vi][2], nx, ny, nz);
+        }
+        for (int k = 1; k < 4; k++)
+            ts_mesh_add_triangle(m, base, base + k, base + k + 1);
+    }
+    return 0;
+}
+
+/* --- Icosahedron --- */
+/* 12 vertices, 20 triangular faces. Circumradius = r. */
+static inline int ts_gen_icosahedron(double r, ts_mesh *m) {
+    ts_mesh_reserve(m, m->vert_count + 60, m->tri_count + 20);
+
+    /* Golden ratio */
+    double phi = (1.0 + sqrt(5.0)) / 2.0;
+
+    /* 12 vertices: unscaled circumradius = sqrt(1 + phi^2). Scale to r. */
+    double s = r / sqrt(1.0 + phi * phi);
+
+    double verts[12][3] = {
+        { 0,  s,  s*phi}, { 0,  s, -s*phi}, { 0, -s,  s*phi}, { 0, -s, -s*phi},
+        { s,  s*phi, 0}, {-s,  s*phi, 0}, { s, -s*phi, 0}, {-s, -s*phi, 0},
+        { s*phi, 0,  s}, { s*phi, 0, -s}, {-s*phi, 0,  s}, {-s*phi, 0, -s}
+    };
+
+    int faces[20][3] = {
+        {0,2,8}, {0,8,4}, {0,4,5}, {0,5,10}, {0,10,2},
+        {2,6,8}, {8,6,9}, {8,9,4}, {4,9,1}, {4,1,5},
+        {5,1,11}, {5,11,10}, {10,11,7}, {10,7,2}, {2,7,6},
+        {3,6,7}, {3,7,11}, {3,11,1}, {3,1,9}, {3,9,6}
+    };
+
+    for (int f = 0; f < 20; f++) {
+        int i0 = faces[f][0], i1 = faces[f][1], i2 = faces[f][2];
+        double e1x = verts[i1][0]-verts[i0][0], e1y = verts[i1][1]-verts[i0][1], e1z = verts[i1][2]-verts[i0][2];
+        double e2x = verts[i2][0]-verts[i0][0], e2y = verts[i2][1]-verts[i0][1], e2z = verts[i2][2]-verts[i0][2];
+        double nx = e1y*e2z - e1z*e2y, ny = e1z*e2x - e1x*e2z, nz = e1x*e2y - e1y*e2x;
+        double nl = sqrt(nx*nx + ny*ny + nz*nz);
+        if (nl > 1e-12) { nx /= nl; ny /= nl; nz /= nl; }
+
+        int v = m->vert_count;
+        ts_mesh_add_vertex(m, verts[i0][0], verts[i0][1], verts[i0][2], nx, ny, nz);
+        ts_mesh_add_vertex(m, verts[i1][0], verts[i1][1], verts[i1][2], nx, ny, nz);
+        ts_mesh_add_vertex(m, verts[i2][0], verts[i2][1], verts[i2][2], nx, ny, nz);
+        ts_mesh_add_triangle(m, v, v+1, v+2);
+    }
+    return 0;
+}
+
 /* --- Circle (2D point generation) --- */
 /* OpenSCAD: circle(r, $fn=N)
  * Returns array of 2D points (stored as vec3 with z=0).
