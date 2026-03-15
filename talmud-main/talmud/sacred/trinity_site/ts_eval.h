@@ -999,15 +999,31 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
 
         /* --- 3D Primitives --- */
         if (strcmp(name, "cube") == 0) {
-            ts_val size_v = ts_arg_get(node, env, "size", 0, ts_val_num(1));
-            ts_val center = ts_arg_get(node, env, "center", 1, ts_val_bool(0));
+            /* Count unnamed positional args */
+            int pos_count = 0;
+            for (int i = 0; i < node->arg_count; i++)
+                if (!node->args[i].name) pos_count++;
+
             double sx, sy, sz;
-            if (size_v.type == TS_VAL_VECTOR) {
-                sx = ts_val_vec_get(size_v, 0);
-                sy = ts_val_vec_get(size_v, 1);
-                sz = ts_val_vec_get(size_v, 2);
+            ts_val center;
+            if (pos_count >= 3 && !ts_arg_has(node, "size")) {
+                /* cube(sx, sy, sz) — 3 positional scalars → rectangular prism */
+                sx = ts_val_to_num(ts_arg_get(node, env, "size", 0, ts_val_num(1)));
+                sy = ts_val_to_num(ts_arg_get(node, env, "_y",  1, ts_val_num(1)));
+                sz = ts_val_to_num(ts_arg_get(node, env, "_z",  2, ts_val_num(1)));
+                center = (pos_count >= 4)
+                    ? ts_arg_get(node, env, "center", 3, ts_val_bool(0))
+                    : ts_arg_get(node, env, "center", -1, ts_val_bool(0));
             } else {
-                sx = sy = sz = ts_val_to_num(size_v);
+                ts_val size_v = ts_arg_get(node, env, "size", 0, ts_val_num(1));
+                center = ts_arg_get(node, env, "center", 1, ts_val_bool(0));
+                if (size_v.type == TS_VAL_VECTOR) {
+                    sx = ts_val_vec_get(size_v, 0);
+                    sy = ts_val_vec_get(size_v, 1);
+                    sz = ts_val_vec_get(size_v, 2);
+                } else {
+                    sx = sy = sz = ts_val_to_num(size_v);
+                }
             }
             ts_gen_cube(sx, sy, sz, &result);
             /* ts_gen_cube generates centered. If not center, translate. */

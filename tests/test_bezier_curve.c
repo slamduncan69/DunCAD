@@ -6,8 +6,10 @@
  */
 
 #include "bezier/bezier_curve.h"
+#include "core/array.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -543,6 +545,158 @@ test_remove_knot_out_of_bounds(void)
 }
 
 /* -------------------------------------------------------------------------
+ * Spline interpolation tests
+ * ---------------------------------------------------------------------- */
+
+static int
+test_spline_two_knots(void)
+{
+    /* 2 knots → straight line: 4 output points [P0, C0, C1, P1] */
+    DC_Point2 knots[] = { {0, 0}, {3, 0} };
+    DC_Array *out = dc_array_new(sizeof(DC_Point2));
+    DC_Array *junc = dc_array_new(sizeof(uint8_t));
+
+    ASSERT(dc_bezier_spline_interpolate(knots, 2, DC_SPLINE_NATURAL,
+                                         out, junc) == 0);
+    ASSERT(dc_array_length(out) == 4);
+
+    /* Endpoints match knots */
+    DC_Point2 *p0 = dc_array_get(out, 0);
+    DC_Point2 *p3 = dc_array_get(out, 3);
+    ASSERT_NEAR(p0->x, 0.0, EPS);
+    ASSERT_NEAR(p0->y, 0.0, EPS);
+    ASSERT_NEAR(p3->x, 3.0, EPS);
+    ASSERT_NEAR(p3->y, 0.0, EPS);
+
+    /* Junctures: 1, 0, 0, 1 */
+    uint8_t *f0 = dc_array_get(junc, 0);
+    uint8_t *f3 = dc_array_get(junc, 3);
+    ASSERT(*f0 == 1);
+    ASSERT(*f3 == 1);
+
+    dc_array_free(out);
+    dc_array_free(junc);
+    return 0;
+}
+
+static int
+test_spline_three_knots_passes_through(void)
+{
+    /* 3 knots → 2 segments, curve must pass through all knots */
+    DC_Point2 knots[] = { {0, 0}, {1, 2}, {3, 0} };
+    DC_Array *out = dc_array_new(sizeof(DC_Point2));
+    DC_Array *junc = dc_array_new(sizeof(uint8_t));
+
+    ASSERT(dc_bezier_spline_interpolate(knots, 3, DC_SPLINE_NATURAL,
+                                         out, junc) == 0);
+    /* 2 segments → 7 output points: [P0,C0,C1, P1,C0,C1, P2] */
+    ASSERT(dc_array_length(out) == 7);
+
+    /* Build a BezierCurve from the output to evaluate at segment boundaries */
+    DC_BezierCurve *curve = dc_bezier_curve_new();
+
+    /* Segment 0: out[0]=P0, out[1]=C0, out[2]=C1, out[3]=P1 */
+    DC_Point2 *op0 = dc_array_get(out, 0);
+    DC_Point2 *oc0 = dc_array_get(out, 1);
+    DC_Point2 *oc1 = dc_array_get(out, 2);
+    DC_Point2 *op1 = dc_array_get(out, 3);
+    dc_bezier_curve_add_knot(curve, op0->x, op0->y);
+    DC_BezierKnot *k0 = dc_bezier_curve_get_knot(curve, 0);
+    k0->hnx = oc0->x; k0->hny = oc0->y;
+
+    dc_bezier_curve_add_knot(curve, op1->x, op1->y);
+    DC_BezierKnot *k1 = dc_bezier_curve_get_knot(curve, 1);
+    k1->hpx = oc1->x; k1->hpy = oc1->y;
+
+    /* Segment 1: out[3]=P1, out[4]=C0, out[5]=C1, out[6]=P2 */
+    DC_Point2 *oc2 = dc_array_get(out, 4);
+    DC_Point2 *oc3 = dc_array_get(out, 5);
+    DC_Point2 *op2 = dc_array_get(out, 6);
+    k1->hnx = oc2->x; k1->hny = oc2->y;
+
+    dc_bezier_curve_add_knot(curve, op2->x, op2->y);
+    DC_BezierKnot *k2 = dc_bezier_curve_get_knot(curve, 2);
+    k2->hpx = oc3->x; k2->hpy = oc3->y;
+
+    /* Evaluate at t=0 of seg 0 → should be knot 0 */
+    double x, y;
+    ASSERT(dc_bezier_curve_eval(curve, 0, 0.0, &x, &y) == 0);
+    ASSERT_NEAR(x, 0.0, EPS);
+    ASSERT_NEAR(y, 0.0, EPS);
+
+    /* Evaluate at t=1 of seg 0 → should be knot 1 */
+    ASSERT(dc_bezier_curve_eval(curve, 0, 1.0, &x, &y) == 0);
+    ASSERT_NEAR(x, 1.0, 1e-6);
+    ASSERT_NEAR(y, 2.0, 1e-6);
+
+    /* Evaluate at t=1 of seg 1 → should be knot 2 */
+    ASSERT(dc_bezier_curve_eval(curve, 1, 1.0, &x, &y) == 0);
+    ASSERT_NEAR(x, 3.0, 1e-6);
+    ASSERT_NEAR(y, 0.0, 1e-6);
+
+    dc_bezier_curve_free(curve);
+    dc_array_free(out);
+    dc_array_free(junc);
+    return 0;
+}
+
+static int
+test_spline_natural_vs_clamped(void)
+{
+    /* Natural and clamped should produce different control points */
+    DC_Point2 knots[] = { {0, 0}, {1, 1}, {2, 0} };
+
+    DC_Array *out_nat = dc_array_new(sizeof(DC_Point2));
+    DC_Array *junc_nat = dc_array_new(sizeof(uint8_t));
+    ASSERT(dc_bezier_spline_interpolate(knots, 3, DC_SPLINE_NATURAL,
+                                         out_nat, junc_nat) == 0);
+
+    DC_Array *out_clamp = dc_array_new(sizeof(DC_Point2));
+    DC_Array *junc_clamp = dc_array_new(sizeof(uint8_t));
+    ASSERT(dc_bezier_spline_interpolate(knots, 3, DC_SPLINE_CLAMPED,
+                                         out_clamp, junc_clamp) == 0);
+
+    /* Both should have 7 points */
+    ASSERT(dc_array_length(out_nat) == 7);
+    ASSERT(dc_array_length(out_clamp) == 7);
+
+    /* Control points should differ (at least C0 of first segment) */
+    DC_Point2 *cn1 = dc_array_get(out_nat, 1);
+    DC_Point2 *cc1 = dc_array_get(out_clamp, 1);
+    double diff = fabs(cn1->x - cc1->x) + fabs(cn1->y - cc1->y);
+    ASSERT(diff > 1e-6);
+
+    dc_array_free(out_nat);
+    dc_array_free(junc_nat);
+    dc_array_free(out_clamp);
+    dc_array_free(junc_clamp);
+    return 0;
+}
+
+static int
+test_spline_error_cases(void)
+{
+    DC_Point2 knots[] = { {0, 0} };
+    DC_Array *out = dc_array_new(sizeof(DC_Point2));
+    DC_Array *junc = dc_array_new(sizeof(uint8_t));
+
+    /* n < 2 */
+    ASSERT(dc_bezier_spline_interpolate(knots, 1, DC_SPLINE_NATURAL,
+                                         out, junc) == -1);
+    /* NULL args */
+    ASSERT(dc_bezier_spline_interpolate(NULL, 2, DC_SPLINE_NATURAL,
+                                         out, junc) == -1);
+    ASSERT(dc_bezier_spline_interpolate(knots, 2, DC_SPLINE_NATURAL,
+                                         NULL, junc) == -1);
+    ASSERT(dc_bezier_spline_interpolate(knots, 2, DC_SPLINE_NATURAL,
+                                         out, NULL) == -1);
+
+    dc_array_free(out);
+    dc_array_free(junc);
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 int
@@ -569,6 +723,10 @@ main(void)
     RUN_TEST(test_clone_independent);
     RUN_TEST(test_remove_knot);
     RUN_TEST(test_remove_knot_out_of_bounds);
+    RUN_TEST(test_spline_two_knots);
+    RUN_TEST(test_spline_three_knots_passes_through);
+    RUN_TEST(test_spline_natural_vs_clamped);
+    RUN_TEST(test_spline_error_cases);
 
     fprintf(stderr, "=== %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

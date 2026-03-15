@@ -19,6 +19,8 @@ struct DC_CodeEditor {
     char             *file_path;    /* owned, NULL if untitled */
     GtkWidget        *path_label;   /* shows filename in toolbar */
     DC_ScadCompletion *completion;  /* custom inline completion */
+    DC_LangModeChangedCb lang_changed_cb;
+    void                *lang_changed_data;
 };
 
 /* -------------------------------------------------------------------------
@@ -153,6 +155,8 @@ on_open_clicked(GtkButton *btn, gpointer data)
     g_object_unref(dialog);
 }
 
+static void on_save_as_response(GObject *source, GAsyncResult *result, gpointer data);
+
 static void
 on_save_clicked(GtkButton *btn, gpointer data)
 {
@@ -169,7 +173,7 @@ on_save_clicked(GtkButton *btn, gpointer data)
 
         GtkWindow *win = ed->window ? GTK_WINDOW(ed->window) : NULL;
         gtk_file_dialog_save(dialog, win, NULL,
-            (GAsyncReadyCallback)on_open_response, ed);
+            (GAsyncReadyCallback)on_save_as_response, ed);
         g_object_unref(dialog);
     }
 }
@@ -214,6 +218,23 @@ on_save_as_clicked(GtkButton *btn, gpointer data)
     GtkWindow *win = ed->window ? GTK_WINDOW(ed->window) : NULL;
     gtk_file_dialog_save(dialog, win, NULL, on_save_as_response, ed);
     g_object_unref(dialog);
+}
+
+/* -------------------------------------------------------------------------
+ * Detect and apply language mode from file extension
+ * ---------------------------------------------------------------------- */
+static void
+update_lang_mode(DC_CodeEditor *ed, const char *path)
+{
+    int cubeiform = 1; /* default for untitled.dcad */
+    if (path) {
+        const char *ext = strrchr(path, '.');
+        cubeiform = (ext && strcmp(ext, ".dcad") == 0);
+    }
+    DC_LangMode mode = cubeiform ? DC_LANG_CUBEIFORM : DC_LANG_OPENSCAD;
+    dc_scad_completion_set_lang_mode(ed->completion, mode);
+    if (ed->lang_changed_cb)
+        ed->lang_changed_cb(cubeiform, ed->lang_changed_data);
 }
 
 /* -------------------------------------------------------------------------
@@ -318,6 +339,7 @@ dc_code_editor_new(void)
 
     /* Custom inline completion (popover-based, bypasses broken Wayland popup) */
     ed->completion = dc_scad_completion_new(ed->view, ed->buffer);
+    update_lang_mode(ed, NULL); /* NULL path → default to Cubeiform */
     GtkWidget *syn_label = dc_scad_completion_syntax_label(ed->completion);
     if (syn_label)
         gtk_box_append(GTK_BOX(ed->container), syn_label);
@@ -394,6 +416,7 @@ dc_code_editor_open_file(DC_CodeEditor *ed, const char *path)
     free(ed->file_path);
     ed->file_path = strdup(path);
     update_path_label(ed);
+    update_lang_mode(ed, path);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
            "code_editor: opened %s (%ld bytes)", path, size);
@@ -430,6 +453,7 @@ dc_code_editor_save_as(DC_CodeEditor *ed, const char *path)
     free(ed->file_path);
     ed->file_path = strdup(path);
     update_path_label(ed);
+    update_lang_mode(ed, path);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "code_editor: saved %s", path);
     return 0;
@@ -527,4 +551,20 @@ dc_code_editor_can_redo(DC_CodeEditor *ed)
 {
     if (!ed) return 0;
     return gtk_text_buffer_get_can_redo(GTK_TEXT_BUFFER(ed->buffer));
+}
+
+int
+dc_code_editor_is_cubeiform(const DC_CodeEditor *ed)
+{
+    if (!ed || !ed->completion) return 0;
+    return dc_scad_completion_get_lang_mode(ed->completion) == DC_LANG_CUBEIFORM;
+}
+
+void
+dc_code_editor_set_lang_changed_callback(DC_CodeEditor *ed,
+                                          DC_LangModeChangedCb cb, void *data)
+{
+    if (!ed) return;
+    ed->lang_changed_cb = cb;
+    ed->lang_changed_data = data;
 }

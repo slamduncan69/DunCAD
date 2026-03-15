@@ -2424,6 +2424,49 @@ static const char HELP_REFERENCE_ARCHITECTURE_DCAD_FORMAT[] =
 "  will handle custom functions, GPU-accelerated geometry, and\n"
 "  direct mesh generation — bypassing OpenSCAD entirely.\n";
 
+static const char HELP_REFERENCE_ARCHITECTURE_SCRIPTURE[] =
+"Temple of the Shapes — The Prison Agent's Knowledge Tree\n"
+"\n"
+"ARCHITECTURE: SCRIPTURE -- Temple of the Shapes\n"
+"\n"
+"The duncad_prison/ directory contains a self-contained agent\n"
+"knowledge tree for the Cubeiform modeling agent. It is a\n"
+"stripped-down Talmud variant with only 36 nodes, focused\n"
+"entirely on Cubeiform language reference, modeling patterns,\n"
+"and Trinity Site math functions.\n"
+"\n"
+"BINARY: scripture (installed to ~/.local/bin/)\n"
+"\n"
+"STRUCTURE:\n"
+"  duncad_prison/\n"
+"    CLAUDE.md       Agent operating instructions\n"
+"    scripture.c     Knowledge tree (single C file)\n"
+"    Makefile        Build system\n"
+"\n"
+"TREE CATEGORIES:\n"
+"  doctrine    Agent purpose, prayer, commandments (6 nodes)\n"
+"  language    Complete Cubeiform reference (15 nodes)\n"
+"  patterns    Common modeling recipes (8 nodes)\n"
+"  math        Trinity Site math internals (6 nodes)\n"
+"\n"
+"INCLUDES THE SACRED PLATONIC SOLIDS:\n"
+"  tetrahedron(r), octahedron(r), dodecahedron(r), icosahedron(r)\n"
+"  Documented in: scripture language primitives platonic\n"
+"  And in:        scripture math geo\n"
+"\n"
+"BUILD:\n"
+"  cd duncad_prison && make && make install\n"
+"\n"
+"CRITICAL MAINTENANCE RULE:\n"
+"  WHENEVER NEW CUBEIFORM FEATURES ARE ADDED TO DUNCAD,\n"
+"  THE SCRIPTURE MUST BE UPDATED TO REFLECT THEM.\n"
+"  This includes new primitives, transforms, CSG operations,\n"
+"  syntax extensions, and math functions. The prison agent\n"
+"  has NO other source of truth. If the scripture is stale,\n"
+"  the agent is blind.\n"
+"\n"
+"SEE ALSO: talmud reference cubeiform (the parent Cubeiform docs)\n";
+
 /* ----------------------------------------------------------------
  * CUBEIFORM LANGUAGE REFERENCE
  * ---------------------------------------------------------------- */
@@ -4183,6 +4226,67 @@ static const char HELP_MEMORY_ACTIVE_SESSION_S020[] =
 "  - Dodecahedron vertices: cube(+-1) + rect planes\n"
 "    (0,+-phi,+-1/phi), scale by r/sqrt(3).\n";
 
+static const char HELP_MEMORY_ACTIVE_SESSION_S021[] =
+"Session s021 (Cubeiform IDE Integration + Snippet Autocomplete)\n"
+"\n"
+"DATE: 2026-03-14\n"
+"\n"
+"FEATURES ADDED:\n"
+"  1. Snippet-based autocomplete system (scad_completion.c)\n"
+"     Complete rewrite of the completion system. ~70 snippets\n"
+"     with dual OpenSCAD/Cubeiform templates. Tab-stop\n"
+"     navigation with ${N:placeholder} syntax. Optional\n"
+"     parameter picker (center, $fn, etc) via secondary\n"
+"     popover. Three-mode key handler priority:\n"
+"     opt_params > snippet_mode > completion_popup.\n"
+"\n"
+"  2. Cubeiform pipe continuation (Enter/Ctrl+Tab)\n"
+"     Enter on a line without semicolon inserts newline +\n"
+"     indent + >>  for pipe chaining. Ctrl+Tab does the\n"
+"     same explicitly. Semicolon-terminated lines get\n"
+"     normal newline. Cubeiform snippets omit trailing\n"
+"     semicolons so pipes chain naturally.\n"
+"\n"
+"  3. Language mode auto-detection\n"
+"     .dcad files -> Cubeiform mode, .scad -> OpenSCAD.\n"
+"     Default (untitled) is Cubeiform. Affects autocomplete\n"
+"     templates, AI chat system prompt, and render pipeline.\n"
+"\n"
+"  4. Cubeiform transpiler in render pipeline\n"
+"     scad_preview.c now calls dc_cubeiform_to_scad() for\n"
+"     .dcad files before passing to Trinity Site. Users\n"
+"     write Cubeiform, Trinity Site receives OpenSCAD.\n"
+"\n"
+"  5. AI chat Cubeiform awareness (ai_chat.c)\n"
+"     System prompt dynamically includes Cubeiform syntax\n"
+"     reference when in .dcad mode. Agent writes Cubeiform\n"
+"     not OpenSCAD. Prompt includes pipe operators, CSG\n"
+"     infix syntax, keyword mappings (shape/fn/for-in).\n"
+"     Lang mode change resets conversation.\n"
+"\n"
+"BUG FIXES:\n"
+"  - Cubeiform: trailing semicolons after } blocks (s020)\n"
+"  - Cubeiform: hull(a,b) arg form now transpiles correctly\n"
+"  - Cubeiform: fn= in primitive args -> $fn= in OpenSCAD\n"
+"  - Cubeiform: UTF-8 multi-byte chars in comments no longer\n"
+"    split bytes in tokenizer\n"
+"  - Save button crash: used wrong callback (on_open_response\n"
+"    instead of on_save_as_response) for untitled files\n"
+"  - Tab stop replacement: first keystroke now explicitly\n"
+"    deletes placeholder text (GTK selection replacement\n"
+"    was unreliable with GtkSourceView)\n"
+"\n"
+"ARCHITECTURE DECISIONS:\n"
+"  - Cubeiform is syntactic sugar, Trinity Site stays\n"
+"    OpenSCAD-only. Transpilation bridges the gap.\n"
+"  - Prison agent writes OpenSCAD (its native language).\n"
+"    Humans write Cubeiform. Scripture updated accordingly.\n"
+"  - Snippet templates store both languages; mode selects.\n"
+"\n"
+"FILES: scad_completion.h/c, code_editor.h/c, ai_chat.h/c,\n"
+"       scad_preview.c, cubeiform.c, app_window.c,\n"
+"       duncad_prison/CLAUDE.md, duncad_prison/scripture.c\n";
+
 static const char HELP_REFERENCE_DOCTRINE_PERSISTENCE[] =
 "The Persistence Doctrine\n"
 "\n"
@@ -4503,6 +4607,7 @@ static const struct help_node TREE[] = {
     { "reference.architecture.scad", HELP_REFERENCE_ARCHITECTURE_SCAD },
     { "reference.architecture.scad.ordering", HELP_REFERENCE_ARCHITECTURE_SCAD_ORDERING },
     { "reference.architecture.dcad-format", HELP_REFERENCE_ARCHITECTURE_DCAD_FORMAT },
+    { "reference.architecture.scripture", HELP_REFERENCE_ARCHITECTURE_SCRIPTURE },
 
 
     /* ---- ROLES -- Agent hierarchy ---- */
@@ -4540,6 +4645,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s018", HELP_MEMORY_ACTIVE_SESSION_S018 },
     { "memory.active.session-s019", HELP_MEMORY_ACTIVE_SESSION_S019 },
     { "memory.active.session-s020", HELP_MEMORY_ACTIVE_SESSION_S020 },
+    { "memory.active.session-s021", HELP_MEMORY_ACTIVE_SESSION_S021 },
     { "reference.cubeiform", HELP_REFERENCE_CUBEIFORM },
     { "reference.cubeiform.primitives", HELP_REFERENCE_CUBEIFORM_PRIMITIVES },
     { "reference.cubeiform.transforms", HELP_REFERENCE_CUBEIFORM_TRANSFORMS },

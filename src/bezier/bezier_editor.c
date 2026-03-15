@@ -1,6 +1,7 @@
 #include "bezier/bezier_editor.h"
 #include "bezier/bezier_canvas.h"
 #include "bezier/bezier_curve.h"   /* DC_Point2 */
+#include "bezier/bezier_fit.h"     /* dc_bezier_fit */
 #include "core/array.h"
 #include "core/log.h"
 #include "ui/app_window.h"
@@ -57,6 +58,32 @@ struct DC_BezierEditor {
     DC_ProfileApplyCb profile_apply_cb;
     void            *profile_apply_data;
     GtkWidget       *apply_profile_btn;  /* shown when profile is active */
+    /* Drawing mode */
+    DC_EditorMode    mode;
+    /* Spline mode state */
+    DC_Array        *spline_knots;       /* DC_Point2: through-points */
+    int              spline_selected;    /* index into spline_knots or -1 */
+    DC_SplineEndCondition spline_end_cond;
+    double           spline_orig_x, spline_orig_y;  /* drag origin */
+    double           spline_press_sx, spline_press_sy;
+    /* Freehand mode state */
+    DC_Array        *stroke_pts;         /* DC_Point2: raw freehand stroke */
+    int              stroking;           /* 1 during freehand stroke */
+    double           freehand_tol;       /* Schneider error tolerance */
+    /* Mode buttons */
+    GtkWidget       *mode_select_btn;
+    GtkWidget       *mode_click_btn;
+    GtkWidget       *mode_spline_btn;
+    GtkWidget       *mode_freehand_btn;
+    /* Multi-selection (DC_MODE_SELECT) */
+    DC_Array        *sel_indices;         /* DC_Array of int: multi-selected point indices */
+    /* Bounding box drag */
+    int              bbox_dragging;       /* 1 during bbox rubber-band drag */
+    double           bbox_x0, bbox_y0;   /* world coords: drag start corner */
+    double           bbox_x1, bbox_y1;   /* world coords: current corner */
+    /* Select-mode drag (moving selected nodes) */
+    int              sel_moving;          /* 1 while dragging selected nodes */
+    DC_Array        *sel_orig;            /* DC_Array of DC_Point2: original positions */
 };
 
 /* -------------------------------------------------------------------------
@@ -161,6 +188,7 @@ enforce_c1_at_p0(DC_BezierEditor *ed)
 static void update_status(DC_BezierEditor *ed);
 static void trigger_export(DC_BezierEditor *ed);
 static void trigger_insert(DC_BezierEditor *ed);
+static void set_mode_internal(DC_BezierEditor *ed, DC_EditorMode mode);
 
 /* -------------------------------------------------------------------------
  * Numeric input panel — refresh from editor state
@@ -270,8 +298,19 @@ update_status(DC_BezierEditor *ed)
 {
     if (!ed->window) return;
     int count = (int)dc_array_length(ed->pts);
-    char buf[256];
-    const char *mode = ed->chain_mode ? "Chain: ON" : "Chain: OFF";
+    char buf[512];
+
+    /* Mode indicator */
+    const char *mode_name;
+    switch (ed->mode) {
+    case DC_MODE_SELECT:         mode_name = "Select"; break;
+    case DC_MODE_CLICK_TO_PLACE: mode_name = "Click"; break;
+    case DC_MODE_SPLINE:         mode_name = "Spline"; break;
+    case DC_MODE_FREEHAND:       mode_name = "Draw"; break;
+    default:                     mode_name = "?"; break;
+    }
+
+    const char *chain = ed->chain_mode ? "Chain: ON" : "Chain: OFF";
 
     /* Count segments by walking juncture boundaries */
     int num_segments = 0;
@@ -291,21 +330,30 @@ update_status(DC_BezierEditor *ed)
 
     const char *shape = ed->closed ? " (closed)" : "";
 
+    /* Multi-selection count */
+    int nsel = ed->sel_indices ? (int)dc_array_length(ed->sel_indices) : 0;
+
     if (num_segments == 0) {
         snprintf(buf, sizeof(buf),
-                 "%s  |  Click to place points  (%d placed)", mode, count);
+                 "[%s]  %s  |  %d pts  |  [Esc] select",
+                 mode_name, chain, count);
+    } else if (nsel > 1) {
+        snprintf(buf, sizeof(buf),
+                 "[%s]  %s  |  %d seg%s%s  |  %d selected  |  [Del] delete  [Esc] select",
+                 mode_name, chain, num_segments, num_segments == 1 ? "" : "s",
+                 shape, nsel);
     } else if (ed->selected >= 0) {
         const char *kind = is_juncture(ed, ed->selected)
                          ? "juncture" : "control";
         snprintf(buf, sizeof(buf),
-                 "%s  |  %d seg%s%s  |  P%d (%s)  |  [C] local  [Del] delete  [Shift+C] global",
-                 mode, num_segments, num_segments == 1 ? "" : "s",
+                 "[%s]  %s  |  %d seg%s%s  |  P%d (%s)  |  [C] local  [Del] delete  [Esc] select",
+                 mode_name, chain, num_segments, num_segments == 1 ? "" : "s",
                  shape, ed->selected, kind);
     } else {
         snprintf(buf, sizeof(buf),
-                 "%s  |  %d seg%s%s  |  Click to %s  |  [Shift+C] global",
-                 mode, num_segments, num_segments == 1 ? "" : "s",
-                 shape, ed->closed ? "drag" : "add or drag");
+                 "[%s]  %s  |  %d seg%s%s  |  [Esc] select",
+                 mode_name, chain, num_segments, num_segments == 1 ? "" : "s",
+                 shape);
     }
     dc_app_window_set_status(ed->window, buf);
 }
@@ -362,6 +410,79 @@ decasteljau(const double *px, const double *py, int n,
 }
 
 /* -------------------------------------------------------------------------
+ * Multi-selection helpers
+ * ---------------------------------------------------------------------- */
+
+/* Returns 1 if the index is in sel_indices */
+static int
+is_multi_selected(DC_BezierEditor *ed, int index)
+{
+    if (!ed->sel_indices) return 0;
+    int n = (int)dc_array_length(ed->sel_indices);
+    for (int i = 0; i < n; i++) {
+        int *idx = dc_array_get(ed->sel_indices, (size_t)i);
+        if (*idx == index) return 1;
+    }
+    return 0;
+}
+
+/* Add index to multi-selection if not already present */
+static void
+multi_select_add(DC_BezierEditor *ed, int index)
+{
+    if (is_multi_selected(ed, index)) return;
+    dc_array_push(ed->sel_indices, &index);
+}
+
+/* Remove index from multi-selection */
+static void
+multi_select_remove(DC_BezierEditor *ed, int index)
+{
+    if (!ed->sel_indices) return;
+    int n = (int)dc_array_length(ed->sel_indices);
+    for (int i = 0; i < n; i++) {
+        int *idx = dc_array_get(ed->sel_indices, (size_t)i);
+        if (*idx == index) {
+            dc_array_remove(ed->sel_indices, (size_t)i);
+            return;
+        }
+    }
+}
+
+/* Clear multi-selection */
+static void
+multi_select_clear(DC_BezierEditor *ed)
+{
+    if (ed->sel_indices) dc_array_clear(ed->sel_indices);
+    ed->selected = -1;
+}
+
+/* Select all points whose world coords fall inside the given bbox */
+static void
+multi_select_bbox(DC_BezierEditor *ed,
+                  double x0, double y0, double x1, double y1)
+{
+    dc_array_clear(ed->sel_indices);
+    ed->selected = -1;
+
+    double min_x = (x0 < x1) ? x0 : x1;
+    double max_x = (x0 > x1) ? x0 : x1;
+    double min_y = (y0 < y1) ? y0 : y1;
+    double max_y = (y0 > y1) ? y0 : y1;
+
+    int count = (int)dc_array_length(ed->pts);
+    for (int i = 0; i < count; i++) {
+        DC_Point2 *p = dc_array_get(ed->pts, (size_t)i);
+        if (p->x >= min_x && p->x <= max_x &&
+            p->y >= min_y && p->y <= max_y) {
+            dc_array_push(ed->sel_indices, &i);
+            /* Set selected to the first hit for panel display */
+            if (ed->selected < 0) ed->selected = i;
+        }
+    }
+}
+
+/* -------------------------------------------------------------------------
  * Overlay — draw control polygon, bezier curve(s), and points
  * ---------------------------------------------------------------------- */
 static void
@@ -371,20 +492,22 @@ editor_overlay(DC_BezierCanvas *canvas, cairo_t *cr,
     (void)width; (void)height;
     DC_BezierEditor *ed = userdata;
     int count = (int)dc_array_length(ed->pts);
-    if (count == 0) return;
 
     /* Convert all placed points to screen coordinates */
-    double *sx = malloc((size_t)count * sizeof(double));
-    double *sy = malloc((size_t)count * sizeof(double));
-    if (!sx || !sy) { free(sx); free(sy); return; }
+    double *sx = NULL, *sy = NULL;
+    if (count > 0) {
+        sx = malloc((size_t)count * sizeof(double));
+        sy = malloc((size_t)count * sizeof(double));
+        if (!sx || !sy) { free(sx); free(sy); return; }
 
-    for (int i = 0; i < count; i++) {
-        DC_Point2 *p = dc_array_get(ed->pts, (size_t)i);
-        dc_bezier_canvas_world_to_screen(canvas, p->x, p->y, &sx[i], &sy[i]);
+        for (int i = 0; i < count; i++) {
+            DC_Point2 *p = dc_array_get(ed->pts, (size_t)i);
+            dc_bezier_canvas_world_to_screen(canvas, p->x, p->y, &sx[i], &sy[i]);
+        }
     }
 
     /* Control polygon: thin gray dashed lines connecting all placed points */
-    if (count >= 2) {
+    if (count >= 2 && sx && sy) {
         cairo_set_source_rgba(cr, 0.5, 0.5, 0.5, 0.6);
         cairo_set_line_width(cr, 1.0);
         double dashes[] = {4.0, 4.0};
@@ -399,7 +522,7 @@ editor_overlay(DC_BezierCanvas *canvas, cairo_t *cr,
     }
 
     /* Draw bezier spans between juncture boundaries */
-    if (ed->closed && count >= 2) {
+    if (ed->closed && count >= 2 && sx && sy) {
         /* Closed shape: segments wrap around. Last segment is
          * (P_last_even, C_last, P0). Build wrapped coordinate arrays
          * for de Casteljau spans that may cross the array boundary. */
@@ -477,7 +600,7 @@ editor_overlay(DC_BezierCanvas *canvas, cairo_t *cr,
         free(wy);
         free(tmp_x);
         free(tmp_y);
-    } else if (count >= 2) {
+    } else if (count >= 2 && sx && sy) {
         /* Open shape: spans delimited by junctures, last point is terminal */
         double *tmp_x = malloc((size_t)count * sizeof(double));
         double *tmp_y = malloc((size_t)count * sizeof(double));
@@ -509,8 +632,9 @@ editor_overlay(DC_BezierCanvas *canvas, cairo_t *cr,
     }
 
     /* Control point dots */
-    for (int i = 0; i < count; i++) {
-        if (i == ed->selected) {
+    for (int i = 0; i < count && sx && sy; i++) {
+        int multi = is_multi_selected(ed, i);
+        if (i == ed->selected || multi) {
             cairo_set_source_rgba(cr, 1.0, 0.6, 0.1, 1.0);   /* orange: selected */
         } else if (is_juncture(ed, i)) {
             cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);   /* white: juncture */
@@ -519,10 +643,496 @@ editor_overlay(DC_BezierCanvas *canvas, cairo_t *cr,
         }
         cairo_arc(cr, sx[i], sy[i], DC_POINT_RADIUS_PX, 0, 2 * G_PI);
         cairo_fill(cr);
+
+        /* Multi-selected: add white ring outline */
+        if (multi) {
+            cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.9);
+            cairo_set_line_width(cr, 2.0);
+            cairo_arc(cr, sx[i], sy[i], DC_POINT_RADIUS_PX + 2.0, 0, 2 * G_PI);
+            cairo_stroke(cr);
+        }
+    }
+
+    /* Spline mode: draw knot markers (8px orange circles) on top */
+    if (ed->mode == DC_MODE_SPLINE && ed->spline_knots) {
+        int nk = (int)dc_array_length(ed->spline_knots);
+        for (int i = 0; i < nk; i++) {
+            DC_Point2 *k = dc_array_get(ed->spline_knots, (size_t)i);
+            double ksx, ksy;
+            dc_bezier_canvas_world_to_screen(canvas, k->x, k->y, &ksx, &ksy);
+            if (i == ed->spline_selected)
+                cairo_set_source_rgba(cr, 1.0, 0.8, 0.2, 1.0);  /* bright yellow */
+            else
+                cairo_set_source_rgba(cr, 1.0, 0.5, 0.0, 1.0);  /* orange */
+            cairo_arc(cr, ksx, ksy, 8.0, 0, 2 * G_PI);
+            cairo_fill(cr);
+            /* White outline */
+            cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.8);
+            cairo_set_line_width(cr, 1.5);
+            cairo_arc(cr, ksx, ksy, 8.0, 0, 2 * G_PI);
+            cairo_stroke(cr);
+        }
+    }
+
+    /* Freehand mode: draw raw stroke while dragging */
+    if (ed->stroking && ed->stroke_pts) {
+        int ns = (int)dc_array_length(ed->stroke_pts);
+        if (ns >= 2) {
+            cairo_set_source_rgba(cr, 1.0, 0.2, 0.2, 0.6);  /* semi-transparent red */
+            cairo_set_line_width(cr, 2.0);
+            DC_Point2 *sp = dc_array_get(ed->stroke_pts, 0);
+            double ssx, ssy;
+            dc_bezier_canvas_world_to_screen(canvas, sp->x, sp->y, &ssx, &ssy);
+            cairo_move_to(cr, ssx, ssy);
+            for (int i = 1; i < ns; i++) {
+                sp = dc_array_get(ed->stroke_pts, (size_t)i);
+                dc_bezier_canvas_world_to_screen(canvas, sp->x, sp->y, &ssx, &ssy);
+                cairo_line_to(cr, ssx, ssy);
+            }
+            cairo_stroke(cr);
+        }
+    }
+
+    /* Bounding box selection rectangle */
+    if (ed->bbox_dragging) {
+        double bsx0, bsy0, bsx1, bsy1;
+        dc_bezier_canvas_world_to_screen(canvas, ed->bbox_x0, ed->bbox_y0,
+                                          &bsx0, &bsy0);
+        dc_bezier_canvas_world_to_screen(canvas, ed->bbox_x1, ed->bbox_y1,
+                                          &bsx1, &bsy1);
+        double rx = (bsx0 < bsx1) ? bsx0 : bsx1;
+        double ry = (bsy0 < bsy1) ? bsy0 : bsy1;
+        double rw = fabs(bsx1 - bsx0);
+        double rh = fabs(bsy1 - bsy0);
+
+        /* Semi-transparent fill */
+        cairo_set_source_rgba(cr, 0.3, 0.6, 1.0, 0.15);
+        cairo_rectangle(cr, rx, ry, rw, rh);
+        cairo_fill(cr);
+
+        /* Dashed outline */
+        cairo_set_source_rgba(cr, 0.3, 0.6, 1.0, 0.8);
+        cairo_set_line_width(cr, 1.5);
+        double dashes[] = {6.0, 4.0};
+        cairo_set_dash(cr, dashes, 2, 0);
+        cairo_rectangle(cr, rx, ry, rw, rh);
+        cairo_stroke(cr);
+        cairo_set_dash(cr, NULL, 0, 0);
     }
 
     free(sx);
     free(sy);
+}
+
+/* -------------------------------------------------------------------------
+ * Select mode handlers
+ * ---------------------------------------------------------------------- */
+
+static void
+select_on_press(DC_BezierEditor *ed, double wx, double wy,
+                double sx, double sy, GdkModifierType state)
+{
+    (void)sx; (void)sy;
+    int hit = hit_test(ed, wx, wy);
+
+    if (hit >= 0) {
+        if (state & GDK_SHIFT_MASK) {
+            /* Shift+click: toggle in multi-selection */
+            if (is_multi_selected(ed, hit)) {
+                multi_select_remove(ed, hit);
+                if (ed->selected == hit) {
+                    /* Pick another selected or -1 */
+                    int n = (int)dc_array_length(ed->sel_indices);
+                    ed->selected = (n > 0) ? *(int *)dc_array_get(ed->sel_indices, 0) : -1;
+                }
+            } else {
+                multi_select_add(ed, hit);
+                ed->selected = hit;
+            }
+        } else {
+            /* Plain click: single-select (or start drag if already selected) */
+            if (!is_multi_selected(ed, hit)) {
+                multi_select_clear(ed);
+                multi_select_add(ed, hit);
+            }
+            ed->selected = hit;
+        }
+
+        /* Prepare for drag-move of selected nodes */
+        ed->mouse_down = 1;
+        ed->sel_moving = 1;
+        ed->press_sx = sx;
+        ed->press_sy = sy;
+
+        /* Store original positions of all multi-selected nodes */
+        dc_array_clear(ed->sel_orig);
+        int ns = (int)dc_array_length(ed->sel_indices);
+        for (int i = 0; i < ns; i++) {
+            int *idx = dc_array_get(ed->sel_indices, (size_t)i);
+            DC_Point2 *p = dc_array_get(ed->pts, (size_t)*idx);
+            dc_array_push(ed->sel_orig, p);
+        }
+    } else {
+        if (!(state & GDK_SHIFT_MASK)) {
+            /* Click on empty: start bounding box drag */
+            multi_select_clear(ed);
+        }
+        ed->bbox_dragging = 1;
+        ed->bbox_x0 = wx;
+        ed->bbox_y0 = wy;
+        ed->bbox_x1 = wx;
+        ed->bbox_y1 = wy;
+        ed->mouse_down = 1;
+        ed->sel_moving = 0;
+        ed->press_sx = sx;
+        ed->press_sy = sy;
+    }
+}
+
+static void
+select_on_motion(DC_BezierEditor *ed, double dwx, double dwy)
+{
+    if (ed->sel_moving) {
+        /* Move all multi-selected nodes */
+        int ns = (int)dc_array_length(ed->sel_indices);
+        for (int i = 0; i < ns; i++) {
+            int *idx = dc_array_get(ed->sel_indices, (size_t)i);
+            DC_Point2 *orig = dc_array_get(ed->sel_orig, (size_t)i);
+            DC_Point2 *p = dc_array_get(ed->pts, (size_t)*idx);
+            if (p && orig) {
+                p->x = orig->x + dwx;
+                p->y = orig->y + dwy;
+            }
+        }
+        gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+    } else if (ed->bbox_dragging) {
+        /* Update bbox corner */
+        double zoom = dc_bezier_canvas_get_zoom(ed->canvas);
+        double dx_screen = 0, dy_screen = 0;
+        /* bbox_x1/y1 is computed from press + current screen delta */
+        (void)dwx; (void)dwy;
+        /* We need absolute world position, not delta.
+         * Recompute from bbox_x0 + delta */
+        ed->bbox_x1 = ed->bbox_x0 + dwx;
+        ed->bbox_y1 = ed->bbox_y0 + dwy;
+        (void)zoom; (void)dx_screen; (void)dy_screen;
+        gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+    }
+}
+
+static void
+select_on_release(DC_BezierEditor *ed)
+{
+    if (ed->bbox_dragging) {
+        ed->bbox_dragging = 0;
+        /* Select all points in the box */
+        double dx = ed->bbox_x1 - ed->bbox_x0;
+        double dy = ed->bbox_y1 - ed->bbox_y0;
+        if (dx * dx + dy * dy > 1e-6) {
+            multi_select_bbox(ed, ed->bbox_x0, ed->bbox_y0,
+                              ed->bbox_x1, ed->bbox_y1);
+        }
+        gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+    }
+    ed->sel_moving = 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Spline mode helpers
+ * ---------------------------------------------------------------------- */
+static int
+spline_hit_test(DC_BezierEditor *ed, double wx, double wy)
+{
+    if (!ed->spline_knots) return -1;
+    double zoom = dc_bezier_canvas_get_zoom(ed->canvas);
+    double radius = DC_HIT_RADIUS_PX / zoom;
+    double best = radius;
+    int hit = -1;
+    int count = (int)dc_array_length(ed->spline_knots);
+
+    for (int i = 0; i < count; i++) {
+        DC_Point2 *p = dc_array_get(ed->spline_knots, (size_t)i);
+        double dx = wx - p->x;
+        double dy = wy - p->y;
+        double d = sqrt(dx * dx + dy * dy);
+        if (d < best) { best = d; hit = i; }
+    }
+    return hit;
+}
+
+static void
+spline_rebuild(DC_BezierEditor *ed)
+{
+    int n = (int)dc_array_length(ed->spline_knots);
+    dc_array_clear(ed->pts);
+    dc_array_clear(ed->junctures);
+    ed->selected = -1;
+    ed->closed = 0;
+
+    if (n < 2) {
+        gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+        update_status(ed);
+        refresh_panel(ed);
+        return;
+    }
+
+    DC_Point2 *knots = dc_array_get(ed->spline_knots, 0);
+    dc_bezier_spline_interpolate(knots, n, ed->spline_end_cond,
+                                  ed->pts, ed->junctures);
+
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+    update_status(ed);
+    refresh_panel(ed);
+}
+
+static void
+spline_on_press(DC_BezierEditor *ed, double wx, double wy)
+{
+    int hit = spline_hit_test(ed, wx, wy);
+
+    if (hit >= 0) {
+        /* Select existing knot for dragging */
+        ed->spline_selected = hit;
+        DC_Point2 *p = dc_array_get(ed->spline_knots, (size_t)hit);
+        ed->spline_orig_x = p->x;
+        ed->spline_orig_y = p->y;
+    } else {
+        /* Place new knot */
+        DC_Point2 pt = { wx, wy };
+        dc_array_push(ed->spline_knots, &pt);
+        ed->spline_selected = (int)dc_array_length(ed->spline_knots) - 1;
+        ed->spline_orig_x = wx;
+        ed->spline_orig_y = wy;
+        spline_rebuild(ed);
+    }
+    ed->mouse_down = 1;
+}
+
+static void
+spline_on_motion(DC_BezierEditor *ed, double dwx, double dwy)
+{
+    if (ed->spline_selected < 0) return;
+    DC_Point2 *p = dc_array_get(ed->spline_knots, (size_t)ed->spline_selected);
+    if (!p) return;
+    p->x = ed->spline_orig_x + dwx;
+    p->y = ed->spline_orig_y + dwy;
+    spline_rebuild(ed);
+}
+
+static void
+spline_delete_selected(DC_BezierEditor *ed)
+{
+    if (ed->spline_selected < 0) return;
+    dc_array_remove(ed->spline_knots, (size_t)ed->spline_selected);
+    int count = (int)dc_array_length(ed->spline_knots);
+    if (count == 0)
+        ed->spline_selected = -1;
+    else if (ed->spline_selected >= count)
+        ed->spline_selected = count - 1;
+    spline_rebuild(ed);
+}
+
+/* -------------------------------------------------------------------------
+ * Freehand mode helpers
+ * ---------------------------------------------------------------------- */
+static void
+freehand_drag_begin(DC_BezierEditor *ed, double wx, double wy)
+{
+    dc_array_clear(ed->stroke_pts);
+    DC_Point2 pt = { wx, wy };
+    dc_array_push(ed->stroke_pts, &pt);
+    ed->stroking = 1;
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+}
+
+static void
+freehand_drag_update(DC_BezierEditor *ed, double wx, double wy)
+{
+    if (!ed->stroking) return;
+    int n = (int)dc_array_length(ed->stroke_pts);
+    if (n > 0) {
+        DC_Point2 *last = dc_array_get(ed->stroke_pts, (size_t)(n - 1));
+        double dx = wx - last->x;
+        double dy = wy - last->y;
+        double zoom = dc_bezier_canvas_get_zoom(ed->canvas);
+        double min_dist = 2.0 / zoom;  /* ~2px threshold */
+        if (dx*dx + dy*dy < min_dist * min_dist) return;
+    }
+    DC_Point2 pt = { wx, wy };
+    dc_array_push(ed->stroke_pts, &pt);
+
+    /* Live preview: fit bezier to stroke so far (every 3 points for performance) */
+    n = (int)dc_array_length(ed->stroke_pts);
+    if (n >= 2 && n % 3 == 0) {
+        DC_Point2 *pts = dc_array_get(ed->stroke_pts, 0);
+        dc_array_clear(ed->pts);
+        dc_array_clear(ed->junctures);
+        ed->selected = -1;
+        DC_Error err = {0};
+        dc_bezier_fit(pts, n, ed->freehand_tol, ed->pts, ed->junctures, &err);
+    }
+
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+}
+
+static void
+freehand_drag_end(DC_BezierEditor *ed)
+{
+    ed->stroking = 0;
+    int n = (int)dc_array_length(ed->stroke_pts);
+    if (n < 2) {
+        gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+        return;
+    }
+
+    DC_Point2 *pts = dc_array_get(ed->stroke_pts, 0);
+    dc_array_clear(ed->pts);
+    dc_array_clear(ed->junctures);
+    ed->selected = -1;
+    ed->closed = 0;
+
+    DC_Error err = {0};
+    dc_bezier_fit(pts, n, ed->freehand_tol, ed->pts, ed->junctures, &err);
+
+    /* Switch to select mode for refinement */
+    set_mode_internal(ed, DC_MODE_SELECT);
+
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+    update_status(ed);
+    refresh_panel(ed);
+}
+
+/* -------------------------------------------------------------------------
+ * GtkGestureDrag callbacks for freehand mode
+ * ---------------------------------------------------------------------- */
+static void
+on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data)
+{
+    DC_BezierEditor *ed = data;
+    if (ed->mode != DC_MODE_FREEHAND) {
+        /* Deny sequence so GtkGestureClick handles it */
+        gtk_gesture_set_state(GTK_GESTURE(gesture),
+                              GTK_EVENT_SEQUENCE_DENIED);
+        return;
+    }
+    if (dc_bezier_canvas_space_held(ed->canvas)) {
+        gtk_gesture_set_state(GTK_GESTURE(gesture),
+                              GTK_EVENT_SEQUENCE_DENIED);
+        return;
+    }
+
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
+
+    double wx, wy;
+    dc_bezier_canvas_screen_to_world(ed->canvas, x, y, &wx, &wy);
+    freehand_drag_begin(ed, wx, wy);
+}
+
+static void
+on_drag_update(GtkGestureDrag *gesture, double offset_x, double offset_y,
+               gpointer data)
+{
+    (void)gesture;
+    DC_BezierEditor *ed = data;
+    if (!ed->stroking) return;
+
+    /* offset is relative to drag start — get absolute screen position */
+    double start_x, start_y;
+    gtk_gesture_drag_get_start_point(gesture, &start_x, &start_y);
+    double sx = start_x + offset_x;
+    double sy = start_y + offset_y;
+    double wx, wy;
+    dc_bezier_canvas_screen_to_world(ed->canvas, sx, sy, &wx, &wy);
+    freehand_drag_update(ed, wx, wy);
+}
+
+static void
+on_drag_end(GtkGestureDrag *gesture, double offset_x, double offset_y,
+            gpointer data)
+{
+    (void)gesture; (void)offset_x; (void)offset_y;
+    DC_BezierEditor *ed = data;
+    freehand_drag_end(ed);
+}
+
+/* -------------------------------------------------------------------------
+ * Mode switching
+ * ---------------------------------------------------------------------- */
+static void
+set_mode_internal(DC_BezierEditor *ed, DC_EditorMode mode)
+{
+    /* Cancel any in-progress freehand stroke */
+    if (ed->stroking) {
+        ed->stroking = 0;
+        dc_array_clear(ed->stroke_pts);
+    }
+    ed->bbox_dragging = 0;
+    ed->sel_moving = 0;
+    ed->mouse_down = 0;
+
+    ed->mode = mode;
+
+    /* Update toggle button state */
+    if (ed->mode_select_btn)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ed->mode_select_btn),
+                                      mode == DC_MODE_SELECT);
+    if (ed->mode_click_btn)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ed->mode_click_btn),
+                                      mode == DC_MODE_CLICK_TO_PLACE);
+    if (ed->mode_spline_btn)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ed->mode_spline_btn),
+                                      mode == DC_MODE_SPLINE);
+    if (ed->mode_freehand_btn)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ed->mode_freehand_btn),
+                                      mode == DC_MODE_FREEHAND);
+
+    update_status(ed);
+    gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+}
+
+static void
+on_mode_select_toggled(GtkToggleButton *btn, gpointer data)
+{
+    DC_BezierEditor *ed = data;
+    if (gtk_toggle_button_get_active(btn))
+        set_mode_internal(ed, DC_MODE_SELECT);
+    else if (ed->mode == DC_MODE_SELECT)
+        gtk_toggle_button_set_active(btn, TRUE);
+    gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
+}
+
+static void
+on_mode_click_toggled(GtkToggleButton *btn, gpointer data)
+{
+    DC_BezierEditor *ed = data;
+    if (gtk_toggle_button_get_active(btn))
+        set_mode_internal(ed, DC_MODE_CLICK_TO_PLACE);
+    else if (ed->mode == DC_MODE_CLICK_TO_PLACE)
+        gtk_toggle_button_set_active(btn, TRUE);
+    gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
+}
+
+static void
+on_mode_spline_toggled(GtkToggleButton *btn, gpointer data)
+{
+    DC_BezierEditor *ed = data;
+    if (gtk_toggle_button_get_active(btn))
+        set_mode_internal(ed, DC_MODE_SPLINE);
+    else if (ed->mode == DC_MODE_SPLINE)
+        gtk_toggle_button_set_active(btn, TRUE);
+    gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
+}
+
+static void
+on_mode_freehand_toggled(GtkToggleButton *btn, gpointer data)
+{
+    DC_BezierEditor *ed = data;
+    if (gtk_toggle_button_get_active(btn))
+        set_mode_internal(ed, DC_MODE_FREEHAND);
+    else if (ed->mode == DC_MODE_FREEHAND)
+        gtk_toggle_button_set_active(btn, TRUE);
+    gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
 }
 
 /* -------------------------------------------------------------------------
@@ -541,8 +1151,37 @@ on_press(GtkGestureClick *gesture, int n_press, double x, double y,
     /* If space is held, don't interfere with canvas pan */
     if (dc_bezier_canvas_space_held(ed->canvas)) return;
 
+    /* Freehand mode is handled by GtkGestureDrag, not click */
+    if (ed->mode == DC_MODE_FREEHAND) { (void)gesture; return; }
+
     double wx, wy;
     dc_bezier_canvas_screen_to_world(ed->canvas, x, y, &wx, &wy);
+
+    /* Select mode dispatch */
+    if (ed->mode == DC_MODE_SELECT) {
+        GdkModifierType state = gtk_event_controller_get_current_event_state(
+            GTK_EVENT_CONTROLLER(gesture));
+        select_on_press(ed, wx, wy, x, y, state);
+        populate_co_selected(ed);
+        update_chain_button(ed);
+        update_status(ed);
+        refresh_panel(ed);
+        gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+        return;
+    }
+
+    /* Spline mode dispatch */
+    if (ed->mode == DC_MODE_SPLINE) {
+        spline_on_press(ed, wx, wy);
+        ed->press_sx = x;
+        ed->press_sy = y;
+        populate_co_selected(ed);
+        update_status(ed);
+        refresh_panel(ed);
+        gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+        (void)gesture;
+        return;
+    }
 
     int hit = hit_test(ed, wx, wy);
 
@@ -672,6 +1311,11 @@ on_release(GtkGestureClick *gesture, int n_press, double x, double y,
 {
     (void)gesture; (void)n_press; (void)x; (void)y;
     DC_BezierEditor *ed = data;
+    if (ed->mode == DC_MODE_SELECT) {
+        select_on_release(ed);
+        update_status(ed);
+        refresh_panel(ed);
+    }
     ed->mouse_down = 0;
 }
 
@@ -684,7 +1328,7 @@ on_motion(GtkEventControllerMotion *ctrl, double x, double y, gpointer data)
     (void)ctrl;
     DC_BezierEditor *ed = data;
 
-    if (!ed->mouse_down || ed->selected < 0) return;
+    if (!ed->mouse_down) return;
 
     /* Convert screen delta to world delta */
     double zoom = dc_bezier_canvas_get_zoom(ed->canvas);
@@ -692,6 +1336,20 @@ on_motion(GtkEventControllerMotion *ctrl, double x, double y, gpointer data)
     double dy_screen = y - ed->press_sy;
     double dwx =  dx_screen / zoom;
     double dwy = -dy_screen / zoom;   /* Y inverted: screen down = world down */
+
+    /* Select mode drag */
+    if (ed->mode == DC_MODE_SELECT) {
+        select_on_motion(ed, dwx, dwy);
+        return;
+    }
+
+    /* Spline mode drag */
+    if (ed->mode == DC_MODE_SPLINE) {
+        spline_on_motion(ed, dwx, dwy);
+        return;
+    }
+
+    if (ed->selected < 0) return;
 
     DC_Point2 *p = dc_array_get(ed->pts, (size_t)ed->selected);
     if (!p) return;
@@ -761,7 +1419,68 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
         return TRUE;
     }
 
+    /* Escape: defocus tool → select mode */
+    if (keyval == GDK_KEY_Escape) {
+        if (ed->stroking) {
+            ed->stroking = 0;
+            dc_array_clear(ed->stroke_pts);
+        }
+        ed->spline_selected = -1;
+        set_mode_internal(ed, DC_MODE_SELECT);
+        return TRUE;
+    }
+
+    /* Mode shortcuts: 1/2/3 for drawing tools */
+    if (keyval == GDK_KEY_1 && !(state & GDK_CONTROL_MASK)) {
+        set_mode_internal(ed, DC_MODE_CLICK_TO_PLACE);
+        return TRUE;
+    }
+    if (keyval == GDK_KEY_2 && !(state & GDK_CONTROL_MASK)) {
+        set_mode_internal(ed, DC_MODE_SPLINE);
+        return TRUE;
+    }
+    if (keyval == GDK_KEY_3 && !(state & GDK_CONTROL_MASK)) {
+        set_mode_internal(ed, DC_MODE_FREEHAND);
+        return TRUE;
+    }
+
     if (keyval == GDK_KEY_Delete || keyval == GDK_KEY_BackSpace) {
+        /* Spline mode: delete spline knot */
+        if (ed->mode == DC_MODE_SPLINE) {
+            spline_delete_selected(ed);
+            return TRUE;
+        }
+        /* Select mode: delete all multi-selected points (descending order) */
+        if (ed->mode == DC_MODE_SELECT && ed->sel_indices) {
+            int ns = (int)dc_array_length(ed->sel_indices);
+            if (ns > 0) {
+                /* Sort indices descending so removal doesn't shift later ones */
+                int indices[256];
+                if (ns > 256) ns = 256;
+                for (int i = 0; i < ns; i++)
+                    indices[i] = *(int *)dc_array_get(ed->sel_indices, (size_t)i);
+                /* Simple bubble sort descending */
+                for (int i = 0; i < ns - 1; i++)
+                    for (int j = 0; j < ns - 1 - i; j++)
+                        if (indices[j] < indices[j+1]) {
+                            int tmp = indices[j];
+                            indices[j] = indices[j+1];
+                            indices[j+1] = tmp;
+                        }
+                for (int i = 0; i < ns; i++) {
+                    dc_array_remove(ed->pts, (size_t)indices[i]);
+                    dc_array_remove(ed->junctures, (size_t)indices[i]);
+                }
+                ed->closed = 0;
+                multi_select_clear(ed);
+                populate_co_selected(ed);
+                update_chain_button(ed);
+                update_status(ed);
+                refresh_panel(ed);
+                gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
+                return TRUE;
+            }
+        }
         int count = (int)dc_array_length(ed->pts);
         int sel = ed->selected;
         if (sel >= 0 && sel < count) {
@@ -1020,6 +1739,23 @@ dc_bezier_editor_new(void)
     ed->selected = -1;
     ed->mouse_down = 0;
     ed->chain_mode = 0;
+    ed->mode = DC_MODE_CLICK_TO_PLACE;
+
+    /* Spline mode arrays */
+    ed->spline_knots = dc_array_new(sizeof(DC_Point2));
+    ed->spline_selected = -1;
+    ed->spline_end_cond = DC_SPLINE_NATURAL;
+
+    /* Freehand mode arrays */
+    ed->stroke_pts = dc_array_new(sizeof(DC_Point2));
+    ed->stroking = 0;
+    ed->freehand_tol = 4.0;  /* squared pixel tolerance */
+
+    /* Select mode arrays */
+    ed->sel_indices = dc_array_new(sizeof(int));
+    ed->sel_orig = dc_array_new(sizeof(DC_Point2));
+    ed->bbox_dragging = 0;
+    ed->sel_moving = 0;
 
     /* Register overlay for drawing points and curve */
     dc_bezier_canvas_set_overlay_cb(ed->canvas, editor_overlay, ed);
@@ -1032,6 +1768,17 @@ dc_bezier_editor_new(void)
     g_signal_connect(click, "pressed", G_CALLBACK(on_press), ed);
     g_signal_connect(click, "released", G_CALLBACK(on_release), ed);
     gtk_widget_add_controller(canvas_widget, GTK_EVENT_CONTROLLER(click));
+
+    /* Drag gesture for freehand mode (button 1) */
+    GtkGesture *drag = gtk_gesture_drag_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), 1);
+    g_signal_connect(drag, "drag-begin", G_CALLBACK(on_drag_begin), ed);
+    g_signal_connect(drag, "drag-update", G_CALLBACK(on_drag_update), ed);
+    g_signal_connect(drag, "drag-end", G_CALLBACK(on_drag_end), ed);
+    gtk_widget_add_controller(canvas_widget, GTK_EVENT_CONTROLLER(drag));
+
+    /* Group gestures: drag and click compete; drag takes priority in freehand */
+    gtk_gesture_group(GTK_GESTURE(drag), GTK_GESTURE(click));
 
     /* Motion controller for dragging */
     GtkEventController *motion = gtk_event_controller_motion_new();
@@ -1093,6 +1840,39 @@ dc_bezier_editor_new(void)
     g_signal_connect(insert_btn, "clicked",
                      G_CALLBACK(on_insert_clicked), ed);
     gtk_box_append(GTK_BOX(toolbar), insert_btn);
+
+    /* --- Mode toggle buttons (after separator) --- */
+    GtkWidget *mode_sep = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+    gtk_box_append(GTK_BOX(toolbar), mode_sep);
+
+    ed->mode_select_btn = gtk_toggle_button_new_with_label("Select");
+    gtk_widget_set_focusable(ed->mode_select_btn, FALSE);
+    gtk_widget_set_tooltip_text(ed->mode_select_btn, "Select / move nodes (Esc)");
+    g_signal_connect(ed->mode_select_btn, "toggled",
+                     G_CALLBACK(on_mode_select_toggled), ed);
+    gtk_box_append(GTK_BOX(toolbar), ed->mode_select_btn);
+
+    ed->mode_click_btn = gtk_toggle_button_new_with_label("Click");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ed->mode_click_btn), TRUE);
+    gtk_widget_set_focusable(ed->mode_click_btn, FALSE);
+    gtk_widget_set_tooltip_text(ed->mode_click_btn, "Click to place mode (1)");
+    g_signal_connect(ed->mode_click_btn, "toggled",
+                     G_CALLBACK(on_mode_click_toggled), ed);
+    gtk_box_append(GTK_BOX(toolbar), ed->mode_click_btn);
+
+    ed->mode_spline_btn = gtk_toggle_button_new_with_label("Spline");
+    gtk_widget_set_focusable(ed->mode_spline_btn, FALSE);
+    gtk_widget_set_tooltip_text(ed->mode_spline_btn, "Spline through-point mode (2)");
+    g_signal_connect(ed->mode_spline_btn, "toggled",
+                     G_CALLBACK(on_mode_spline_toggled), ed);
+    gtk_box_append(GTK_BOX(toolbar), ed->mode_spline_btn);
+
+    ed->mode_freehand_btn = gtk_toggle_button_new_with_label("Draw");
+    gtk_widget_set_focusable(ed->mode_freehand_btn, FALSE);
+    gtk_widget_set_tooltip_text(ed->mode_freehand_btn, "Freehand draw mode (3)");
+    g_signal_connect(ed->mode_freehand_btn, "toggled",
+                     G_CALLBACK(on_mode_freehand_toggled), ed);
+    gtk_box_append(GTK_BOX(toolbar), ed->mode_freehand_btn);
 
     /* Apply Profile button — hidden by default, shown when profile is loaded */
     ed->apply_profile_btn = gtk_button_new_with_label("Apply Profile");
@@ -1168,6 +1948,10 @@ void
 dc_bezier_editor_free(DC_BezierEditor *editor)
 {
     if (!editor) return;
+    dc_array_free(editor->sel_orig);
+    dc_array_free(editor->sel_indices);
+    dc_array_free(editor->stroke_pts);
+    dc_array_free(editor->spline_knots);
     dc_array_free(editor->co_sel);
     dc_array_free(editor->junctures);
     dc_array_free(editor->pts);
@@ -1181,6 +1965,20 @@ dc_bezier_editor_widget(DC_BezierEditor *editor)
 {
     if (!editor) return NULL;
     return editor->container;
+}
+
+void
+dc_bezier_editor_set_mode(DC_BezierEditor *editor, DC_EditorMode mode)
+{
+    if (!editor) return;
+    set_mode_internal(editor, mode);
+}
+
+DC_EditorMode
+dc_bezier_editor_get_mode(const DC_BezierEditor *editor)
+{
+    if (!editor) return DC_MODE_CLICK_TO_PLACE;
+    return editor->mode;
 }
 
 void

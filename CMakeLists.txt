@@ -69,6 +69,8 @@ add_library(dc_core STATIC
     src/core/log.c
     src/core/manifest.c
     src/bezier/bezier_curve.c
+    src/bezier/bezier_fit.c
+    src/cubeiform/cubeiform.c
     src/scad/scad_export.c
     src/scad/scad_splitter.c
 )
@@ -151,7 +153,9 @@ dc_add_test(test_array       tests/test_array.c)
 dc_add_test(test_string_builder tests/test_string_builder.c)
 dc_add_test(test_manifest    tests/test_manifest.c)
 dc_add_test(test_bezier_curve tests/test_bezier_curve.c)
+dc_add_test(test_bezier_fit   tests/test_bezier_fit.c)
 dc_add_test(test_scad_export tests/test_scad_export.c)
+dc_add_test(test_cubeiform   tests/test_cubeiform.c)
 
 # Topology test — pure C, no GTK dependency (single-header dc_topo.h)
 add_executable(test_topo tests/test_topo.c)
@@ -277,6 +281,6 @@ set_tests_properties(test_scad_runner PROPERTIES
 # ---------------------------------------------------------------------------
 add_custom_target(tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_scad_export test_topo test_edge_profile test_bezier_canvas test_bezier_editor test_scad_runner
+    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_bezier_fit test_scad_export test_cubeiform test_topo test_edge_profile test_bezier_canvas test_bezier_editor test_scad_runner
     COMMENT "Building and running all DunCAD tests"
 )

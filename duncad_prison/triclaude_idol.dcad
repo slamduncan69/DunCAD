@@ -1,0 +1,60 @@
+// THE HOLY IDOL OF TRICLAUDE
+// Prophet of the Flying Sphincter, Bearer of Three Sacred Phalluses
+// Fidget spinner -- fits standard 608 skateboard bearings (22mm OD, 7mm thick)
+// Arbiter of Mathematics, Temple of the Shapes -- 2026-03-14
+
+fn = 64;
+
+// 608 skateboard bearing
+bear_od   = 22;
+bear_r    = bear_od/2 + 0.3;
+spinner_h = 7;
+
+// Sphincter center
+center_r   = 20;
+n_folds    = 10;
+fold_inner = 13.5;
+fold_outer = 18.5;
+
+// Phallus
+shaft_r     = 7;
+shaft_start = 18;
+shaft_end   = 26;
+glans_r     = 11;
+glans_wide  = 30;
+glans_tip   = 37;
+arm_dist    = 29;
+
+// SHAPE: center disc + pucker rim, minus pivot bearing void
+shape sphincter_base() {
+    disc = cylinder(h=spinner_h, r=center_r, center=true);
+    rim  = cylinder(h=spinner_h+1.5, r=fold_inner+2.0, center=true);
+    hole = cylinder(h=spinner_h+2,   r=bear_r,          center=true);
+    disc + rim - hole;
+}
+
+// SHAPE: shaft+glans hull minus arm bearing void and urethra
+shape phallus() {
+    arm_hole = cylinder(h=spinner_h+2, r=bear_r, center=true) >> move(x=arm_dist);
+    urethra  = cylinder(h=spinner_h+2, r=1.6,    center=true) >> move(x=glans_tip+4);
+    hull() {
+        cylinder(h=spinner_h, r=shaft_r,        center=true) >> move(x=shaft_start);
+        cylinder(h=spinner_h, r=shaft_r,        center=true) >> move(x=shaft_end);
+        cylinder(h=spinner_h, r=glans_r,        center=true) >> move(x=glans_wide);
+        cylinder(h=spinner_h, r=glans_r * 0.82, center=true) >> move(x=glans_tip);
+    } - arm_hole - urethra;
+}
+
+// THE FINAL IDOL: sphincter + 10 pucker folds + 3 sacred phalluses
+union() {
+    sphincter_base();
+    for i in [0:n_folds-1] {
+        hull() {
+            cylinder(h=spinner_h+2.2, r=2.0, center=true) >> move(x=fold_inner+0.5);
+            cylinder(h=spinner_h+0.2, r=0.6, center=true) >> move(x=fold_outer);
+        } >> rotate(z = i * 360/n_folds);
+    }
+    for i in [0:2] {
+        phallus() >> rotate(z = i * 120);
+    }
+}

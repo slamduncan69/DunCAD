@@ -17,6 +17,18 @@
 typedef struct DC_CodeEditor DC_CodeEditor;
 typedef struct DC_BezierEditor DC_BezierEditor;
 
+/* ---- Editor modes ---- */
+typedef enum {
+    DC_MODE_SELECT,           /* no tool: click/bbox select nodes, drag moves selection */
+    DC_MODE_CLICK_TO_PLACE,   /* click to place/select/drag points */
+    DC_MODE_SPLINE,           /* click to place through-points, auto-generate spline */
+    DC_MODE_FREEHAND          /* drag to draw, Schneider fit on release */
+} DC_EditorMode;
+
+void          dc_bezier_editor_set_mode(DC_BezierEditor *editor,
+                                         DC_EditorMode mode);
+DC_EditorMode dc_bezier_editor_get_mode(const DC_BezierEditor *editor);
+
 DC_BezierEditor *dc_bezier_editor_new(void);
 void             dc_bezier_editor_free(DC_BezierEditor *editor);
 GtkWidget       *dc_bezier_editor_widget(DC_BezierEditor *editor);

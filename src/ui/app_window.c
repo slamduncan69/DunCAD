@@ -360,6 +360,14 @@ on_ai_tool(const char *tool, const char *input, const char *result,
     dc_terminal_panel_append(term, buf);
 }
 
+/* ---- Lang mode changed: update AI chat ---- */
+static void
+on_lang_mode_changed(int cubeiform, void *userdata)
+{
+    DC_AiChat *ai = userdata;
+    if (ai) dc_ai_chat_set_cubeiform(ai, cubeiform);
+}
+
 static void
 on_terminal_command(const char *command, void *userdata)
 {
@@ -595,8 +603,13 @@ dc_app_window_create(GtkApplication *app)
     if (ai_chat) {
         dc_ai_chat_set_response_callback(ai_chat, on_ai_response, terminal);
         dc_ai_chat_set_tool_callback(ai_chat, on_ai_tool, terminal);
+        /* Set initial lang mode from code editor */
+        dc_ai_chat_set_cubeiform(ai_chat, dc_code_editor_is_cubeiform(code_ed));
         dc_terminal_panel_append(terminal,
             "AI connected. Type to chat, /command for inspect.\n\n");
+        /* Update AI lang mode when editor switches files */
+        dc_code_editor_set_lang_changed_callback(code_ed,
+                                                  on_lang_mode_changed, ai_chat);
     } else {
         dc_terminal_panel_append(terminal,
             "claude CLI not found. /command for inspect.\n\n");

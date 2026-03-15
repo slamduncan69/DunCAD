@@ -58,4 +58,13 @@ void dc_code_editor_redo(DC_CodeEditor *ed);
 int  dc_code_editor_can_undo(DC_CodeEditor *ed);
 int  dc_code_editor_can_redo(DC_CodeEditor *ed);
 
+/* Returns 1 if editor is in Cubeiform mode, 0 for OpenSCAD. */
+int dc_code_editor_is_cubeiform(const DC_CodeEditor *ed);
+
+/* Callback when language mode changes (file open/save-as). */
+typedef void (*DC_LangModeChangedCb)(int cubeiform, void *userdata);
+void dc_code_editor_set_lang_changed_callback(DC_CodeEditor *ed,
+                                               DC_LangModeChangedCb cb,
+                                               void *data);
+
 #endif /* DC_CODE_EDITOR_H */

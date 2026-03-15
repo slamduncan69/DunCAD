@@ -121,4 +121,23 @@ int dc_bezier_curve_bounds(const DC_BezierCurve *curve,
                            double *min_x, double *min_y,
                            double *max_x, double *max_y);
 
+/* -------------------------------------------------------------------------
+ * Spline interpolation — generate cubic bezier curve through knot points
+ * ---------------------------------------------------------------------- */
+
+typedef enum {
+    DC_SPLINE_NATURAL,   /* second derivative = 0 at endpoints */
+    DC_SPLINE_CLAMPED    /* first derivative matches chord direction */
+} DC_SplineEndCondition;
+
+/* Compute a cubic bezier spline passing through all knots.
+ * For n knots produces n-1 cubic segments output in alternating format:
+ *   out_pts:      [P0, C0, C1, P1, C0, C1, P2, ...]
+ *   out_junctures: [1, 0, 0, 1, 0, 0, ..., 1]
+ * Requires n >= 2. Returns 0 on success, -1 on error. */
+int dc_bezier_spline_interpolate(const DC_Point2 *knots, int n,
+                                  DC_SplineEndCondition end_cond,
+                                  DC_Array *out_pts,
+                                  DC_Array *out_junctures);
+
 #endif /* DC_BEZIER_CURVE_H */

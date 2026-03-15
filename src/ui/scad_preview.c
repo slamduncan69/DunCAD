@@ -5,6 +5,7 @@
 #include "scad/scad_splitter.h"
 #include "ui/transform_panel.h"
 #include "core/log.h"
+#include "cubeiform/cubeiform.h"
 
 /* Trinity Site — native OpenSCAD interpreter (replaces OpenSCAD subprocess) */
 #include "ts_eval.h"
@@ -509,6 +510,29 @@ do_render(DC_ScadPreview *pv)
         gtk_label_set_text(GTK_LABEL(pv->status_label), "Nothing to render");
         free(text);
         return;
+    }
+
+    /* Transpile Cubeiform → OpenSCAD if needed */
+    const char *path = dc_code_editor_get_path(pv->code_ed);
+    int is_dcad = 1; /* default (untitled.dcad) */
+    if (path) {
+        const char *ext = strrchr(path, '.');
+        is_dcad = (ext && strcmp(ext, ".dcad") == 0);
+    }
+    if (is_dcad) {
+        DC_Error err = {0};
+        char *scad = dc_cubeiform_to_scad(text, &err);
+        if (!scad) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Cubeiform error: %.200s", err.message);
+            gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
+            free(text);
+            return;
+        }
+        free(text);
+        text = scad;
+        dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP,
+               "transpiled Cubeiform → OpenSCAD (%zu bytes)", strlen(text));
     }
 
     /* Cancel any in-flight HQ render */

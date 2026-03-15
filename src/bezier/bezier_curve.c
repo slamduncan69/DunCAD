@@ -1,6 +1,7 @@
 #include "bezier/bezier_curve.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 /* -------------------------------------------------------------------------
@@ -327,5 +328,144 @@ dc_bezier_curve_bounds(const DC_BezierCurve *curve,
     *max_x = hi_x;
     *max_y = hi_y;
 
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Cubic spline interpolation via Thomas algorithm (tridiagonal solver)
+ * ---------------------------------------------------------------------- */
+
+int
+dc_bezier_spline_interpolate(const DC_Point2 *knots, int n,
+                              DC_SplineEndCondition end_cond,
+                              DC_Array *out_pts,
+                              DC_Array *out_junctures)
+{
+    if (!knots || n < 2 || !out_pts || !out_junctures) return -1;
+
+    int m = n - 1;  /* number of segments */
+
+    /* Allocate working arrays for first control points (c0) */
+    double *c0x = malloc((size_t)m * sizeof(double));
+    double *c0y = malloc((size_t)m * sizeof(double));
+    double *a   = malloc((size_t)m * sizeof(double));  /* sub-diagonal */
+    double *b   = malloc((size_t)m * sizeof(double));  /* diagonal */
+    double *c   = malloc((size_t)m * sizeof(double));  /* super-diagonal */
+    double *rx  = malloc((size_t)m * sizeof(double));  /* rhs x */
+    double *ry  = malloc((size_t)m * sizeof(double));  /* rhs y */
+    if (!c0x || !c0y || !a || !b || !c || !rx || !ry) {
+        free(c0x); free(c0y); free(a); free(b); free(c); free(rx); free(ry);
+        return -1;
+    }
+
+    /* Build tridiagonal system for first control points */
+    for (int i = 0; i < m; i++) {
+        if (i == 0) {
+            a[i] = 0.0;
+            b[i] = 2.0;
+            c[i] = 1.0;
+            if (end_cond == DC_SPLINE_CLAMPED && m > 1) {
+                /* Clamped: first derivative at start matches chord */
+                double dx = knots[1].x - knots[0].x;
+                double dy = knots[1].y - knots[0].y;
+                rx[i] = knots[0].x + dx / 3.0;
+                ry[i] = knots[0].y + dy / 3.0;
+                /* Override: b=1, c=0 for clamped start */
+                b[i] = 1.0;
+                c[i] = 0.0;
+            } else {
+                rx[i] = knots[0].x + 2.0 * knots[1].x;
+                ry[i] = knots[0].y + 2.0 * knots[1].y;
+            }
+        } else if (i == m - 1) {
+            a[i] = 2.0;
+            b[i] = 7.0;
+            c[i] = 0.0;
+            if (end_cond == DC_SPLINE_CLAMPED) {
+                double dx = knots[m].x - knots[m-1].x;
+                double dy = knots[m].y - knots[m-1].y;
+                rx[i] = knots[m].x - dx / 3.0;
+                ry[i] = knots[m].y - dy / 3.0;
+                b[i] = 1.0;
+                a[i] = 0.0;
+            } else {
+                rx[i] = 8.0 * knots[m-1].x + knots[m].x;
+                ry[i] = 8.0 * knots[m-1].y + knots[m].y;
+            }
+        } else {
+            a[i] = 1.0;
+            b[i] = 4.0;
+            c[i] = 1.0;
+            rx[i] = 4.0 * knots[i].x + 2.0 * knots[i+1].x;
+            ry[i] = 4.0 * knots[i].y + 2.0 * knots[i+1].y;
+        }
+    }
+
+    /* Thomas algorithm forward sweep */
+    for (int i = 1; i < m; i++) {
+        double w = a[i] / b[i-1];
+        b[i]  -= w * c[i-1];
+        rx[i] -= w * rx[i-1];
+        ry[i] -= w * ry[i-1];
+    }
+
+    /* Back substitution */
+    c0x[m-1] = rx[m-1] / b[m-1];
+    c0y[m-1] = ry[m-1] / b[m-1];
+    for (int i = m - 2; i >= 0; i--) {
+        c0x[i] = (rx[i] - c[i] * c0x[i+1]) / b[i];
+        c0y[i] = (ry[i] - c[i] * c0y[i+1]) / b[i];
+    }
+
+    /* Derive second control points: C1[i] = 2*P[i+1] - C0[i+1] */
+    double *c1x = malloc((size_t)m * sizeof(double));
+    double *c1y = malloc((size_t)m * sizeof(double));
+    if (!c1x || !c1y) {
+        free(c0x); free(c0y); free(a); free(b); free(c);
+        free(rx); free(ry); free(c1x); free(c1y);
+        return -1;
+    }
+
+    for (int i = 0; i < m - 1; i++) {
+        c1x[i] = 2.0 * knots[i+1].x - c0x[i+1];
+        c1y[i] = 2.0 * knots[i+1].y - c0y[i+1];
+    }
+    /* Last segment */
+    c1x[m-1] = (knots[m].x + c0x[m-1]) * 0.5;
+    c1y[m-1] = (knots[m].y + c0y[m-1]) * 0.5;
+
+    /* Output in alternating format: [P0, C0_0, C1_0, P1, C0_1, C1_1, P2, ...] */
+    for (int i = 0; i < m; i++) {
+        DC_Point2 pt;
+        uint8_t flag;
+
+        /* Knot i */
+        pt.x = knots[i].x; pt.y = knots[i].y;
+        flag = 1;
+        dc_array_push(out_pts, &pt);
+        dc_array_push(out_junctures, &flag);
+
+        /* First control point */
+        pt.x = c0x[i]; pt.y = c0y[i];
+        flag = 0;
+        dc_array_push(out_pts, &pt);
+        dc_array_push(out_junctures, &flag);
+
+        /* Second control point */
+        pt.x = c1x[i]; pt.y = c1y[i];
+        flag = 0;
+        dc_array_push(out_pts, &pt);
+        dc_array_push(out_junctures, &flag);
+    }
+    /* Final knot */
+    {
+        DC_Point2 pt = { knots[m].x, knots[m].y };
+        uint8_t flag = 1;
+        dc_array_push(out_pts, &pt);
+        dc_array_push(out_junctures, &flag);
+    }
+
+    free(c0x); free(c0y); free(c1x); free(c1y);
+    free(a); free(b); free(c); free(rx); free(ry);
     return 0;
 }

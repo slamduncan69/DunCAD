@@ -31,4 +31,9 @@ void dc_ai_chat_send(DC_AiChat *chat, const char *message);
 /* Returns TRUE if a request is in flight. */
 int dc_ai_chat_busy(const DC_AiChat *chat);
 
+/* Set language mode: 1 = Cubeiform, 0 = OpenSCAD.
+ * Adjusts the system prompt so the AI responds in the correct language.
+ * Takes effect on the next new conversation (first_call). */
+void dc_ai_chat_set_cubeiform(DC_AiChat *chat, int cubeiform);
+
 #endif /* DC_AI_CHAT_H */
