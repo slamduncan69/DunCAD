@@ -39,6 +39,7 @@
  * ---------------------------------------------------------------------- */
 static GSocketService  *s_service = NULL;
 static GtkWidget       *s_window  = NULL;
+static DC_VoxelGrid    *s_voxel_grid = NULL;
 
 /* Convenience accessors — all borrowed pointers, may be NULL */
 static DC_BezierEditor  *get_editor(void)  { return dc_app_window_get_editor(s_window); }
@@ -988,10 +989,12 @@ static char *cmd_cubeiform_exec(const char *args) {
     }
 
     DC_Error err = {0};
-    int rc = dc_cubeiform_execute(args, sch, NULL, NULL, NULL, &err);
+    DC_VoxelGrid *vox_grid = NULL;
+    int rc = dc_cubeiform_execute_full(args, sch, NULL, &vox_grid, NULL, &err);
     if (rc != 0) {
         DC_StringBuilder *sb = dc_sb_new();
         dc_sb_appendf(sb, "{\"error\":\"%s\"}\n", err.message);
+        dc_voxel_grid_free(vox_grid);
         return dc_sb_take(sb);
     }
 
@@ -1000,6 +1003,15 @@ static char *cmd_cubeiform_exec(const char *args) {
         DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
         DC_SchCanvas *canvas = dc_sch_editor_get_canvas(ed);
         dc_sch_canvas_queue_redraw(canvas);
+    }
+
+    /* Display voxel grid in viewport */
+    if (vox_grid) {
+        DC_GlViewport *vp = get_viewport();
+        if (vp) dc_gl_viewport_set_voxel_grid(vp, vox_grid);
+        /* Store globally for lifetime */
+        dc_voxel_grid_free(s_voxel_grid);
+        s_voxel_grid = vox_grid;
     }
 
     return strdup("{\"ok\":true}\n");
@@ -1639,9 +1651,6 @@ static char *cmd_eda_fp_list(void) {
 /* =========================================================================
  * Voxel commands
  * ========================================================================= */
-
-/* Global voxel grid — persists across commands */
-static DC_VoxelGrid *s_voxel_grid = NULL;
 
 /* voxel_sphere <cx> <cy> <cz> <radius> [resolution] [cell_size]
  * Create a sphere SDF, activate, color by normal, display in viewport. */

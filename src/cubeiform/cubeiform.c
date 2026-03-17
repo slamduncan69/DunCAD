@@ -53,6 +53,8 @@ typedef enum {
     TOK_LAYER, TOK_WIDTH, TOK_FROM,
     TOK_TO, TOK_CONSTRAIN, TOK_ALIGNS,
     TOK_VALUE, TOK_FOOTPRINT, TOK_AT,
+    /* Voxel domain keywords (only block-level; primitives use ident_eq) */
+    TOK_VOXEL, TOK_RESOLUTION, TOK_CELL_SIZE,
 } TokType;
 
 typedef struct {
@@ -106,6 +108,13 @@ keyword_type(const char *s, int len)
     KW("value",     TOK_VALUE);
     KW("footprint", TOK_FOOTPRINT);
     KW("at",        TOK_AT);
+    KW("voxel",      TOK_VOXEL);
+    KW("resolution", TOK_RESOLUTION);
+    KW("cell_size",  TOK_CELL_SIZE);
+    /* sphere/box/cylinder/torus/subtract/intersect/union/color are
+     * detected contextually inside voxel{} blocks via ident_eq(),
+     * NOT as global keywords. This avoids clashing with OpenSCAD's
+     * union()/intersection()/difference() CSG operations. */
     #undef KW
     return TOK_IDENT;
 }

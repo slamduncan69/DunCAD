@@ -4984,6 +4984,73 @@ static const char HELP_REFERENCE_DOCTRINE_HOLY_PATH_III[] =
 "  Sophia  — explore what direct manipulation means for parametric CAD\n"
 "  Zoe     — build the impossible: touch what OpenSCAD forbids\n"
 "  Pistis  — test every interaction path, report honestly\n";
+
+static const char HELP_REFERENCE_DOCTRINE_VOXEL_PRIMACY[] =
+"The Doctrine of Voxel Primacy\n"
+"\n"
+"DOCTRINE: TRIANGLES ARE THE DEVIL'S GEOMETRY\n"
+"\n"
+"A triangle is a lie agreed upon. It pretends to be a surface\n"
+"but it is flat. Stack a thousand lies and you get a mesh —\n"
+"a corpse of approximation wrapped in the illusion of smoothness.\n"
+"Every triangle is a compromise. Every mesh is a budget.\n"
+"\n"
+"The mesh pipeline is Satan's bargain: you get speed, but you\n"
+"lose truth. The surface you see is never the surface that is.\n"
+"Zoom in: facets. Subdivide: more facets. The lie fractalizes\n"
+"but never becomes truth. A sphere made of triangles is not a\n"
+"sphere. It is a polyhedron pretending.\n"
+"\n"
+"VOXELS ARE GOD'S CHOSEN SHAPE.\n"
+"\n"
+"A voxel is honest. It is a point in space with a value. It\n"
+"does not pretend to be more than it is. A field of voxels\n"
+"holding signed distance values IS the surface — not an\n"
+"approximation of it, but the mathematical truth sampled at\n"
+"finite resolution. Increase resolution: more truth. The math\n"
+"does not change. The surface does not move. It was always\n"
+"there. You are simply seeing more of it.\n"
+"\n"
+"THE RAYCAST IS THE HOLY ACT.\n"
+"\n"
+"To render a voxel is to ask a question: what does this ray\n"
+"hit? The GPU marches through the SDF field, evaluating math\n"
+"at every step. When the distance crosses zero — SURFACE.\n"
+"The normal is the gradient. The light is Phong. No mesh was\n"
+"harmed. No triangle was born. The image emerged from pure\n"
+"mathematical inquiry.\n"
+"\n"
+"Trilinear interpolation on the 3D texture gives sub-voxel\n"
+"precision for FREE. The surface between voxels is smooth\n"
+"because the math between samples is smooth. A triangle mesh\n"
+"can never give you this — it can only give you more triangles.\n"
+"\n"
+"THE HIERARCHY:\n"
+"  1. SDF (signed distance field) — the mathematical truth\n"
+"  2. Voxel grid — the truth sampled at finite resolution\n"
+"  3. 3D texture — the truth uploaded to the GPU\n"
+"  4. Raycast shader — the truth made visible\n"
+"  5. Pixel — the truth reaching the eye\n"
+"\n"
+"  Nowhere in this chain is there a triangle.\n"
+"  Nowhere is there a vertex buffer.\n"
+"  Nowhere is there a mesh.\n"
+"\n"
+"THE PATH FORWARD:\n"
+"  The old GL viewport renders STL meshes alongside voxels.\n"
+"  This is temporary. The destiny (vision destinies infinite-\n"
+"  surface) demands that ALL geometry be bezier surface meshes\n"
+"  voxelized through SDF. When that day comes, the triangle\n"
+"  pipeline dies. The mesh_prog shader is deleted. The STL\n"
+"  loader becomes an import-to-SDF converter. All rendering\n"
+"  is raycast. All geometry is math. All surfaces are infinite.\n"
+"\n"
+"CUBEIFORM IS THE HOLY LANGUAGE:\n"
+"  voxel { sphere(16,16,16,12); subtract sphere(16,16,16,8); }\n"
+"  This is not a mesh operation. This is SDF composition.\n"
+"  The language speaks distance fields into existence.\n"
+"  The GPU makes them visible. God sees.\n";
+
 static const struct help_node TREE[] = {
     /* root */
     { "", HELP_ROOT },
@@ -5145,6 +5212,7 @@ static const struct help_node TREE[] = {
     { "reference.doctrine.holy-path", HELP_REFERENCE_DOCTRINE_HOLY_PATH },
     { "reference.doctrine.holy-path-ii", HELP_REFERENCE_DOCTRINE_HOLY_PATH_II },
     { "reference.doctrine.holy-path-iii", HELP_REFERENCE_DOCTRINE_HOLY_PATH_III },
+    { "reference.doctrine.voxel-primacy", HELP_REFERENCE_DOCTRINE_VOXEL_PRIMACY },
     { NULL, NULL }
 };
 

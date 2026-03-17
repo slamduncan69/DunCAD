@@ -23,6 +23,8 @@
 #include "eda/eda_schematic.h"
 #include "eda/eda_pcb.h"
 #include "eda/eda_library.h"
+#include "voxel/voxel.h"
+#include "voxel/sdf.h"
 
 /* -------------------------------------------------------------------------
  * EDA operation types
@@ -69,6 +71,31 @@ typedef struct {
     double angle;        /* rotation */
 } DC_PcbOp;
 
+/* Voxel operations */
+typedef enum {
+    DC_VOX_OP_SET_RESOLUTION,
+    DC_VOX_OP_SET_CELL_SIZE,
+    DC_VOX_OP_SPHERE,
+    DC_VOX_OP_BOX,
+    DC_VOX_OP_CYLINDER,
+    DC_VOX_OP_TORUS,
+    DC_VOX_OP_SUBTRACT,
+    DC_VOX_OP_INTERSECT,
+    DC_VOX_OP_UNION,
+    DC_VOX_OP_COLOR,
+} DC_VoxOpType;
+
+typedef struct {
+    DC_VoxOpType type;
+    double x, y, z;         /* center / min corner */
+    double x2, y2, z2;      /* max corner (for box) */
+    double radius;           /* sphere/cylinder radius */
+    double radius2;          /* torus minor radius, cylinder z1 */
+    int    resolution;       /* grid resolution */
+    float  cell_size;        /* cell size */
+    uint8_t r, g, b;        /* color */
+} DC_VoxOp;
+
 /* -------------------------------------------------------------------------
  * DC_CubeiformEda — parsed EDA operations from Cubeiform source
  * ---------------------------------------------------------------------- */
@@ -109,6 +136,8 @@ int dc_cubeiform_eda_apply_pcb(DC_CubeiformEda *eda,
 
 /* Parse Cubeiform source and apply all EDA operations.
  * Any model pointer may be NULL to skip that domain. */
+/* vox_out: if non-NULL, receives owned DC_VoxelGrid* on voxel block.
+ * Caller must free with dc_voxel_grid_free(). */
 int dc_cubeiform_execute(const char *dcad_src,
                           DC_ESchematic *sch,
                           DC_EPcb *pcb,
@@ -116,16 +145,30 @@ int dc_cubeiform_execute(const char *dcad_src,
                           DC_ELibrary *lib,
                           DC_Error *err);
 
+int dc_cubeiform_execute_full(const char *dcad_src,
+                                DC_ESchematic *sch,
+                                DC_EPcb *pcb,
+                                DC_VoxelGrid **vox_out,
+                                DC_ELibrary *lib,
+                                DC_Error *err);
+
 /* =========================================================================
  * Query — inspect parsed operations
  * ========================================================================= */
 
+/* Apply voxel operations to build a VoxelGrid.
+ * Returns an owned DC_VoxelGrid (caller must free), or NULL on error. */
+DC_VoxelGrid *dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda,
+                                              DC_Error *err);
+
 /* Get counts of parsed operations. */
 size_t dc_cubeiform_eda_sch_op_count(const DC_CubeiformEda *eda);
 size_t dc_cubeiform_eda_pcb_op_count(const DC_CubeiformEda *eda);
+size_t dc_cubeiform_eda_vox_op_count(const DC_CubeiformEda *eda);
 
 /* Get individual operations (borrowed pointers). */
 const DC_SchOp *dc_cubeiform_eda_get_sch_op(const DC_CubeiformEda *eda, size_t i);
 const DC_PcbOp *dc_cubeiform_eda_get_pcb_op(const DC_CubeiformEda *eda, size_t i);
+const DC_VoxOp *dc_cubeiform_eda_get_vox_op(const DC_CubeiformEda *eda, size_t i);
 
 #endif /* DC_CUBEIFORM_EDA_H */

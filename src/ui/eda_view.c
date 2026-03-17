@@ -10,6 +10,10 @@
 #include "eda/eda_pcb.h"
 #include "eda/eda_cubeiform_export.h"
 #include "cubeiform/cubeiform_eda.h"
+#include "voxel/voxel.h"
+#include "gl/gl_viewport.h"
+#include "ui/app_window.h"
+#include "ui/scad_preview.h"
 #include "core/error.h"
 #include "core/log.h"
 
@@ -24,6 +28,7 @@ struct DC_EdaView {
     DC_SchEditor   *sch_editor;  /* owned */
     DC_PcbEditor   *pcb_editor;  /* owned */
     DC_CodeEditor  *code_editor; /* owned */
+    DC_VoxelGrid   *voxel_grid;  /* owned — last voxel output, for lifetime */
 };
 
 /* =========================================================================
@@ -143,6 +148,7 @@ dc_eda_view_free(DC_EdaView *v)
     dc_sch_editor_free(v->sch_editor);
     dc_pcb_editor_free(v->pcb_editor);
     dc_code_editor_free(v->code_editor);
+    dc_voxel_grid_free(v->voxel_grid);
     free(v);
 }
 
@@ -165,13 +171,15 @@ dc_eda_view_execute_cubeiform(DC_EdaView *v)
     DC_Error err = {0};
     DC_ESchematic *sch = dc_sch_editor_get_schematic(v->sch_editor);
     DC_EPcb *pcb = dc_pcb_editor_get_pcb(v->pcb_editor);
+    DC_VoxelGrid *vox_grid = NULL;
 
-    int rc = dc_cubeiform_execute(src, sch, pcb, NULL, NULL, &err);
+    int rc = dc_cubeiform_execute_full(src, sch, pcb, &vox_grid, NULL, &err);
     free(src);
 
     if (rc != 0) {
         dc_log(DC_LOG_ERROR, DC_LOG_EVENT_EDA,
                "Cubeiform execution failed: %s", err.message);
+        dc_voxel_grid_free(vox_grid);
         return -1;
     }
 
@@ -179,6 +187,27 @@ dc_eda_view_execute_cubeiform(DC_EdaView *v)
     dc_sch_canvas_queue_redraw(dc_sch_editor_get_canvas(v->sch_editor));
     dc_pcb_canvas_queue_redraw(dc_pcb_editor_get_canvas(v->pcb_editor));
     dc_pcb_editor_update_ratsnest(v->pcb_editor);
+
+    /* If voxel block produced a grid, display it in the 3D viewport */
+    if (vox_grid) {
+        /* Get the GL viewport from the app window via the ScadPreview */
+        DC_ScadPreview *pv = dc_app_window_get_scad_preview(
+            gtk_widget_get_ancestor(dc_eda_view_widget(v), GTK_TYPE_WINDOW));
+        if (pv) {
+            DC_GlViewport *gl_vp = dc_scad_preview_get_viewport(pv);
+            if (gl_vp) {
+                dc_gl_viewport_set_voxel_grid(gl_vp, vox_grid);
+                /* Switch to 3D CAD tab to see the result */
+                GtkWidget *win = gtk_widget_get_ancestor(
+                    dc_eda_view_widget(v), GTK_TYPE_WINDOW);
+                if (win) dc_app_window_set_tab(win, "3d_cad");
+            }
+        }
+        /* Grid must stay alive while viewport references it —
+         * store it on the eda_view for lifetime management */
+        dc_voxel_grid_free(v->voxel_grid);
+        v->voxel_grid = vox_grid;
+    }
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA, "Cubeiform executed successfully");
     return 0;

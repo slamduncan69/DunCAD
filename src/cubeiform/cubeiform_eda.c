@@ -20,6 +20,7 @@
 struct DC_CubeiformEda {
     DC_Array *sch_ops;  /* DC_SchOp elements */
     DC_Array *pcb_ops;  /* DC_PcbOp elements */
+    DC_Array *vox_ops;  /* DC_VoxOp elements */
 };
 
 /* =========================================================================
@@ -694,7 +695,114 @@ static void parse_pcb_block(EParser *p, DC_Array *ops)
 /* =========================================================================
  * Top-level parser — find domain blocks in Cubeiform source
  * ========================================================================= */
-static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_ops)
+/* =========================================================================
+ * Voxel block parser
+ * ========================================================================= */
+static void
+parse_voxel_block(EParser *p, DC_Array *vox_ops)
+{
+    if (p->cur.type != ETOK_LBRACE) {
+        if (!p->has_error) {
+            DC_SET_ERROR(p->err, DC_ERROR_EDA_PARSE, "expected '{' after voxel");
+            p->has_error = 1;
+        }
+        return;
+    }
+    next_token(p); /* skip { */
+
+    while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error) {
+        if (ident_eq(&p->cur, "resolution")) {
+            next_token(p);
+            DC_VoxOp op = { .type = DC_VOX_OP_SET_RESOLUTION };
+            op.resolution = (int)eat_number(p);
+            expect(p, ETOK_SEMI);
+            dc_array_push(vox_ops, &op);
+        } else if (ident_eq(&p->cur, "cell_size")) {
+            next_token(p);
+            DC_VoxOp op = { .type = DC_VOX_OP_SET_CELL_SIZE };
+            op.cell_size = (float)eat_number(p);
+            expect(p, ETOK_SEMI);
+            dc_array_push(vox_ops, &op);
+        } else if (ident_eq(&p->cur, "sphere")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_VoxOp op = { .type = DC_VOX_OP_SPHERE };
+            op.x = eat_number(p); expect(p, ETOK_COMMA);
+            op.y = eat_number(p); expect(p, ETOK_COMMA);
+            op.z = eat_number(p); expect(p, ETOK_COMMA);
+            op.radius = eat_number(p);
+            expect(p, ETOK_RPAREN);
+            expect(p, ETOK_SEMI);
+            dc_array_push(vox_ops, &op);
+        } else if (ident_eq(&p->cur, "box")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_VoxOp op = { .type = DC_VOX_OP_BOX };
+            op.x  = eat_number(p); expect(p, ETOK_COMMA);
+            op.y  = eat_number(p); expect(p, ETOK_COMMA);
+            op.z  = eat_number(p); expect(p, ETOK_COMMA);
+            op.x2 = eat_number(p); expect(p, ETOK_COMMA);
+            op.y2 = eat_number(p); expect(p, ETOK_COMMA);
+            op.z2 = eat_number(p);
+            expect(p, ETOK_RPAREN);
+            expect(p, ETOK_SEMI);
+            dc_array_push(vox_ops, &op);
+        } else if (ident_eq(&p->cur, "cylinder")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_VoxOp op = { .type = DC_VOX_OP_CYLINDER };
+            op.x = eat_number(p); expect(p, ETOK_COMMA);
+            op.y = eat_number(p); expect(p, ETOK_COMMA);
+            op.radius = eat_number(p); expect(p, ETOK_COMMA);
+            op.z = eat_number(p); expect(p, ETOK_COMMA);
+            op.radius2 = eat_number(p);
+            expect(p, ETOK_RPAREN);
+            expect(p, ETOK_SEMI);
+            dc_array_push(vox_ops, &op);
+        } else if (ident_eq(&p->cur, "torus")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_VoxOp op = { .type = DC_VOX_OP_TORUS };
+            op.x = eat_number(p); expect(p, ETOK_COMMA);
+            op.y = eat_number(p); expect(p, ETOK_COMMA);
+            op.z = eat_number(p); expect(p, ETOK_COMMA);
+            op.radius = eat_number(p); expect(p, ETOK_COMMA);
+            op.radius2 = eat_number(p);
+            expect(p, ETOK_RPAREN);
+            expect(p, ETOK_SEMI);
+            dc_array_push(vox_ops, &op);
+        } else if (ident_eq(&p->cur, "subtract")) {
+            next_token(p);
+            DC_VoxOp wrapper = { .type = DC_VOX_OP_SUBTRACT };
+            dc_array_push(vox_ops, &wrapper);
+            /* The next statement is the operand — parse it as part of the block */
+        } else if (ident_eq(&p->cur, "intersect")) {
+            next_token(p);
+            DC_VoxOp wrapper = { .type = DC_VOX_OP_INTERSECT };
+            dc_array_push(vox_ops, &wrapper);
+        } else if (ident_eq(&p->cur, "union")) {
+            next_token(p);
+            DC_VoxOp wrapper = { .type = DC_VOX_OP_UNION };
+            dc_array_push(vox_ops, &wrapper);
+        } else if (ident_eq(&p->cur, "color")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_VoxOp op = { .type = DC_VOX_OP_COLOR };
+            op.r = (uint8_t)eat_number(p); expect(p, ETOK_COMMA);
+            op.g = (uint8_t)eat_number(p); expect(p, ETOK_COMMA);
+            op.b = (uint8_t)eat_number(p);
+            expect(p, ETOK_RPAREN);
+            expect(p, ETOK_SEMI);
+            dc_array_push(vox_ops, &op);
+        } else {
+            next_token(p); /* skip unknown */
+        }
+    }
+
+    if (p->cur.type == ETOK_RBRACE) next_token(p);
+}
+
+static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_ops, DC_Array *vox_ops)
 {
     while (p->cur.type != ETOK_EOF && !p->has_error) {
         if (ident_eq(&p->cur, "schematic")) {
@@ -703,6 +811,9 @@ static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_o
         } else if (ident_eq(&p->cur, "pcb")) {
             next_token(p);
             parse_pcb_block(p, pcb_ops);
+        } else if (ident_eq(&p->cur, "voxel")) {
+            next_token(p);
+            parse_voxel_block(p, vox_ops);
         } else if (ident_eq(&p->cur, "assembly")) {
             /* Skip assembly blocks for now — future */
             next_token(p);
@@ -753,7 +864,8 @@ dc_cubeiform_parse_eda(const char *dcad_src, DC_Error *err)
 
     eda->sch_ops = dc_array_new(sizeof(DC_SchOp));
     eda->pcb_ops = dc_array_new(sizeof(DC_PcbOp));
-    if (!eda->sch_ops || !eda->pcb_ops) {
+    eda->vox_ops = dc_array_new(sizeof(DC_VoxOp));
+    if (!eda->sch_ops || !eda->pcb_ops || !eda->vox_ops) {
         dc_cubeiform_eda_free(eda);
         DC_SET_ERROR(err, DC_ERROR_MEMORY, "alloc op arrays");
         return NULL;
@@ -767,7 +879,7 @@ dc_cubeiform_parse_eda(const char *dcad_src, DC_Error *err)
     p.has_error = 0;
 
     next_token(&p);
-    find_and_parse_blocks(&p, eda->sch_ops, eda->pcb_ops);
+    find_and_parse_blocks(&p, eda->sch_ops, eda->pcb_ops, eda->vox_ops);
 
     if (p.has_error) {
         dc_cubeiform_eda_free(eda);
@@ -775,8 +887,9 @@ dc_cubeiform_parse_eda(const char *dcad_src, DC_Error *err)
     }
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA,
-           "Cubeiform EDA parsed: %zu sch ops, %zu pcb ops",
-           dc_array_length(eda->sch_ops), dc_array_length(eda->pcb_ops));
+           "Cubeiform parsed: %zu sch, %zu pcb, %zu vox ops",
+           dc_array_length(eda->sch_ops), dc_array_length(eda->pcb_ops),
+           dc_array_length(eda->vox_ops));
 
     return eda;
 }
@@ -801,6 +914,9 @@ dc_cubeiform_eda_free(DC_CubeiformEda *eda)
         }
         dc_array_free(eda->pcb_ops);
     }
+
+    if (eda->vox_ops)
+        dc_array_free(eda->vox_ops);
 
     free(eda);
 }
@@ -828,6 +944,17 @@ const DC_PcbOp *dc_cubeiform_eda_get_pcb_op(const DC_CubeiformEda *eda, size_t i
 {
     if (!eda || i >= dc_array_length(eda->pcb_ops)) return NULL;
     return dc_array_get(eda->pcb_ops, i);
+}
+
+size_t dc_cubeiform_eda_vox_op_count(const DC_CubeiformEda *eda)
+{
+    return eda && eda->vox_ops ? dc_array_length(eda->vox_ops) : 0;
+}
+
+const DC_VoxOp *dc_cubeiform_eda_get_vox_op(const DC_CubeiformEda *eda, size_t i)
+{
+    if (!eda || !eda->vox_ops || i >= dc_array_length(eda->vox_ops)) return NULL;
+    return dc_array_get(eda->vox_ops, i);
 }
 
 /* =========================================================================
@@ -1030,4 +1157,150 @@ dc_cubeiform_execute(const char *dcad_src,
 
     dc_cubeiform_eda_free(eda);
     return 0;
+}
+
+int
+dc_cubeiform_execute_full(const char *dcad_src,
+                            DC_ESchematic *sch,
+                            DC_EPcb *pcb,
+                            DC_VoxelGrid **vox_out,
+                            DC_ELibrary *lib,
+                            DC_Error *err)
+{
+    DC_CubeiformEda *eda = dc_cubeiform_parse_eda(dcad_src, err);
+    if (!eda) return -1;
+
+    int rc = 0;
+
+    if (sch && dc_array_length(eda->sch_ops) > 0) {
+        rc = dc_cubeiform_eda_apply_schematic(eda, sch, lib, err);
+        if (rc != 0) { dc_cubeiform_eda_free(eda); return rc; }
+    }
+
+    if (pcb && dc_array_length(eda->pcb_ops) > 0) {
+        rc = dc_cubeiform_eda_apply_pcb(eda, pcb, lib, err);
+        if (rc != 0) { dc_cubeiform_eda_free(eda); return rc; }
+    }
+
+    if (vox_out && eda->vox_ops && dc_array_length(eda->vox_ops) > 0) {
+        *vox_out = dc_cubeiform_eda_apply_voxel(eda, err);
+    }
+
+    dc_cubeiform_eda_free(eda);
+    return 0;
+}
+
+/* =========================================================================
+ * Apply — voxel operations → DC_VoxelGrid
+ * ========================================================================= */
+DC_VoxelGrid *
+dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
+{
+    if (!eda || !eda->vox_ops || dc_array_length(eda->vox_ops) == 0)
+        return NULL;
+
+    int resolution = 64;
+    float cell_size = 1.0f;
+    uint8_t cr = 180, cg = 180, cb = 180; /* default color */
+
+    /* First pass: find resolution and cell_size */
+    size_t nops = dc_array_length(eda->vox_ops);
+    for (size_t i = 0; i < nops; i++) {
+        DC_VoxOp *op = dc_array_get(eda->vox_ops, i);
+        if (op->type == DC_VOX_OP_SET_RESOLUTION) resolution = op->resolution;
+        if (op->type == DC_VOX_OP_SET_CELL_SIZE)  cell_size = op->cell_size;
+    }
+
+    if (resolution < 2) resolution = 2;
+    if (resolution > 256) resolution = 256;
+    if (cell_size <= 0) cell_size = 1.0f;
+
+    DC_VoxelGrid *grid = dc_voxel_grid_new(resolution, resolution, resolution, cell_size);
+    if (!grid) {
+        DC_SET_ERROR(err, DC_ERROR_MEMORY, "voxel grid alloc");
+        return NULL;
+    }
+
+    /* Temp grid for CSG operands */
+    DC_VoxelGrid *temp = NULL;
+    int csg_pending = 0; /* 0=none, 1=subtract, 2=intersect, 3=union */
+
+    for (size_t i = 0; i < nops; i++) {
+        DC_VoxOp *op = dc_array_get(eda->vox_ops, i);
+
+        switch (op->type) {
+        case DC_VOX_OP_SET_RESOLUTION:
+        case DC_VOX_OP_SET_CELL_SIZE:
+            break; /* already handled */
+
+        case DC_VOX_OP_SUBTRACT:  csg_pending = 1; break;
+        case DC_VOX_OP_INTERSECT: csg_pending = 2; break;
+        case DC_VOX_OP_UNION:     csg_pending = 3; break;
+
+        case DC_VOX_OP_COLOR:
+            cr = op->r; cg = op->g; cb = op->b;
+            break;
+
+        case DC_VOX_OP_SPHERE:
+        case DC_VOX_OP_BOX:
+        case DC_VOX_OP_CYLINDER:
+        case DC_VOX_OP_TORUS: {
+            if (csg_pending) {
+                /* Build operand in temp grid, then CSG combine */
+                temp = dc_voxel_grid_new(resolution, resolution, resolution, cell_size);
+                if (!temp) break;
+
+                if (op->type == DC_VOX_OP_SPHERE)
+                    dc_sdf_sphere(temp, (float)op->x, (float)op->y, (float)op->z, (float)op->radius);
+                else if (op->type == DC_VOX_OP_BOX)
+                    dc_sdf_box(temp, (float)op->x, (float)op->y, (float)op->z,
+                                     (float)op->x2, (float)op->y2, (float)op->z2);
+                else if (op->type == DC_VOX_OP_CYLINDER)
+                    dc_sdf_cylinder(temp, (float)op->x, (float)op->y, (float)op->radius,
+                                          (float)op->z, (float)op->radius2);
+                else if (op->type == DC_VOX_OP_TORUS)
+                    dc_sdf_torus(temp, (float)op->x, (float)op->y, (float)op->z,
+                                       (float)op->radius, (float)op->radius2);
+
+                DC_VoxelGrid *out = dc_voxel_grid_new(resolution, resolution, resolution, cell_size);
+                if (out) {
+                    if (csg_pending == 1) dc_sdf_subtract(grid, temp, out);
+                    else if (csg_pending == 2) dc_sdf_intersect(grid, temp, out);
+                    else dc_sdf_union(grid, temp, out);
+
+                    dc_voxel_grid_free(grid);
+                    grid = out;
+                }
+                dc_voxel_grid_free(temp);
+                temp = NULL;
+                csg_pending = 0;
+            } else {
+                /* Direct SDF into main grid */
+                if (op->type == DC_VOX_OP_SPHERE)
+                    dc_sdf_sphere(grid, (float)op->x, (float)op->y, (float)op->z, (float)op->radius);
+                else if (op->type == DC_VOX_OP_BOX)
+                    dc_sdf_box(grid, (float)op->x, (float)op->y, (float)op->z,
+                                     (float)op->x2, (float)op->y2, (float)op->z2);
+                else if (op->type == DC_VOX_OP_CYLINDER)
+                    dc_sdf_cylinder(grid, (float)op->x, (float)op->y, (float)op->radius,
+                                          (float)op->z, (float)op->radius2);
+                else if (op->type == DC_VOX_OP_TORUS)
+                    dc_sdf_torus(grid, (float)op->x, (float)op->y, (float)op->z,
+                                       (float)op->radius, (float)op->radius2);
+            }
+            break;
+        }
+        }
+    }
+
+    /* Activate and color */
+    dc_sdf_activate_color(grid, cr, cg, cb);
+    dc_sdf_color_by_normal(grid);
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA,
+           "Cubeiform voxel: %dx%dx%d grid, %zu active",
+           resolution, resolution, resolution,
+           dc_voxel_grid_active_count(grid));
+
+    return grid;
 }
