@@ -281,8 +281,8 @@ on_preview_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
     cairo_fill(cr);
 
     if (ctx->preview_sym) {
-        dc_sch_symbol_render_preview(cr, ctx->preview_sym,
-                                      0, 0, (double)width, (double)height);
+        dc_sch_symbol_render_preview_ex(cr, ctx->preview_sym, ctx->lib,
+                                         0, 0, (double)width, (double)height);
     } else {
         cairo_set_source_rgb(cr, 0.4, 0.4, 0.4);
         cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL,

@@ -1479,16 +1479,15 @@ static char *cmd_eda_sym_preview(const char *args) {
         return resp;
     }
 
-    /* Render to Cairo image surface */
-    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    /* Render to Cairo image surface (RGB24 — no alpha complications) */
+    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_RGB24, w, h);
     cairo_t *cr = cairo_create(surf);
 
     /* Dark background */
     cairo_set_source_rgb(cr, 0.12, 0.12, 0.14);
-    cairo_rectangle(cr, 0, 0, w, h);
-    cairo_fill(cr);
+    cairo_paint(cr);
 
-    dc_sch_symbol_render_preview(cr, sym, 0, 0, (double)w, (double)h);
+    dc_sch_symbol_render_preview_ex(cr, sym, lib, 0, 0, (double)w, (double)h);
 
     cairo_destroy(cr);
     cairo_surface_write_to_png(surf, path);
@@ -1519,12 +1518,11 @@ static char *cmd_eda_fp_preview(const char *args) {
         return resp;
     }
 
-    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_RGB24, w, h);
     cairo_t *cr = cairo_create(surf);
 
     cairo_set_source_rgb(cr, 0.1, 0.15, 0.1);
-    cairo_rectangle(cr, 0, 0, w, h);
-    cairo_fill(cr);
+    cairo_paint(cr);
 
     dc_pcb_footprint_render_preview(cr, fp, 0, 0, (double)w, (double)h);
 

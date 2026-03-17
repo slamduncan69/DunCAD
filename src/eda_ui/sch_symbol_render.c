@@ -511,7 +511,7 @@ preview_scan_bbox(const DC_Sexpr *unit,
                 double pin_len = sexpr_float(length_node, 0);
                 double rad = pin_angle * M_PI / 180.0;
                 double ex = px + pin_len * cos(rad);
-                double ey = py - pin_len * sin(rad);
+                double ey = py + pin_len * sin(rad);
                 preview_bbox_update(minx, miny, maxx, maxy, px, py);
                 preview_bbox_update(minx, miny, maxx, maxy, ex, ey);
             }
@@ -635,7 +635,7 @@ preview_render_primitive(cairo_t *cr, const DC_Sexpr *prim,
         double pin_len = sexpr_float(length_node, 0);
         double rad = pin_angle * M_PI / 180.0;
         double ex = px + pin_len * cos(rad);
-        double ey = py - pin_len * sin(rad);
+        double ey = py + pin_len * sin(rad);
 
         cairo_set_source_rgb(cr, 0.0, 0.6, 0.0);
         cairo_set_line_width(cr, 1.5);
@@ -650,9 +650,31 @@ preview_render_primitive(cairo_t *cr, const DC_Sexpr *prim,
 #undef PY
 }
 
-void
-dc_sch_symbol_render_preview(cairo_t *cr, const DC_Sexpr *sym_def,
-                               double x, double y, double w, double h)
+/* Resolve (extends "ParentName") to get the actual draw definition.
+ * Returns the parent symbol if extends is found, otherwise sym_def itself. */
+static const DC_Sexpr *
+resolve_extends(const DC_Sexpr *sym_def, DC_ELibrary *lib)
+{
+    if (!sym_def || !lib) return sym_def;
+
+    DC_Sexpr *ext = dc_sexpr_find(sym_def, "extends");
+    if (!ext) return sym_def;
+
+    const char *parent_name = dc_sexpr_value(ext);
+    if (!parent_name) return sym_def;
+
+    /* Look up parent in the same library */
+    const DC_Sexpr *parent = dc_elibrary_find_symbol_by_name(lib, parent_name);
+    if (!parent) return sym_def;
+
+    /* Recursively resolve (parent might also extend) */
+    return resolve_extends(parent, lib);
+}
+
+/* Core preview implementation */
+static void
+render_preview_impl(cairo_t *cr, const DC_Sexpr *sym_def,
+                     double x, double y, double w, double h)
 {
     if (!cr || !sym_def || w <= 0 || h <= 0) return;
 
@@ -705,4 +727,20 @@ dc_sch_symbol_render_preview(cairo_t *cr, const DC_Sexpr *sym_def,
             preview_render_primitive(cr, child, ox, oy, scale);
         }
     }
+}
+
+void
+dc_sch_symbol_render_preview(cairo_t *cr, const DC_Sexpr *sym_def,
+                               double x, double y, double w, double h)
+{
+    render_preview_impl(cr, sym_def, x, y, w, h);
+}
+
+void
+dc_sch_symbol_render_preview_ex(cairo_t *cr, const DC_Sexpr *sym_def,
+                                  DC_ELibrary *lib,
+                                  double x, double y, double w, double h)
+{
+    const DC_Sexpr *resolved = resolve_extends(sym_def, lib);
+    render_preview_impl(cr, resolved, x, y, w, h);
 }

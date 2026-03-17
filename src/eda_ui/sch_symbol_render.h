@@ -25,8 +25,14 @@ void dc_sch_symbol_render(cairo_t *cr,
 
 /* Render a symbol definition as a standalone preview.
  * Fits the symbol bbox into the rectangle (x,y,w,h) in Cairo user coords.
- * No SchCanvas needed — uses a simple affine fit. */
+ * No SchCanvas needed — uses a simple affine fit.
+ * lib may be NULL; if non-NULL, used to resolve (extends "...") references. */
 void dc_sch_symbol_render_preview(cairo_t *cr, const DC_Sexpr *sym_def,
                                     double x, double y, double w, double h);
+
+/* Same as above but with library for resolving extends. */
+void dc_sch_symbol_render_preview_ex(cairo_t *cr, const DC_Sexpr *sym_def,
+                                       DC_ELibrary *lib,
+                                       double x, double y, double w, double h);
 
 #endif /* DC_SCH_SYMBOL_RENDER_H */
