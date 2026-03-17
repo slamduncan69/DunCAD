@@ -29,6 +29,17 @@ typedef struct {
     const DC_Sexpr *preview_fp;
 } FPBrowserCtx;
 
+/* qsort comparator for C strings (via pointer-to-pointer) */
+static int
+fp_str_cmp(const void *a, const void *b)
+{
+    const char *sa = *(const char *const *)a;
+    const char *sb = *(const char *const *)b;
+    if (!sa) return sb ? 1 : 0;
+    if (!sb) return -1;
+    return strcmp(sa, sb);
+}
+
 /* Case-insensitive substring match */
 static int
 fp_str_contains_ci(const char *haystack, const char *needle)
@@ -62,22 +73,20 @@ populate_fp_lib_list(FPBrowserCtx *ctx)
     while ((child = gtk_widget_get_first_child(ctx->lib_list)) != NULL)
         gtk_list_box_remove(GTK_LIST_BOX(ctx->lib_list), child);
 
-    /* Collect distinct library names from footprints */
-    size_t count = dc_elibrary_footprint_count(ctx->lib);
-    /* Simple O(n^2) distinct — footprint libs are typically small */
-    for (size_t i = 0; i < count; i++) {
-        const char *lname = dc_elibrary_footprint_lib_name(ctx->lib, i);
-        if (!lname) continue;
+    /* Use fp_lib_count which includes pending (registered but not loaded) dirs */
+    size_t nlibs = dc_elibrary_fp_lib_count(ctx->lib);
+    if (nlibs == 0) return;
 
-        /* Check if already added */
-        int dup = 0;
-        for (size_t j = 0; j < i; j++) {
-            const char *prev = dc_elibrary_footprint_lib_name(ctx->lib, j);
-            if (prev && strcmp(lname, prev) == 0) { dup = 1; break; }
-        }
-        if (dup) continue;
+    /* Collect and sort alphabetically */
+    const char **names = malloc(nlibs * sizeof(const char *));
+    if (!names) return;
+    for (size_t i = 0; i < nlibs; i++)
+        names[i] = dc_elibrary_fp_lib_name(ctx->lib, i);
+    qsort(names, nlibs, sizeof(const char *), fp_str_cmp);
 
-        GtkWidget *label = gtk_label_new(lname);
+    for (size_t i = 0; i < nlibs; i++) {
+        if (!names[i]) continue;
+        GtkWidget *label = gtk_label_new(names[i]);
         gtk_label_set_xalign(GTK_LABEL(label), 0.0);
         gtk_widget_set_margin_start(label, 6);
         gtk_widget_set_margin_end(label, 6);
@@ -85,6 +94,7 @@ populate_fp_lib_list(FPBrowserCtx *ctx)
         gtk_widget_set_margin_bottom(label, 2);
         gtk_list_box_append(GTK_LIST_BOX(ctx->lib_list), label);
     }
+    free(names);
 }
 
 /* Populate footprint list for a given library */
@@ -97,23 +107,42 @@ populate_fp_list_for_lib(FPBrowserCtx *ctx, const char *lib_name)
 
     if (!lib_name) return;
 
-    size_t count = dc_elibrary_footprint_count(ctx->lib);
-    int added = 0;
-    for (size_t i = 0; i < count && added < 2000; i++) {
-        const char *lname = dc_elibrary_footprint_lib_name(ctx->lib, i);
-        const char *name = dc_elibrary_footprint_name(ctx->lib, i);
-        if (!lname || !name) continue;
-        if (strcmp(lname, lib_name) != 0) continue;
+    /* Trigger lazy load by looking up a dummy footprint in this lib */
+    char dummy[512];
+    snprintf(dummy, sizeof(dummy), "%s:__trigger__", lib_name);
+    dc_elibrary_find_footprint(ctx->lib, dummy);
 
-        GtkWidget *label = gtk_label_new(name);
+    /* Now enumerate loaded footprints for this lib, collect and sort */
+    size_t count = dc_elibrary_footprint_count(ctx->lib);
+    size_t match_count = 0;
+    for (size_t i = 0; i < count; i++) {
+        const char *lname = dc_elibrary_footprint_lib_name(ctx->lib, i);
+        if (lname && strcmp(lname, lib_name) == 0) match_count++;
+    }
+    if (match_count == 0) return;
+    if (match_count > 2000) match_count = 2000;
+
+    const char **names = malloc(match_count * sizeof(const char *));
+    if (!names) return;
+    size_t idx = 0;
+    for (size_t i = 0; i < count && idx < match_count; i++) {
+        const char *lname = dc_elibrary_footprint_lib_name(ctx->lib, i);
+        if (lname && strcmp(lname, lib_name) == 0)
+            names[idx++] = dc_elibrary_footprint_name(ctx->lib, i);
+    }
+    qsort(names, idx, sizeof(const char *), fp_str_cmp);
+
+    for (size_t i = 0; i < idx; i++) {
+        if (!names[i]) continue;
+        GtkWidget *label = gtk_label_new(names[i]);
         gtk_label_set_xalign(GTK_LABEL(label), 0.0);
         gtk_widget_set_margin_start(label, 6);
         gtk_widget_set_margin_end(label, 6);
         gtk_widget_set_margin_top(label, 2);
         gtk_widget_set_margin_bottom(label, 2);
         gtk_list_box_append(GTK_LIST_BOX(ctx->fp_list), label);
-        added++;
     }
+    free(names);
 }
 
 /* Flat search across all footprint libs */
