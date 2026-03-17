@@ -49,6 +49,7 @@ static const char *RAYMARCH_FRAG_SRC =
     "uniform vec3 uLightDir;\n"
     "uniform mat4 uInvVP;\n"
     "uniform float uCellSize;\n"
+    "uniform int uBlocky;\n"
     "\n"
     "vec2 intersectAABB(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {\n"
     "    vec3 invRd = 1.0 / rd;\n"
@@ -120,7 +121,24 @@ static const char *RAYMARCH_FRAG_SRC =
     "\n"
     "    if (!hit) discard;\n"
     "\n"
-    "    vec3 N = calcNormal(hitUVW);\n"
+    "    vec3 N;\n"
+    "    if (uBlocky == 1) {\n"
+    "        /* Blocky normals: snap to nearest axis direction.\n"
+    "         * Determine which voxel face we hit by checking which\n"
+    "         * cell boundary the hit point is closest to. */\n"
+    "        vec3 gridSize = vec3(textureSize(uSDF, 0));\n"
+    "        vec3 cellPos = hitUVW * gridSize;\n"
+    "        vec3 frac = fract(cellPos);\n"
+    "        vec3 distToEdge = min(frac, 1.0 - frac);\n"
+    "        if (distToEdge.x < distToEdge.y && distToEdge.x < distToEdge.z)\n"
+    "            N = vec3(sign(frac.x - 0.5), 0.0, 0.0);\n"
+    "        else if (distToEdge.y < distToEdge.z)\n"
+    "            N = vec3(0.0, sign(frac.y - 0.5), 0.0);\n"
+    "        else\n"
+    "            N = vec3(0.0, 0.0, sign(frac.z - 0.5));\n"
+    "    } else {\n"
+    "        N = calcNormal(hitUVW);\n"
+    "    }\n"
     "    vec3 color = texture(uColor, hitUVW).rgb;\n"
     "\n"
     "    vec3 L = normalize(uLightDir);\n"
@@ -333,6 +351,7 @@ dc_gl_voxel_buf_draw(const DC_GlVoxelBuf *b,
     glUniform3fv(glGetUniformLocation(b->prog, "uBBoxMin"), 1, b->bbox_min);
     glUniform3fv(glGetUniformLocation(b->prog, "uBBoxMax"), 1, b->bbox_max);
     glUniform1f(glGetUniformLocation(b->prog, "uCellSize"), b->cell_size);
+    glUniform1i(glGetUniformLocation(b->prog, "uBlocky"), b->blocky);
 
     /* Bind textures */
     glActiveTexture(GL_TEXTURE0);
