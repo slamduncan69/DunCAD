@@ -10,6 +10,7 @@
 #include "eda/eda_library.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -1223,30 +1224,101 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
         return NULL;
 
     int resolution = 64;
-    float cell_size = 1.0f;
-    uint8_t cr = 180, cg = 180, cb = 180; /* default color */
+    float user_cell_size = 0; /* 0 = auto-compute */
+    uint8_t cr = 180, cg = 180, cb = 180;
 
-    /* First pass: find resolution and cell_size */
+    /* First pass: find resolution, cell_size, and compute bounding box */
     size_t nops = dc_array_length(eda->vox_ops);
+    float bmin[3] = {1e18f, 1e18f, 1e18f};
+    float bmax[3] = {-1e18f, -1e18f, -1e18f};
+
     for (size_t i = 0; i < nops; i++) {
         DC_VoxOp *op = dc_array_get(eda->vox_ops, i);
         if (op->type == DC_VOX_OP_SET_RESOLUTION) resolution = op->resolution;
-        if (op->type == DC_VOX_OP_SET_CELL_SIZE)  cell_size = op->cell_size;
+        if (op->type == DC_VOX_OP_SET_CELL_SIZE) user_cell_size = op->cell_size;
+
+        /* Accumulate bounding box from primitives */
+        float r;
+        switch (op->type) {
+        case DC_VOX_OP_SPHERE:
+            r = (float)op->radius;
+            if ((float)op->x - r < bmin[0]) bmin[0] = (float)op->x - r;
+            if ((float)op->y - r < bmin[1]) bmin[1] = (float)op->y - r;
+            if ((float)op->z - r < bmin[2]) bmin[2] = (float)op->z - r;
+            if ((float)op->x + r > bmax[0]) bmax[0] = (float)op->x + r;
+            if ((float)op->y + r > bmax[1]) bmax[1] = (float)op->y + r;
+            if ((float)op->z + r > bmax[2]) bmax[2] = (float)op->z + r;
+            break;
+        case DC_VOX_OP_BOX:
+            if ((float)op->x  < bmin[0]) bmin[0] = (float)op->x;
+            if ((float)op->y  < bmin[1]) bmin[1] = (float)op->y;
+            if ((float)op->z  < bmin[2]) bmin[2] = (float)op->z;
+            if ((float)op->x2 > bmax[0]) bmax[0] = (float)op->x2;
+            if ((float)op->y2 > bmax[1]) bmax[1] = (float)op->y2;
+            if ((float)op->z2 > bmax[2]) bmax[2] = (float)op->z2;
+            break;
+        case DC_VOX_OP_CYLINDER:
+            r = (float)op->radius;
+            if ((float)op->x - r < bmin[0]) bmin[0] = (float)op->x - r;
+            if ((float)op->y - r < bmin[1]) bmin[1] = (float)op->y - r;
+            if ((float)op->z     < bmin[2]) bmin[2] = (float)op->z;
+            if ((float)op->x + r > bmax[0]) bmax[0] = (float)op->x + r;
+            if ((float)op->y + r > bmax[1]) bmax[1] = (float)op->y + r;
+            if ((float)op->radius2 > bmax[2]) bmax[2] = (float)op->radius2;
+            break;
+        case DC_VOX_OP_TORUS:
+            r = (float)(op->radius + op->radius2);
+            if ((float)op->x - r < bmin[0]) bmin[0] = (float)op->x - r;
+            if ((float)op->y - r < bmin[1]) bmin[1] = (float)op->y - r;
+            if ((float)op->z - (float)op->radius2 < bmin[2]) bmin[2] = (float)op->z - (float)op->radius2;
+            if ((float)op->x + r > bmax[0]) bmax[0] = (float)op->x + r;
+            if ((float)op->y + r > bmax[1]) bmax[1] = (float)op->y + r;
+            if ((float)op->z + (float)op->radius2 > bmax[2]) bmax[2] = (float)op->z + (float)op->radius2;
+            break;
+        default: break;
+        }
     }
 
-    if (resolution < 2) resolution = 2;
-    if (resolution > 256) resolution = 256;
-    if (cell_size <= 0) cell_size = 1.0f;
+    if (resolution < 8) resolution = 8;
+    if (resolution > 512) resolution = 512;
 
-    DC_VoxelGrid *grid = dc_voxel_grid_new(resolution, resolution, resolution, cell_size);
+    /* Add padding around bounding box */
+    float extent[3] = { bmax[0]-bmin[0], bmax[1]-bmin[1], bmax[2]-bmin[2] };
+    float max_extent = extent[0];
+    if (extent[1] > max_extent) max_extent = extent[1];
+    if (extent[2] > max_extent) max_extent = extent[2];
+    if (max_extent < 0.001f) max_extent = 1.0f;
+
+    float pad = max_extent * 0.1f;
+    for (int a = 0; a < 3; a++) { bmin[a] -= pad; bmax[a] += pad; }
+    for (int a = 0; a < 3; a++) extent[a] = bmax[a] - bmin[a];
+    max_extent = extent[0];
+    if (extent[1] > max_extent) max_extent = extent[1];
+    if (extent[2] > max_extent) max_extent = extent[2];
+
+    /* Compute cell_size from resolution (cells per longest axis) */
+    float cell_size = user_cell_size > 0 ? user_cell_size : max_extent / (float)resolution;
+    int sx = (int)ceilf(extent[0] / cell_size) + 1;
+    int sy = (int)ceilf(extent[1] / cell_size) + 1;
+    int sz = (int)ceilf(extent[2] / cell_size) + 1;
+    if (sx > 512) sx = 512;
+    if (sy > 512) sy = 512;
+    if (sz > 512) sz = 512;
+
+    DC_VoxelGrid *grid = dc_voxel_grid_new(sx, sy, sz, cell_size);
     if (!grid) {
         DC_SET_ERROR(err, DC_ERROR_MEMORY, "voxel grid alloc");
         return NULL;
     }
 
-    /* Temp grid for CSG operands */
+    /* Offset: grid coords = world coords - bmin.
+     * All SDF primitives must be shifted by -bmin. */
+    #define OX(v) ((float)(v) - bmin[0])
+    #define OY(v) ((float)(v) - bmin[1])
+    #define OZ(v) ((float)(v) - bmin[2])
+
     DC_VoxelGrid *temp = NULL;
-    int csg_pending = 0; /* 0=none, 1=subtract, 2=intersect, 3=union */
+    int csg_pending = 0;
 
     for (size_t i = 0; i < nops; i++) {
         DC_VoxOp *op = dc_array_get(eda->vox_ops, i);
@@ -1254,7 +1326,7 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
         switch (op->type) {
         case DC_VOX_OP_SET_RESOLUTION:
         case DC_VOX_OP_SET_CELL_SIZE:
-            break; /* already handled */
+            break;
 
         case DC_VOX_OP_SUBTRACT:  csg_pending = 1; break;
         case DC_VOX_OP_INTERSECT: csg_pending = 2; break;
@@ -1268,57 +1340,59 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
         case DC_VOX_OP_BOX:
         case DC_VOX_OP_CYLINDER:
         case DC_VOX_OP_TORUS: {
+            DC_VoxelGrid *target = grid;
             if (csg_pending) {
-                /* Build operand in temp grid, then CSG combine */
-                temp = dc_voxel_grid_new(resolution, resolution, resolution, cell_size);
+                temp = dc_voxel_grid_new(sx, sy, sz, cell_size);
                 if (!temp) break;
+                target = temp;
+            }
 
-                if (op->type == DC_VOX_OP_SPHERE)
-                    dc_sdf_sphere(temp, (float)op->x, (float)op->y, (float)op->z, (float)op->radius);
-                else if (op->type == DC_VOX_OP_BOX)
-                    dc_sdf_box(temp, (float)op->x, (float)op->y, (float)op->z,
-                                     (float)op->x2, (float)op->y2, (float)op->z2);
-                else if (op->type == DC_VOX_OP_CYLINDER)
-                    dc_sdf_cylinder(temp, (float)op->x, (float)op->y, (float)op->radius,
-                                          (float)op->z, (float)op->radius2);
-                else if (op->type == DC_VOX_OP_TORUS)
-                    dc_sdf_torus(temp, (float)op->x, (float)op->y, (float)op->z,
-                                       (float)op->radius, (float)op->radius2);
+            if (op->type == DC_VOX_OP_SPHERE)
+                dc_sdf_sphere(target, OX(op->x), OY(op->y), OZ(op->z), (float)op->radius);
+            else if (op->type == DC_VOX_OP_BOX)
+                dc_sdf_box(target, OX(op->x), OY(op->y), OZ(op->z),
+                                   OX(op->x2), OY(op->y2), OZ(op->z2));
+            else if (op->type == DC_VOX_OP_CYLINDER)
+                dc_sdf_cylinder(target, OX(op->x), OY(op->y), (float)op->radius,
+                                        OZ(op->z), OZ(op->radius2));
+            else if (op->type == DC_VOX_OP_TORUS)
+                dc_sdf_torus(target, OX(op->x), OY(op->y), OZ(op->z),
+                                     (float)op->radius, (float)op->radius2);
 
-                DC_VoxelGrid *out = dc_voxel_grid_new(resolution, resolution, resolution, cell_size);
+            if (csg_pending && temp) {
+                DC_VoxelGrid *out = dc_voxel_grid_new(sx, sy, sz, cell_size);
                 if (out) {
                     if (csg_pending == 1) dc_sdf_subtract(grid, temp, out);
                     else if (csg_pending == 2) dc_sdf_intersect(grid, temp, out);
                     else dc_sdf_union(grid, temp, out);
-
                     dc_voxel_grid_free(grid);
                     grid = out;
                 }
                 dc_voxel_grid_free(temp);
                 temp = NULL;
                 csg_pending = 0;
-            } else {
-                /* Direct SDF into main grid */
-                if (op->type == DC_VOX_OP_SPHERE)
-                    dc_sdf_sphere(grid, (float)op->x, (float)op->y, (float)op->z, (float)op->radius);
-                else if (op->type == DC_VOX_OP_BOX)
-                    dc_sdf_box(grid, (float)op->x, (float)op->y, (float)op->z,
-                                     (float)op->x2, (float)op->y2, (float)op->z2);
-                else if (op->type == DC_VOX_OP_CYLINDER)
-                    dc_sdf_cylinder(grid, (float)op->x, (float)op->y, (float)op->radius,
-                                          (float)op->z, (float)op->radius2);
-                else if (op->type == DC_VOX_OP_TORUS)
-                    dc_sdf_torus(grid, (float)op->x, (float)op->y, (float)op->z,
-                                       (float)op->radius, (float)op->radius2);
             }
             break;
         }
         }
     }
+    #undef OX
+    #undef OY
+    #undef OZ
 
-    /* Activate and color */
-    dc_sdf_activate_color(grid, cr, cg, cb);
-    dc_sdf_color_by_normal(grid);
+    /* Activate voxels and fill ALL cells with the solid color.
+     * The SDF texture determines the surface boundary — color must
+     * be present everywhere so trilinear interpolation doesn't blend
+     * with black at the zero-crossing. */
+    dc_sdf_activate(grid);
+    {
+        for (int iz = 0; iz < sz; iz++)
+        for (int iy = 0; iy < sy; iy++)
+        for (int ix = 0; ix < sx; ix++) {
+            DC_Voxel *v = dc_voxel_grid_get(grid, ix, iy, iz);
+            if (v) { v->r = cr; v->g = cg; v->b = cb; }
+        }
+    }
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA,
            "Cubeiform voxel: %dx%dx%d grid, %zu active",

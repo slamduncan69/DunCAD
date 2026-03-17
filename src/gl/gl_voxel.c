@@ -1,22 +1,15 @@
 /*
  * gl_voxel.c — SDF raycast voxel renderer.
  *
- * No mesh geometry. No triangles. No instancing.
+ * No mesh geometry. No triangles.
  *
- * The entire volume is a 3D texture of RGBA:
- *   RGB = voxel color (0-255 mapped to 0.0-1.0)
- *   A   = signed distance, remapped to [0,1] range
- *       (0.5 = surface, <0.5 = inside, >0.5 = outside)
+ * Two 3D textures:
+ *   1. RGB8  — voxel color
+ *   2. R32F  — signed distance in WORLD UNITS (no normalization)
  *
  * A fullscreen quad fires a ray per pixel. The fragment shader
- * marches through the 3D texture using ray-AABB intersection to
- * find entry/exit, then steps through the volume sampling the SDF.
- * When the distance crosses zero, we've hit surface. Compute the
- * normal from the SDF gradient (central differences on the 3D texture).
- * Light with Phong. Done.
- *
- * Trilinear interpolation on the 3D texture gives sub-voxel
- * surface precision for free.
+ * marches through the SDF texture using fixed half-voxel steps.
+ * When distance crosses zero — surface. Normal from gradient.
  */
 
 #include "gl/gl_voxel.h"
@@ -48,15 +41,15 @@ static const char *RAYMARCH_FRAG_SRC =
     "in vec2 vUV;\n"
     "out vec4 FragColor;\n"
     "\n"
-    "uniform sampler3D uVolume;\n"       /* 3D SDF texture */
-    "uniform vec3 uBBoxMin;\n"           /* volume world-space AABB */
+    "uniform sampler3D uColor;\n"        /* RGB8 color texture */
+    "uniform sampler3D uSDF;\n"          /* R32F signed distance */
+    "uniform vec3 uBBoxMin;\n"
     "uniform vec3 uBBoxMax;\n"
-    "uniform vec3 uEye;\n"               /* camera position */
-    "uniform vec3 uLightDir;\n"          /* normalized light direction */
-    "uniform mat4 uInvVP;\n"            /* inverse view-projection */
-    "uniform float uStepSize;\n"        /* ray step in normalized coords */
+    "uniform vec3 uEye;\n"
+    "uniform vec3 uLightDir;\n"
+    "uniform mat4 uInvVP;\n"
+    "uniform float uCellSize;\n"
     "\n"
-    "/* Ray-AABB intersection (returns tmin, tmax) */\n"
     "vec2 intersectAABB(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {\n"
     "    vec3 invRd = 1.0 / rd;\n"
     "    vec3 t0 = (bmin - ro) * invRd;\n"
@@ -68,19 +61,16 @@ static const char *RAYMARCH_FRAG_SRC =
     "    return vec2(tNear, tFar);\n"
     "}\n"
     "\n"
-    "/* World position to volume UV (0..1) */\n"
     "vec3 worldToUV(vec3 p) {\n"
     "    return (p - uBBoxMin) / (uBBoxMax - uBBoxMin);\n"
     "}\n"
     "\n"
-    "/* Sample SDF: alpha channel, remapped from [0,1] to [-range,+range] */\n"
     "float sampleSDF(vec3 uvw) {\n"
-    "    return texture(uVolume, uvw).a * 2.0 - 1.0;\n"
+    "    return texture(uSDF, uvw).r;\n"  /* actual world-space distance */
     "}\n"
     "\n"
-    "/* Compute normal from SDF gradient via central differences */\n"
     "vec3 calcNormal(vec3 uvw) {\n"
-    "    vec3 texel = 1.0 / vec3(textureSize(uVolume, 0));\n"
+    "    vec3 texel = 1.0 / vec3(textureSize(uSDF, 0));\n"
     "    float dx = sampleSDF(uvw + vec3(texel.x,0,0)) - sampleSDF(uvw - vec3(texel.x,0,0));\n"
     "    float dy = sampleSDF(uvw + vec3(0,texel.y,0)) - sampleSDF(uvw - vec3(0,texel.y,0));\n"
     "    float dz = sampleSDF(uvw + vec3(0,0,texel.z)) - sampleSDF(uvw - vec3(0,0,texel.z));\n"
@@ -88,7 +78,6 @@ static const char *RAYMARCH_FRAG_SRC =
     "}\n"
     "\n"
     "void main() {\n"
-    "    /* Reconstruct ray from screen UV through inverse VP */\n"
     "    vec4 ndc_near = vec4(vUV * 2.0 - 1.0, -1.0, 1.0);\n"
     "    vec4 ndc_far  = vec4(vUV * 2.0 - 1.0,  1.0, 1.0);\n"
     "    vec4 world_near = uInvVP * ndc_near;\n"
@@ -99,16 +88,14 @@ static const char *RAYMARCH_FRAG_SRC =
     "    vec3 ro = uEye;\n"
     "    vec3 rd = normalize(world_far.xyz - world_near.xyz);\n"
     "\n"
-    "    /* Intersect ray with volume bounding box */\n"
     "    vec2 tHit = intersectAABB(ro, rd, uBBoxMin, uBBoxMax);\n"
-    "    if (tHit.x > tHit.y) discard;  /* ray misses volume */\n"
+    "    if (tHit.x > tHit.y) discard;\n"
     "\n"
-    "    float tNear = max(tHit.x, 0.0);  /* clamp to camera */\n"
+    "    float tNear = max(tHit.x, 0.0);\n"
     "    float tFar  = tHit.y;\n"
+    "    float step = uCellSize * 0.5;\n"
     "\n"
-    "    /* March through the volume — fixed step for reliability */\n"
     "    float t = tNear;\n"
-    "    float step = uStepSize;\n"
     "    bool hit = false;\n"
     "    vec3 hitUVW;\n"
     "    vec3 hitPos;\n"
@@ -117,13 +104,10 @@ static const char *RAYMARCH_FRAG_SRC =
     "        if (t > tFar) break;\n"
     "        vec3 p = ro + rd * t;\n"
     "        vec3 uvw = worldToUV(p);\n"
-    "\n"
-    "        /* Bounds check */\n"
     "        if (any(lessThan(uvw, vec3(0))) || any(greaterThan(uvw, vec3(1)))) {\n"
     "            t += step;\n"
     "            continue;\n"
     "        }\n"
-    "\n"
     "        float d = sampleSDF(uvw);\n"
     "        if (d <= 0.0) {\n"
     "            hit = true;\n"
@@ -131,18 +115,14 @@ static const char *RAYMARCH_FRAG_SRC =
     "            hitPos = p;\n"
     "            break;\n"
     "        }\n"
-    "\n"
-    "        /* Fixed step — one voxel width. No adaptive skipping. */\n"
     "        t += step;\n"
     "    }\n"
     "\n"
     "    if (!hit) discard;\n"
     "\n"
-    "    /* Compute normal and color */\n"
     "    vec3 N = calcNormal(hitUVW);\n"
-    "    vec3 color = texture(uVolume, hitUVW).rgb;\n"
+    "    vec3 color = texture(uColor, hitUVW).rgb;\n"
     "\n"
-    "    /* Phong lighting */\n"
     "    vec3 L = normalize(uLightDir);\n"
     "    float diff = max(dot(N, L), 0.0);\n"
     "    float diff2 = max(dot(N, -L), 0.0) * 0.3;\n"
@@ -159,20 +139,19 @@ static const char *RAYMARCH_FRAG_SRC =
  * Internal structure
  * ========================================================================= */
 struct DC_GlVoxelBuf {
-    GLuint  vol_tex;      /* 3D texture: RGBA8 */
-    GLuint  quad_vao;     /* fullscreen quad */
+    GLuint  color_tex;    /* 3D texture: RGB8 */
+    GLuint  sdf_tex;      /* 3D texture: R32F — real distances */
+    GLuint  quad_vao;
     GLuint  quad_vbo;
-    GLuint  prog;         /* raymarch shader program */
+    GLuint  prog;
     int     uploaded;
     int     active_count;
 
-    int     res_x, res_y, res_z;
     float   cell_size;
     float   bbox_min[3];
     float   bbox_max[3];
 };
 
-/* Fullscreen quad: two triangles covering NDC [-1,1] */
 static const float QUAD_VERTS[] = {
     -1, -1,   1, -1,   1, 1,
     -1, -1,   1,  1,  -1, 1,
@@ -235,17 +214,16 @@ void
 dc_gl_voxel_buf_free(DC_GlVoxelBuf *b)
 {
     if (!b) return;
-    if (b->vol_tex)  glDeleteTextures(1, &b->vol_tex);
-    if (b->quad_vao) glDeleteVertexArrays(1, &b->quad_vao);
-    if (b->quad_vbo) glDeleteBuffers(1, &b->quad_vbo);
-    if (b->prog)     glDeleteProgram(b->prog);
+    if (b->color_tex) glDeleteTextures(1, &b->color_tex);
+    if (b->sdf_tex)   glDeleteTextures(1, &b->sdf_tex);
+    if (b->quad_vao)  glDeleteVertexArrays(1, &b->quad_vao);
+    if (b->quad_vbo)  glDeleteBuffers(1, &b->quad_vbo);
+    if (b->prog)      glDeleteProgram(b->prog);
     free(b);
 }
 
 /* =========================================================================
- * Upload — pack voxel grid into RGBA 3D texture
- *   R,G,B = voxel color
- *   A     = SDF distance, remapped: 0.5 = surface, 0 = deep inside, 1 = far outside
+ * Upload — two textures: RGB8 color + R32F SDF (world-space distances)
  * ========================================================================= */
 int
 dc_gl_voxel_buf_upload(DC_GlVoxelBuf *b, const DC_VoxelGrid *grid)
@@ -257,74 +235,64 @@ dc_gl_voxel_buf_upload(DC_GlVoxelBuf *b, const DC_VoxelGrid *grid)
     int sz = dc_voxel_grid_size_z(grid);
     float cs = dc_voxel_grid_cell_size(grid);
 
-    b->res_x = sx;
-    b->res_y = sy;
-    b->res_z = sz;
     b->cell_size = cs;
     b->bbox_min[0] = 0; b->bbox_min[1] = 0; b->bbox_min[2] = 0;
     b->bbox_max[0] = sx * cs; b->bbox_max[1] = sy * cs; b->bbox_max[2] = sz * cs;
-
-    /* Count active */
     b->active_count = (int)dc_voxel_grid_active_count(grid);
 
-    /* Pack RGBA8 texture data */
     size_t total = (size_t)sx * sy * sz;
-    unsigned char *texdata = malloc(total * 4);
-    if (!texdata) return -1;
 
-    /* Find distance range for normalization */
-    float dmin = 1e9f, dmax = -1e9f;
-    for (int iz = 0; iz < sz; iz++)
-    for (int iy = 0; iy < sy; iy++)
-    for (int ix = 0; ix < sx; ix++) {
-        const DC_Voxel *v = dc_voxel_grid_get_const(grid, ix, iy, iz);
-        if (!v) continue;
-        if (v->distance < dmin) dmin = v->distance;
-        if (v->distance > dmax && v->distance < 1e6f) dmax = v->distance;
-    }
-    float drange = (dmax - dmin);
-    if (drange < 0.001f) drange = 1.0f;
+    /* Pack RGB color texture */
+    unsigned char *rgb = malloc(total * 3);
+    /* Pack SDF float texture */
+    float *sdf = malloc(total * sizeof(float));
+    if (!rgb || !sdf) { free(rgb); free(sdf); return -1; }
 
     for (int iz = 0; iz < sz; iz++)
     for (int iy = 0; iy < sy; iy++)
     for (int ix = 0; ix < sx; ix++) {
         size_t idx = ((size_t)iz * sy + iy) * sx + ix;
         const DC_Voxel *v = dc_voxel_grid_get_const(grid, ix, iy, iz);
-        if (!v) {
-            texdata[idx*4+0] = 0;
-            texdata[idx*4+1] = 0;
-            texdata[idx*4+2] = 0;
-            texdata[idx*4+3] = 255; /* far outside */
-            continue;
+        if (v) {
+            rgb[idx*3+0] = v->r;
+            rgb[idx*3+1] = v->g;
+            rgb[idx*3+2] = v->b;
+            sdf[idx] = v->distance;  /* ACTUAL world-space distance */
+        } else {
+            rgb[idx*3+0] = 0;
+            rgb[idx*3+1] = 0;
+            rgb[idx*3+2] = 0;
+            sdf[idx] = 1e6f;  /* far outside */
         }
-        texdata[idx*4+0] = v->r;
-        texdata[idx*4+1] = v->g;
-        texdata[idx*4+2] = v->b;
-        /* Remap distance: 0 = deep inside, 0.5 = surface, 1.0 = far outside.
-         * Alpha = clamp((distance / range) * 0.5 + 0.5, 0, 1) * 255 */
-        float norm = (v->distance / drange) * 0.5f + 0.5f;
-        if (norm < 0.0f) norm = 0.0f;
-        if (norm > 1.0f) norm = 1.0f;
-        texdata[idx*4+3] = (unsigned char)(norm * 255.0f);
     }
 
-    /* Create/update 3D texture */
-    if (!b->vol_tex)
-        glGenTextures(1, &b->vol_tex);
-
-    glBindTexture(GL_TEXTURE_3D, b->vol_tex);
-    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8,
-                 sx, sy, sz, 0, GL_RGBA, GL_UNSIGNED_BYTE, texdata);
+    /* Upload color texture */
+    if (!b->color_tex) glGenTextures(1, &b->color_tex);
+    glBindTexture(GL_TEXTURE_3D, b->color_tex);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB8, sx, sy, sz, 0,
+                 GL_RGB, GL_UNSIGNED_BYTE, rgb);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+    /* Upload SDF texture — R32F, actual distances */
+    if (!b->sdf_tex) glGenTextures(1, &b->sdf_tex);
+    glBindTexture(GL_TEXTURE_3D, b->sdf_tex);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, sx, sy, sz, 0,
+                 GL_RED, GL_FLOAT, sdf);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
     glBindTexture(GL_TEXTURE_3D, 0);
+    free(rgb);
+    free(sdf);
 
-    free(texdata);
-
-    /* Build fullscreen quad if not yet */
+    /* Build fullscreen quad */
     if (!b->quad_vao) {
         glGenVertexArrays(1, &b->quad_vao);
         glGenBuffers(1, &b->quad_vbo);
@@ -336,7 +304,6 @@ dc_gl_voxel_buf_upload(DC_GlVoxelBuf *b, const DC_VoxelGrid *grid)
         glBindVertexArray(0);
     }
 
-    /* Build shader if not yet */
     if (!b->prog)
         b->prog = build_program();
 
@@ -345,7 +312,7 @@ dc_gl_voxel_buf_upload(DC_GlVoxelBuf *b, const DC_VoxelGrid *grid)
 }
 
 /* =========================================================================
- * Draw — the pure raycast
+ * Draw
  * ========================================================================= */
 void
 dc_gl_voxel_buf_draw(const DC_GlVoxelBuf *b,
@@ -359,28 +326,29 @@ dc_gl_voxel_buf_draw(const DC_GlVoxelBuf *b,
 
     glUseProgram(b->prog);
 
-    /* Uniforms */
     glUniformMatrix4fv(glGetUniformLocation(b->prog, "uInvVP"), 1, GL_FALSE, view_proj_inv);
     glUniform3fv(glGetUniformLocation(b->prog, "uEye"), 1, eye);
     glUniform3fv(glGetUniformLocation(b->prog, "uLightDir"), 1, light_dir);
     glUniform3fv(glGetUniformLocation(b->prog, "uBBoxMin"), 1, b->bbox_min);
     glUniform3fv(glGetUniformLocation(b->prog, "uBBoxMax"), 1, b->bbox_max);
+    glUniform1f(glGetUniformLocation(b->prog, "uCellSize"), b->cell_size);
 
-    /* Step size: half a voxel width in world space.
-     * This ensures we never skip over a surface, even at oblique angles. */
-    float step = b->cell_size * 0.5f;
-    glUniform1f(glGetUniformLocation(b->prog, "uStepSize"), step);
-
-    /* Bind 3D texture */
+    /* Bind textures */
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_3D, b->vol_tex);
-    glUniform1i(glGetUniformLocation(b->prog, "uVolume"), 0);
+    glBindTexture(GL_TEXTURE_3D, b->color_tex);
+    glUniform1i(glGetUniformLocation(b->prog, "uColor"), 0);
 
-    /* Draw fullscreen quad — every pixel fires a ray */
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_3D, b->sdf_tex);
+    glUniform1i(glGetUniformLocation(b->prog, "uSDF"), 1);
+
     glBindVertexArray(b->quad_vao);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
 
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_3D, 0);
+    glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_3D, 0);
     glUseProgram(0);
 }
