@@ -222,6 +222,12 @@ size_t dc_epcb_add_zone(DC_EPcb *pcb, const char *net_name,
                           int layer, double clearance,
                           double x, double y, double w, double h);
 
+/* Remove element by index. Returns 0 on success. */
+int dc_epcb_remove_footprint(DC_EPcb *pcb, size_t index);
+int dc_epcb_remove_track(DC_EPcb *pcb, size_t index);
+int dc_epcb_remove_via(DC_EPcb *pcb, size_t index);
+int dc_epcb_remove_zone(DC_EPcb *pcb, size_t index);
+
 /* Import a netlist — creates footprints and assigns nets.
  * Existing footprints with matching references are updated, not duplicated. */
 int dc_epcb_import_netlist(DC_EPcb *pcb, const DC_Netlist *nl, DC_Error *err);

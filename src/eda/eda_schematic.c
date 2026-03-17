@@ -788,6 +788,33 @@ dc_eschematic_remove_wire(DC_ESchematic *sch, size_t index)
     return dc_array_remove(sch->wires, index);
 }
 
+int
+dc_eschematic_remove_label(DC_ESchematic *sch, size_t index)
+{
+    if (!sch || index >= dc_array_length(sch->labels)) return -1;
+    DC_SchLabel *l = dc_array_get(sch->labels, index);
+    label_cleanup(l);
+    return dc_array_remove(sch->labels, index);
+}
+
+int
+dc_eschematic_remove_junction(DC_ESchematic *sch, size_t index)
+{
+    if (!sch || index >= dc_array_length(sch->junctions)) return -1;
+    DC_SchJunction *j = dc_array_get(sch->junctions, index);
+    junction_cleanup(j);
+    return dc_array_remove(sch->junctions, index);
+}
+
+int
+dc_eschematic_remove_power_port(DC_ESchematic *sch, size_t index)
+{
+    if (!sch || index >= dc_array_length(sch->power_ports)) return -1;
+    DC_SchPowerPort *pp = dc_array_get(sch->power_ports, index);
+    power_port_cleanup(pp);
+    return dc_array_remove(sch->power_ports, index);
+}
+
 /* =========================================================================
  * Netlist generation
  *

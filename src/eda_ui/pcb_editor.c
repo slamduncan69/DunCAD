@@ -17,8 +17,8 @@
  * ========================================================================= */
 struct DC_PcbEditor {
     GtkWidget       *box;          /* top-level GtkBox (V) */
-    GtkWidget       *hbox;         /* horizontal: layer panel + canvas */
-    GtkWidget       *toolbar;
+    GtkWidget       *hbox;         /* horizontal: canvas + right panel */
+    GtkWidget       *toolbar;      /* top horizontal toolbar (status) */
     DC_PcbCanvas    *canvas;
     DC_PcbLayerPanel *layer_panel;
     DC_EPcb         *pcb;          /* owned */
@@ -54,6 +54,31 @@ static void on_mode_route(GtkButton *b, gpointer d)
     { (void)b; ((DC_PcbEditor*)d)->mode = DC_PCB_MODE_ROUTE; }
 static void on_mode_via(GtkButton *b, gpointer d)
     { (void)b; ((DC_PcbEditor*)d)->mode = DC_PCB_MODE_PLACE_VIA; }
+static void on_mode_footprint(GtkButton *b, gpointer d)
+    { (void)b; ((DC_PcbEditor*)d)->mode = DC_PCB_MODE_PLACE_FOOTPRINT; }
+static void on_mode_zone(GtkButton *b, gpointer d)
+    { (void)b; ((DC_PcbEditor*)d)->mode = DC_PCB_MODE_ZONE; }
+static void on_mode_measure(GtkButton *b, gpointer d)
+    { (void)b; ((DC_PcbEditor*)d)->mode = DC_PCB_MODE_MEASURE; }
+
+/* =========================================================================
+ * Helper: add a tool button to a vertical toolbar
+ * ========================================================================= */
+static GtkWidget *
+add_tool_btn(GtkWidget *box, const char *label, GCallback cb, gpointer data)
+{
+    GtkWidget *btn = gtk_button_new_with_label(label);
+    gtk_widget_set_size_request(btn, 36, 36);
+    gtk_widget_set_tooltip_text(btn, label);
+    /* Make button compact */
+    gtk_widget_set_margin_start(btn, 1);
+    gtk_widget_set_margin_end(btn, 1);
+    gtk_widget_set_margin_top(btn, 1);
+    gtk_widget_set_margin_bottom(btn, 1);
+    g_signal_connect(btn, "clicked", cb, data);
+    gtk_box_append(GTK_BOX(box), btn);
+    return btn;
+}
 
 /* =========================================================================
  * Lifecycle
@@ -70,59 +95,75 @@ DC_PcbEditor *dc_pcb_editor_new(void)
     if (!ed->canvas) { dc_epcb_free(ed->pcb); free(ed); return NULL; }
 
     dc_pcb_canvas_set_pcb(ed->canvas, ed->pcb);
+    dc_pcb_canvas_set_editor(ed->canvas, ed);
 
     ed->layer_panel = dc_pcb_layer_panel_new();
 
     /* Build UI */
     ed->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
-    /* Toolbar */
+    /* Top toolbar — just a status label */
     ed->toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_widget_set_margin_start(ed->toolbar, 4);
     gtk_widget_set_margin_end(ed->toolbar, 4);
     gtk_widget_set_margin_top(ed->toolbar, 2);
     gtk_widget_set_margin_bottom(ed->toolbar, 2);
 
-    GtkWidget *btn_sel = gtk_button_new_with_label("Select");
-    GtkWidget *btn_route = gtk_button_new_with_label("Route");
-    GtkWidget *btn_via = gtk_button_new_with_label("Via");
-
-    g_signal_connect(btn_sel, "clicked", G_CALLBACK(on_mode_select), ed);
-    g_signal_connect(btn_route, "clicked", G_CALLBACK(on_mode_route), ed);
-    g_signal_connect(btn_via, "clicked", G_CALLBACK(on_mode_via), ed);
-
-    gtk_box_append(GTK_BOX(ed->toolbar), btn_sel);
-    gtk_box_append(GTK_BOX(ed->toolbar), btn_route);
-    gtk_box_append(GTK_BOX(ed->toolbar), btn_via);
-
-    GtkWidget *label = gtk_label_new("PCB Editor");
-    gtk_widget_set_hexpand(label, TRUE);
-    gtk_label_set_xalign(GTK_LABEL(label), 1.0);
-    gtk_box_append(GTK_BOX(ed->toolbar), label);
+    GtkWidget *title = gtk_label_new("PCB Editor");
+    gtk_widget_set_hexpand(title, TRUE);
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0);
+    gtk_box_append(GTK_BOX(ed->toolbar), title);
 
     gtk_box_append(GTK_BOX(ed->box), ed->toolbar);
     gtk_box_append(GTK_BOX(ed->box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
 
-    /* Horizontal: layer panel (left) + canvas (right) */
+    /* Horizontal layout: canvas (center) + right panel */
     ed->hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_set_vexpand(ed->hbox, TRUE);
+
+    /* Canvas (center, expandable) */
+    GtkWidget *canvas_w = dc_pcb_canvas_widget(ed->canvas);
+    gtk_widget_set_hexpand(canvas_w, TRUE);
+    gtk_box_append(GTK_BOX(ed->hbox), canvas_w);
+
+    /* Right-side vertical tool toolbar (KiCad-style) */
+    gtk_box_append(GTK_BOX(ed->hbox),
+                   gtk_separator_new(GTK_ORIENTATION_VERTICAL));
+
+    GtkWidget *tool_bar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_margin_top(tool_bar, 2);
+    gtk_widget_set_margin_bottom(tool_bar, 2);
+    gtk_widget_set_size_request(tool_bar, 40, -1);
+
+    /* Tool buttons — short labels like KiCad's right toolbar */
+    add_tool_btn(tool_bar, "Sel",  G_CALLBACK(on_mode_select), ed);
+    add_tool_btn(tool_bar, "Rte",  G_CALLBACK(on_mode_route), ed);
+    add_tool_btn(tool_bar, "Via",  G_CALLBACK(on_mode_via), ed);
+    add_tool_btn(tool_bar, "FP",   G_CALLBACK(on_mode_footprint), ed);
+    add_tool_btn(tool_bar, "Zone", G_CALLBACK(on_mode_zone), ed);
+    add_tool_btn(tool_bar, "Msr",  G_CALLBACK(on_mode_measure), ed);
+
+    /* Spacer to push layers down */
+    GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_vexpand(spacer, TRUE);
+    gtk_box_append(GTK_BOX(tool_bar), spacer);
+
+    gtk_box_append(GTK_BOX(ed->hbox), tool_bar);
+
+    /* Layer panel (right side, after toolbar) */
+    gtk_box_append(GTK_BOX(ed->hbox),
+                   gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
     if (ed->layer_panel) {
         GtkWidget *lp_w = dc_pcb_layer_panel_widget(ed->layer_panel);
         gtk_widget_set_size_request(lp_w, 140, -1);
         gtk_box_append(GTK_BOX(ed->hbox), lp_w);
-        gtk_box_append(GTK_BOX(ed->hbox),
-                       gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
         dc_pcb_layer_panel_set_visibility_callback(ed->layer_panel,
                                                      on_layer_changed, ed);
         dc_pcb_layer_panel_set_active_callback(ed->layer_panel,
                                                  on_active_layer_changed, ed);
     }
-
-    GtkWidget *canvas_w = dc_pcb_canvas_widget(ed->canvas);
-    gtk_widget_set_hexpand(canvas_w, TRUE);
-    gtk_box_append(GTK_BOX(ed->hbox), canvas_w);
 
     gtk_box_append(GTK_BOX(ed->box), ed->hbox);
 

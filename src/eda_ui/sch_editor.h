@@ -72,4 +72,10 @@ int dc_sch_editor_save(DC_SchEditor *ed, const char *path);
 void dc_sch_editor_set_mode(DC_SchEditor *ed, DC_SchEditMode mode);
 DC_SchEditMode dc_sch_editor_get_mode(const DC_SchEditor *ed);
 
+/* Set a callback invoked when the user clicks a placement button (Symbol, Label).
+ * The callback receives the mode and userdata. */
+typedef void (*DC_SchPlaceCallback)(DC_SchEditMode mode, void *userdata);
+void dc_sch_editor_set_place_callback(DC_SchEditor *ed,
+                                        DC_SchPlaceCallback cb, void *userdata);
+
 #endif /* DC_SCH_EDITOR_H */

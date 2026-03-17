@@ -15,39 +15,54 @@
  * ========================================================================= */
 struct DC_SchEditor {
     GtkWidget      *box;         /* top-level GtkBox (V) */
-    GtkWidget      *toolbar;     /* mode buttons */
+    GtkWidget      *toolbar;     /* top status bar */
     DC_SchCanvas   *canvas;
     DC_ESchematic  *sch;         /* owned */
     DC_ELibrary    *lib;         /* borrowed */
     DC_SchEditMode  mode;
     char           *current_path; /* owned, NULL if untitled */
+    DC_SchPlaceCallback place_cb;
+    void               *place_cb_data;
 };
 
 /* =========================================================================
  * Toolbar callbacks
  * ========================================================================= */
-static void
-on_mode_select(GtkButton *btn, gpointer userdata)
+static void on_mode_select(GtkButton *b, gpointer d)
+    { (void)b; ((DC_SchEditor*)d)->mode = DC_SCH_MODE_SELECT; }
+static void on_mode_wire(GtkButton *b, gpointer d)
+    { (void)b; ((DC_SchEditor*)d)->mode = DC_SCH_MODE_WIRE; }
+static void on_mode_symbol(GtkButton *b, gpointer d)
 {
-    (void)btn;
-    DC_SchEditor *ed = userdata;
-    ed->mode = DC_SCH_MODE_SELECT;
+    (void)b;
+    DC_SchEditor *ed = d;
+    if (ed->place_cb) {
+        ed->place_cb(DC_SCH_MODE_PLACE_SYMBOL, ed->place_cb_data);
+    } else {
+        ed->mode = DC_SCH_MODE_PLACE_SYMBOL;
+    }
 }
+static void on_mode_label(GtkButton *b, gpointer d)
+    { (void)b; ((DC_SchEditor*)d)->mode = DC_SCH_MODE_PLACE_LABEL; }
+static void on_mode_move(GtkButton *b, gpointer d)
+    { (void)b; ((DC_SchEditor*)d)->mode = DC_SCH_MODE_MOVE; }
 
-static void
-on_mode_wire(GtkButton *btn, gpointer userdata)
+/* =========================================================================
+ * Helper: add a tool button to a vertical toolbar
+ * ========================================================================= */
+static GtkWidget *
+add_tool_btn(GtkWidget *box, const char *label, GCallback cb, gpointer data)
 {
-    (void)btn;
-    DC_SchEditor *ed = userdata;
-    ed->mode = DC_SCH_MODE_WIRE;
-}
-
-static void
-on_mode_symbol(GtkButton *btn, gpointer userdata)
-{
-    (void)btn;
-    DC_SchEditor *ed = userdata;
-    ed->mode = DC_SCH_MODE_PLACE_SYMBOL;
+    GtkWidget *btn = gtk_button_new_with_label(label);
+    gtk_widget_set_size_request(btn, 36, 36);
+    gtk_widget_set_tooltip_text(btn, label);
+    gtk_widget_set_margin_start(btn, 1);
+    gtk_widget_set_margin_end(btn, 1);
+    gtk_widget_set_margin_top(btn, 1);
+    gtk_widget_set_margin_bottom(btn, 1);
+    g_signal_connect(btn, "clicked", cb, data);
+    gtk_box_append(GTK_BOX(box), btn);
+    return btn;
 }
 
 /* =========================================================================
@@ -66,44 +81,53 @@ dc_sch_editor_new(void)
     if (!ed->canvas) { dc_eschematic_free(ed->sch); free(ed); return NULL; }
 
     dc_sch_canvas_set_schematic(ed->canvas, ed->sch);
+    dc_sch_canvas_set_editor(ed->canvas, ed);
 
     /* Build UI */
     ed->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
-    /* Toolbar */
+    /* Top toolbar — status label */
     ed->toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_widget_set_margin_start(ed->toolbar, 4);
     gtk_widget_set_margin_end(ed->toolbar, 4);
     gtk_widget_set_margin_top(ed->toolbar, 2);
     gtk_widget_set_margin_bottom(ed->toolbar, 2);
 
-    GtkWidget *btn_select = gtk_button_new_with_label("Select");
-    GtkWidget *btn_wire = gtk_button_new_with_label("Wire");
-    GtkWidget *btn_symbol = gtk_button_new_with_label("Symbol");
-
-    g_signal_connect(btn_select, "clicked", G_CALLBACK(on_mode_select), ed);
-    g_signal_connect(btn_wire, "clicked", G_CALLBACK(on_mode_wire), ed);
-    g_signal_connect(btn_symbol, "clicked", G_CALLBACK(on_mode_symbol), ed);
-
-    gtk_box_append(GTK_BOX(ed->toolbar), btn_select);
-    gtk_box_append(GTK_BOX(ed->toolbar), btn_wire);
-    gtk_box_append(GTK_BOX(ed->toolbar), btn_symbol);
-
-    /* Mode label */
-    GtkWidget *mode_label = gtk_label_new("Schematic Editor");
-    gtk_widget_set_hexpand(mode_label, TRUE);
-    gtk_label_set_xalign(GTK_LABEL(mode_label), 1.0);
-    gtk_box_append(GTK_BOX(ed->toolbar), mode_label);
+    GtkWidget *title = gtk_label_new("Schematic Editor");
+    gtk_widget_set_hexpand(title, TRUE);
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0);
+    gtk_box_append(GTK_BOX(ed->toolbar), title);
 
     gtk_box_append(GTK_BOX(ed->box), ed->toolbar);
-
-    /* Separator */
     gtk_box_append(GTK_BOX(ed->box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
 
-    /* Canvas */
+    /* Horizontal layout: canvas + right-side vertical toolbar */
+    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_vexpand(hbox, TRUE);
+
+    /* Canvas (center, expandable) */
     GtkWidget *canvas_w = dc_sch_canvas_widget(ed->canvas);
-    gtk_widget_set_vexpand(canvas_w, TRUE);
-    gtk_box_append(GTK_BOX(ed->box), canvas_w);
+    gtk_widget_set_hexpand(canvas_w, TRUE);
+    gtk_box_append(GTK_BOX(hbox), canvas_w);
+
+    /* Right-side vertical tool toolbar (KiCad-style) */
+    gtk_box_append(GTK_BOX(hbox),
+                   gtk_separator_new(GTK_ORIENTATION_VERTICAL));
+
+    GtkWidget *tool_bar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_margin_top(tool_bar, 2);
+    gtk_widget_set_margin_bottom(tool_bar, 2);
+    gtk_widget_set_size_request(tool_bar, 40, -1);
+
+    add_tool_btn(tool_bar, "Sel",  G_CALLBACK(on_mode_select), ed);
+    add_tool_btn(tool_bar, "Wire", G_CALLBACK(on_mode_wire), ed);
+    add_tool_btn(tool_bar, "Sym",  G_CALLBACK(on_mode_symbol), ed);
+    add_tool_btn(tool_bar, "Lbl",  G_CALLBACK(on_mode_label), ed);
+    add_tool_btn(tool_bar, "Mov",  G_CALLBACK(on_mode_move), ed);
+
+    gtk_box_append(GTK_BOX(hbox), tool_bar);
+
+    gtk_box_append(GTK_BOX(ed->box), hbox);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA, "Schematic editor created");
     return ed;
@@ -201,4 +225,12 @@ void dc_sch_editor_set_mode(DC_SchEditor *ed, DC_SchEditMode mode)
 DC_SchEditMode dc_sch_editor_get_mode(const DC_SchEditor *ed)
 {
     return ed ? ed->mode : DC_SCH_MODE_SELECT;
+}
+
+void dc_sch_editor_set_place_callback(DC_SchEditor *ed,
+                                        DC_SchPlaceCallback cb, void *userdata)
+{
+    if (!ed) return;
+    ed->place_cb = cb;
+    ed->place_cb_data = userdata;
 }

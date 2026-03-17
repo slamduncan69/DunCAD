@@ -183,6 +183,9 @@ int dc_eschematic_set_property(DC_ESchematic *sch, size_t symbol_index,
 /* Remove element by index. Returns 0 on success. */
 int dc_eschematic_remove_symbol(DC_ESchematic *sch, size_t index);
 int dc_eschematic_remove_wire(DC_ESchematic *sch, size_t index);
+int dc_eschematic_remove_label(DC_ESchematic *sch, size_t index);
+int dc_eschematic_remove_junction(DC_ESchematic *sch, size_t index);
+int dc_eschematic_remove_power_port(DC_ESchematic *sch, size_t index);
 
 /* =========================================================================
  * Netlist generation

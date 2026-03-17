@@ -863,6 +863,42 @@ dc_epcb_add_zone(DC_EPcb *pcb, const char *net_name,
 }
 
 int
+dc_epcb_remove_footprint(DC_EPcb *pcb, size_t index)
+{
+    if (!pcb || index >= dc_array_length(pcb->footprints)) return -1;
+    DC_PcbFootprint *fp = dc_array_get(pcb->footprints, index);
+    footprint_cleanup(fp);
+    return dc_array_remove(pcb->footprints, index);
+}
+
+int
+dc_epcb_remove_track(DC_EPcb *pcb, size_t index)
+{
+    if (!pcb || index >= dc_array_length(pcb->tracks)) return -1;
+    DC_PcbTrack *t = dc_array_get(pcb->tracks, index);
+    track_cleanup(t);
+    return dc_array_remove(pcb->tracks, index);
+}
+
+int
+dc_epcb_remove_via(DC_EPcb *pcb, size_t index)
+{
+    if (!pcb || index >= dc_array_length(pcb->vias)) return -1;
+    DC_PcbVia *v = dc_array_get(pcb->vias, index);
+    via_cleanup(v);
+    return dc_array_remove(pcb->vias, index);
+}
+
+int
+dc_epcb_remove_zone(DC_EPcb *pcb, size_t index)
+{
+    if (!pcb || index >= dc_array_length(pcb->zones)) return -1;
+    DC_PcbZone *z = dc_array_get(pcb->zones, index);
+    zone_cleanup(z);
+    return dc_array_remove(pcb->zones, index);
+}
+
+int
 dc_epcb_import_netlist(DC_EPcb *pcb, const DC_Netlist *nl, DC_Error *err)
 {
     if (!pcb || !nl) {

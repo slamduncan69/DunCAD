@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "app_window.h"
 #include "ui/code_editor.h"
 #include "ui/scad_preview.h"
@@ -6,6 +8,14 @@
 #include "ui/ai_chat.h"
 #include "ui/shape_menu.h"
 #include "ui/eda_view.h"
+#include "eda_ui/sch_editor.h"
+#include "eda_ui/sch_canvas.h"
+#include "eda_ui/pcb_editor.h"
+#include "eda_ui/pcb_canvas.h"
+#include "eda_ui/eda_library_browser.h"
+#include "eda/eda_library.h"
+#include "eda/eda_schematic.h"
+#include "eda/eda_pcb.h"
 #include "gl/gl_viewport.h"
 #include "bezier/bezier_editor.h"
 #include "inspect/inspect.h"
@@ -31,8 +41,37 @@
  * GTK4 uses GMenuModel (GMenu/GMenuItem) rather than legacy GtkMenuBar.
  * The menu model is attached to the window via gtk_application_window_set_show_menubar.
  * ---------------------------------------------------------------------- */
+/* The Insert menu is a mutable GMenu that gets swapped when tabs change.
+ * It's stored on the window as "dc-insert-menu". */
+
+static void
+populate_insert_menu_3d(GMenu *menu)
+{
+    g_menu_remove_all(menu);
+    g_menu_append(menu, "Cube",         "shape.insert-cube");
+    g_menu_append(menu, "Sphere",       "shape.insert-sphere");
+    g_menu_append(menu, "Cylinder",     "shape.insert-cylinder");
+    g_menu_append(menu, "Tetrahedron",  "shape.insert-tetrahedron");
+    g_menu_append(menu, "Octahedron",   "shape.insert-octahedron");
+    g_menu_append(menu, "Dodecahedron", "shape.insert-dodecahedron");
+    g_menu_append(menu, "Icosahedron",  "shape.insert-icosahedron");
+}
+
+static void
+populate_insert_menu_eda(GMenu *menu)
+{
+    g_menu_remove_all(menu);
+    g_menu_append(menu, "Add Symbol...",   "eda.add-symbol");
+    g_menu_append(menu, "Add Wire",        "eda.add-wire");
+    g_menu_append(menu, "Add Label",       "eda.add-label");
+    g_menu_append(menu, "Add Power Port",  "eda.add-power");
+    g_menu_append(menu, "Route Track",     "eda.route-track");
+    g_menu_append(menu, "Add Via",         "eda.add-via");
+    g_menu_append(menu, "Add Footprint...", "eda.add-footprint");
+}
+
 static GMenuModel *
-build_menu_model(void)
+build_menu_model(GMenu **out_insert_menu)
 {
     GMenu *menu_bar = g_menu_new();
 
@@ -60,10 +99,14 @@ build_menu_model(void)
     g_menu_append_submenu(menu_bar, "View", G_MENU_MODEL(view_menu));
     g_object_unref(view_menu);
 
-    /* Insert menu — shape insertion from menu bar */
-    GMenuModel *insert_menu = dc_shape_menu_build_insert_menu();
-    g_menu_append_submenu(menu_bar, "Insert", insert_menu);
-    g_object_unref(insert_menu);
+    /* Insert menu — mutable, swapped on tab change */
+    GMenu *insert_menu = g_menu_new();
+    populate_insert_menu_3d(insert_menu);
+    g_menu_append_submenu(menu_bar, "Insert", G_MENU_MODEL(insert_menu));
+    if (out_insert_menu)
+        *out_insert_menu = insert_menu; /* keep alive — stored on window */
+    else
+        g_object_unref(insert_menu);
 
     /* Tools menu */
     GMenu *tools_menu = g_menu_new();
@@ -80,6 +123,235 @@ build_menu_model(void)
     g_object_unref(help_menu);
 
     return G_MENU_MODEL(menu_bar);
+}
+
+static DC_ELibrary *ensure_library_loaded(void);
+
+/* -------------------------------------------------------------------------
+ * Tab change handler — swap Insert menu contents
+ * ---------------------------------------------------------------------- */
+static void
+on_tab_changed(GtkStack *stack, GParamSpec *pspec, gpointer userdata)
+{
+    (void)pspec;
+    GtkWidget *window = userdata;
+    GMenu *insert_menu = g_object_get_data(G_OBJECT(window), "dc-insert-menu");
+    if (!insert_menu) return;
+
+    const char *tab = gtk_stack_get_visible_child_name(stack);
+    if (tab && strcmp(tab, "eda") == 0) {
+        populate_insert_menu_eda(insert_menu);
+        /* Ensure library is loaded and set on editors */
+        DC_ELibrary *lib = ensure_library_loaded();
+        DC_EdaView *ev = dc_app_window_get_eda_view(window);
+        if (lib && ev) {
+            dc_sch_editor_set_library(dc_eda_view_get_sch_editor(ev), lib);
+            dc_pcb_editor_set_library(dc_eda_view_get_pcb_editor(ev), lib);
+        }
+    } else {
+        populate_insert_menu_3d(insert_menu);
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * EDA Insert action handlers
+ * ---------------------------------------------------------------------- */
+static DC_ELibrary *s_eda_lib = NULL; /* global library cache — lazy loaded */
+
+static DC_ELibrary *
+ensure_library_loaded(void)
+{
+    if (s_eda_lib) return s_eda_lib;
+
+    s_eda_lib = dc_elibrary_new();
+    if (!s_eda_lib) return NULL;
+
+    /* Load ALL KiCad symbol libraries from system install */
+    const char *lib_dir = "/usr/share/kicad/symbols/";
+    GDir *dir = g_dir_open(lib_dir, 0, NULL);
+    if (dir) {
+        const gchar *name;
+        int count = 0;
+        while ((name = g_dir_read_name(dir)) != NULL) {
+            if (!g_str_has_suffix(name, ".kicad_sym")) continue;
+            char path[512];
+            snprintf(path, sizeof(path), "%s%s", lib_dir, name);
+            DC_Error err = {0};
+            if (dc_elibrary_load_symbols(s_eda_lib, path, &err) == 0)
+                count++;
+        }
+        g_dir_close(dir);
+        dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA,
+               "Loaded %d symbol libraries (%zu symbols total)",
+               count, dc_elibrary_symbol_count(s_eda_lib));
+    } else {
+        dc_log(DC_LOG_WARN, DC_LOG_EVENT_EDA,
+               "Could not open KiCad symbols directory: %s", lib_dir);
+    }
+
+    return s_eda_lib;
+}
+
+/* Auto-generate next reference designator like R1, R2, C1, C2... */
+static int s_ref_counters[256]; /* indexed by first char */
+static char *
+next_reference(const char *lib_id)
+{
+    char prefix = 'U';
+    if (lib_id) {
+        if (strstr(lib_id, ":R") || strstr(lib_id, "Resistor"))  prefix = 'R';
+        else if (strstr(lib_id, ":C") || strstr(lib_id, "Capacitor")) prefix = 'C';
+        else if (strstr(lib_id, ":L") || strstr(lib_id, "Inductor")) prefix = 'L';
+        else if (strstr(lib_id, ":D") || strstr(lib_id, "Diode") || strstr(lib_id, "LED")) prefix = 'D';
+        else if (strstr(lib_id, ":Q") || strstr(lib_id, "Transistor")) prefix = 'Q';
+        else if (strstr(lib_id, "Connector")) prefix = 'J';
+    }
+    int idx = (unsigned char)prefix;
+    s_ref_counters[idx]++;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%c%d", prefix, s_ref_counters[idx]);
+    return strdup(buf);
+}
+
+static void on_eda_add_symbol(GSimpleAction *action, GVariant *param, gpointer userdata);
+
+/* Called when the Sym toolbar button is clicked in the schematic editor */
+static void
+on_sch_place_request(DC_SchEditMode mode, void *userdata)
+{
+    GtkWidget *window = userdata;
+    if (mode == DC_SCH_MODE_PLACE_SYMBOL) {
+        on_eda_add_symbol(NULL, NULL, window);
+    }
+}
+
+static void
+on_eda_add_symbol(GSimpleAction *action, GVariant *param, gpointer userdata)
+{
+    (void)action; (void)param;
+    GtkWidget *window = userdata;
+    DC_EdaView *ev = dc_app_window_get_eda_view(window);
+    if (!ev) return;
+
+    DC_ELibrary *lib = ensure_library_loaded();
+    if (!lib || dc_elibrary_symbol_count(lib) == 0) {
+        dc_log(DC_LOG_WARN, DC_LOG_EVENT_EDA, "No symbols loaded in library");
+        return;
+    }
+
+    /* Set library on editor for rendering */
+    dc_sch_editor_set_library(dc_eda_view_get_sch_editor(ev), lib);
+
+    char *lib_id = dc_eda_library_browser_run(GTK_WINDOW(window), lib, "symbol");
+    if (!lib_id) return;
+
+    DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+    DC_ESchematic *sch = dc_sch_editor_get_schematic(ed);
+    char *ref = next_reference(lib_id);
+
+    /* Place at center of current view */
+    DC_SchCanvas *canvas = dc_sch_editor_get_canvas(ed);
+    double px, py;
+    dc_sch_canvas_get_pan(canvas, &px, &py);
+    dc_eschematic_add_symbol(sch, lib_id, ref, px, py);
+    dc_sch_canvas_queue_redraw(canvas);
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA,
+           "Added symbol %s as %s", lib_id, ref);
+    free(ref);
+    free(lib_id);
+}
+
+static void
+on_eda_add_wire(GSimpleAction *action, GVariant *param, gpointer userdata)
+{
+    (void)action; (void)param;
+    GtkWidget *window = userdata;
+    DC_EdaView *ev = dc_app_window_get_eda_view(window);
+    if (!ev) return;
+    dc_sch_editor_set_mode(dc_eda_view_get_sch_editor(ev), DC_SCH_MODE_WIRE);
+}
+
+static void
+on_eda_add_label(GSimpleAction *action, GVariant *param, gpointer userdata)
+{
+    (void)action; (void)param;
+    GtkWidget *window = userdata;
+    DC_EdaView *ev = dc_app_window_get_eda_view(window);
+    if (!ev) return;
+    dc_sch_editor_set_mode(dc_eda_view_get_sch_editor(ev), DC_SCH_MODE_PLACE_LABEL);
+}
+
+static void
+on_eda_add_power(GSimpleAction *action, GVariant *param, gpointer userdata)
+{
+    (void)action; (void)param;
+    GtkWidget *window = userdata;
+    DC_EdaView *ev = dc_app_window_get_eda_view(window);
+    if (!ev) return;
+    /* For now, place a VCC power port at view center */
+    DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+    DC_ESchematic *sch = dc_sch_editor_get_schematic(ed);
+    DC_SchCanvas *canvas = dc_sch_editor_get_canvas(ed);
+    double px, py;
+    dc_sch_canvas_get_pan(canvas, &px, &py);
+    dc_eschematic_add_power_port(sch, "VCC", px, py);
+    dc_sch_canvas_queue_redraw(canvas);
+}
+
+static void
+on_eda_route_track(GSimpleAction *action, GVariant *param, gpointer userdata)
+{
+    (void)action; (void)param;
+    GtkWidget *window = userdata;
+    DC_EdaView *ev = dc_app_window_get_eda_view(window);
+    if (!ev) return;
+    dc_pcb_editor_set_mode(dc_eda_view_get_pcb_editor(ev), DC_PCB_MODE_ROUTE);
+}
+
+static void
+on_eda_add_via(GSimpleAction *action, GVariant *param, gpointer userdata)
+{
+    (void)action; (void)param;
+    GtkWidget *window = userdata;
+    DC_EdaView *ev = dc_app_window_get_eda_view(window);
+    if (!ev) return;
+    dc_pcb_editor_set_mode(dc_eda_view_get_pcb_editor(ev), DC_PCB_MODE_PLACE_VIA);
+}
+
+static void
+on_eda_add_footprint(GSimpleAction *action, GVariant *param, gpointer userdata)
+{
+    (void)action; (void)param;
+    GtkWidget *window = userdata;
+    DC_EdaView *ev = dc_app_window_get_eda_view(window);
+    if (!ev) return;
+    dc_pcb_editor_set_mode(dc_eda_view_get_pcb_editor(ev), DC_PCB_MODE_PLACE_FOOTPRINT);
+}
+
+static void
+install_eda_actions(GtkWidget *window)
+{
+    GSimpleActionGroup *group = g_simple_action_group_new();
+
+    struct { const char *name; GCallback cb; } actions[] = {
+        { "add-symbol",    G_CALLBACK(on_eda_add_symbol) },
+        { "add-wire",      G_CALLBACK(on_eda_add_wire) },
+        { "add-label",     G_CALLBACK(on_eda_add_label) },
+        { "add-power",     G_CALLBACK(on_eda_add_power) },
+        { "route-track",   G_CALLBACK(on_eda_route_track) },
+        { "add-via",       G_CALLBACK(on_eda_add_via) },
+        { "add-footprint", G_CALLBACK(on_eda_add_footprint) },
+    };
+    for (size_t i = 0; i < sizeof(actions) / sizeof(actions[0]); i++) {
+        GSimpleAction *a = g_simple_action_new(actions[i].name, NULL);
+        g_signal_connect(a, "activate", actions[i].cb, window);
+        g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(a));
+        g_object_unref(a);
+    }
+
+    gtk_widget_insert_action_group(window, "eda", G_ACTION_GROUP(group));
+    g_object_unref(group);
 }
 
 
@@ -451,10 +723,18 @@ dc_app_window_create(GtkApplication *app)
     /* Enable the application menu bar */
     gtk_application_window_set_show_menubar(GTK_APPLICATION_WINDOW(window), TRUE);
 
-    /* Attach the GMenuModel to the application */
-    GMenuModel *menu_model = build_menu_model();
+    /* Attach the GMenuModel to the application — Insert menu is mutable */
+    GMenu *insert_menu = NULL;
+    GMenuModel *menu_model = build_menu_model(&insert_menu);
     gtk_application_set_menubar(app, menu_model);
     g_object_unref(menu_model);
+
+    /* Store the Insert menu for tab-aware swapping */
+    g_object_set_data_full(G_OBJECT(window), "dc-insert-menu",
+                           insert_menu, g_object_unref);
+
+    /* Install EDA actions on window */
+    install_eda_actions(window);
 
     /* --- Header bar --- */
     GtkWidget *header = gtk_header_bar_new();
@@ -570,6 +850,11 @@ dc_app_window_create(GtkApplication *app)
         gtk_stack_add_titled(GTK_STACK(stack), eda_widget, "eda", "EDA");
         g_object_set_data_full(G_OBJECT(window), "dc-eda-view", eda_view,
                                (GDestroyNotify)dc_eda_view_free);
+
+        /* Wire Sym button to open library browser via place callback */
+        dc_sch_editor_set_place_callback(
+            dc_eda_view_get_sch_editor(eda_view),
+            on_sch_place_request, window);
     }
 
     /* Tab 3: Assembly (placeholder) */
@@ -582,6 +867,10 @@ dc_app_window_create(GtkApplication *app)
     gtk_header_bar_pack_start(GTK_HEADER_BAR(header), stack_switcher);
 
     g_object_set_data(G_OBJECT(window), "dc-stack", stack);
+
+    /* Connect tab change signal to swap Insert menu */
+    g_signal_connect(stack, "notify::visible-child",
+                     G_CALLBACK(on_tab_changed), window);
 
     gtk_box_append(GTK_BOX(outer_box), stack);
 

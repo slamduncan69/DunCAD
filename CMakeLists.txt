@@ -99,6 +99,7 @@ set(DC_EDA_UI_SOURCES
     src/eda_ui/pcb_canvas.c
     src/eda_ui/pcb_editor.c
     src/eda_ui/pcb_layer_panel.c
+    src/eda_ui/eda_library_browser.c
 )
 
 add_executable(duncad

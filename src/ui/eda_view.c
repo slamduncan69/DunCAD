@@ -64,29 +64,12 @@ dc_eda_view_new(void)
         return NULL;
     }
 
-    /* Build layout: left (notebook: schematic+PCB) | right (code editor) */
+    /* Build layout: LEFT (code editor) | RIGHT (notebook: schematic+PCB) */
     v->paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
-    /* Left: GtkNotebook with Schematic and PCB tabs */
-    GtkWidget *notebook = gtk_notebook_new();
-    gtk_widget_set_hexpand(notebook, TRUE);
-    gtk_widget_set_size_request(notebook, 500, -1);
-
-    /* Schematic page */
-    GtkWidget *sch_w = dc_sch_editor_widget(v->sch_editor);
-    gtk_widget_set_vexpand(sch_w, TRUE);
-    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), sch_w,
-                              gtk_label_new("Schematic"));
-
-    /* PCB page */
-    GtkWidget *pcb_w = dc_pcb_editor_widget(v->pcb_editor);
-    gtk_widget_set_vexpand(pcb_w, TRUE);
-    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), pcb_w,
-                              gtk_label_new("PCB"));
-
-    /* Right: code editor + sync buttons */
-    GtkWidget *right_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_size_request(right_box, 300, -1);
+    /* Left: code editor + sync buttons */
+    GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_size_request(left_box, 250, -1);
 
     /* Sync toolbar */
     GtkWidget *sync_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
@@ -108,16 +91,33 @@ dc_eda_view_new(void)
     gtk_label_set_xalign(GTK_LABEL(label), 1.0);
     gtk_box_append(GTK_BOX(sync_bar), label);
 
-    gtk_box_append(GTK_BOX(right_box), sync_bar);
-    gtk_box_append(GTK_BOX(right_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+    gtk_box_append(GTK_BOX(left_box), sync_bar);
+    gtk_box_append(GTK_BOX(left_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
 
     GtkWidget *code_w = dc_code_editor_widget(v->code_editor);
     gtk_widget_set_vexpand(code_w, TRUE);
-    gtk_box_append(GTK_BOX(right_box), code_w);
+    gtk_box_append(GTK_BOX(left_box), code_w);
 
-    gtk_paned_set_start_child(GTK_PANED(v->paned), notebook);
-    gtk_paned_set_end_child(GTK_PANED(v->paned), right_box);
-    gtk_paned_set_position(GTK_PANED(v->paned), 650);
+    /* Right: GtkNotebook with Schematic and PCB tabs */
+    GtkWidget *notebook = gtk_notebook_new();
+    gtk_widget_set_hexpand(notebook, TRUE);
+    gtk_widget_set_size_request(notebook, 500, -1);
+
+    /* Schematic page */
+    GtkWidget *sch_w = dc_sch_editor_widget(v->sch_editor);
+    gtk_widget_set_vexpand(sch_w, TRUE);
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), sch_w,
+                              gtk_label_new("Schematic"));
+
+    /* PCB page */
+    GtkWidget *pcb_w = dc_pcb_editor_widget(v->pcb_editor);
+    gtk_widget_set_vexpand(pcb_w, TRUE);
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), pcb_w,
+                              gtk_label_new("PCB"));
+
+    gtk_paned_set_start_child(GTK_PANED(v->paned), left_box);
+    gtk_paned_set_end_child(GTK_PANED(v->paned), notebook);
+    gtk_paned_set_position(GTK_PANED(v->paned), 300);
 
     /* Set initial Cubeiform template */
     dc_code_editor_set_text(v->code_editor,
