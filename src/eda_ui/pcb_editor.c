@@ -26,6 +26,8 @@ struct DC_PcbEditor {
     DC_Ratsnest     *ratsnest;     /* owned */
     DC_PcbEditMode   mode;
     char            *current_path; /* owned, NULL if untitled */
+    DC_PcbPlaceCallback place_cb;
+    void               *place_cb_data;
 };
 
 /* =========================================================================
@@ -55,7 +57,13 @@ static void on_mode_route(GtkButton *b, gpointer d)
 static void on_mode_via(GtkButton *b, gpointer d)
     { (void)b; ((DC_PcbEditor*)d)->mode = DC_PCB_MODE_PLACE_VIA; }
 static void on_mode_footprint(GtkButton *b, gpointer d)
-    { (void)b; ((DC_PcbEditor*)d)->mode = DC_PCB_MODE_PLACE_FOOTPRINT; }
+{
+    (void)b;
+    DC_PcbEditor *ed = d;
+    ed->mode = DC_PCB_MODE_PLACE_FOOTPRINT;
+    if (ed->place_cb)
+        ed->place_cb(DC_PCB_MODE_PLACE_FOOTPRINT, ed->place_cb_data);
+}
 static void on_mode_zone(GtkButton *b, gpointer d)
     { (void)b; ((DC_PcbEditor*)d)->mode = DC_PCB_MODE_ZONE; }
 static void on_mode_measure(GtkButton *b, gpointer d)
@@ -239,4 +247,12 @@ void dc_pcb_editor_update_ratsnest(DC_PcbEditor *ed)
     dc_ratsnest_free(ed->ratsnest);
     ed->ratsnest = dc_ratsnest_compute(ed->pcb);
     dc_pcb_canvas_set_ratsnest(ed->canvas, ed->ratsnest);
+}
+
+void dc_pcb_editor_set_place_callback(DC_PcbEditor *ed,
+                                        DC_PcbPlaceCallback cb, void *userdata)
+{
+    if (!ed) return;
+    ed->place_cb = cb;
+    ed->place_cb_data = userdata;
 }

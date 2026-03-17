@@ -65,4 +65,10 @@ DC_PcbEditMode dc_pcb_editor_get_mode(const DC_PcbEditor *ed);
 /* Recompute ratsnest. Call after modifying tracks/nets. */
 void dc_pcb_editor_update_ratsnest(DC_PcbEditor *ed);
 
+/* Set a callback invoked when the user clicks the FP placement button.
+ * The callback receives the mode and userdata. */
+typedef void (*DC_PcbPlaceCallback)(DC_PcbEditMode mode, void *userdata);
+void dc_pcb_editor_set_place_callback(DC_PcbEditor *ed,
+                                        DC_PcbPlaceCallback cb, void *userdata);
+
 #endif /* DC_PCB_EDITOR_H */

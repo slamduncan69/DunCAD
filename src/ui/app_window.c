@@ -13,6 +13,7 @@
 #include "eda_ui/pcb_editor.h"
 #include "eda_ui/pcb_canvas.h"
 #include "eda_ui/eda_library_browser.h"
+#include "eda_ui/eda_footprint_browser.h"
 #include "eda/eda_library.h"
 #include "eda/eda_schematic.h"
 #include "eda/eda_pcb.h"
@@ -233,6 +234,7 @@ next_reference(const char *lib_id)
 }
 
 static void on_eda_add_symbol(GSimpleAction *action, GVariant *param, gpointer userdata);
+static void on_eda_add_footprint(GSimpleAction *action, GVariant *param, gpointer userdata);
 
 /* Called when the Sym toolbar button is clicked in the schematic editor */
 static void
@@ -241,6 +243,16 @@ on_sch_place_request(DC_SchEditMode mode, void *userdata)
     GtkWidget *window = userdata;
     if (mode == DC_SCH_MODE_PLACE_SYMBOL) {
         on_eda_add_symbol(NULL, NULL, window);
+    }
+}
+
+/* Called when the FP toolbar button is clicked in the PCB editor */
+static void
+on_pcb_place_request(DC_PcbEditMode mode, void *userdata)
+{
+    GtkWidget *window = userdata;
+    if (mode == DC_PCB_MODE_PLACE_FOOTPRINT) {
+        on_eda_add_footprint(NULL, NULL, window);
     }
 }
 
@@ -279,6 +291,43 @@ on_eda_add_symbol(GSimpleAction *action, GVariant *param, gpointer userdata)
            "Added symbol %s as %s", lib_id, ref);
     free(ref);
     free(lib_id);
+}
+
+static void
+on_eda_add_footprint(GSimpleAction *action, GVariant *param, gpointer userdata)
+{
+    (void)action; (void)param;
+    GtkWidget *window = userdata;
+    DC_EdaView *ev = dc_app_window_get_eda_view(window);
+    if (!ev) return;
+
+    DC_ELibrary *lib = ensure_library_loaded();
+    if (!lib || dc_elibrary_fp_lib_count(lib) == 0) {
+        dc_log(DC_LOG_WARN, DC_LOG_EVENT_EDA, "No footprint libraries available");
+        return;
+    }
+
+    dc_pcb_editor_set_library(dc_eda_view_get_pcb_editor(ev), lib);
+
+    char *fp_id = dc_eda_footprint_browser_run(GTK_WINDOW(window), lib);
+    if (!fp_id) return;
+
+    DC_PcbEditor *ed = dc_eda_view_get_pcb_editor(ev);
+    DC_EPcb *pcb = dc_pcb_editor_get_pcb(ed);
+    char *ref = next_reference(fp_id);
+
+    /* Place at center of current view */
+    DC_PcbCanvas *canvas = dc_pcb_editor_get_canvas(ed);
+    double px, py;
+    dc_pcb_canvas_get_pan(canvas, &px, &py);
+    dc_epcb_add_footprint(pcb, fp_id, ref, px, py, 0 /* F.Cu */);
+    dc_pcb_canvas_queue_redraw(canvas);
+    dc_pcb_editor_update_ratsnest(ed);
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA,
+           "Added footprint %s as %s", fp_id, ref);
+    free(ref);
+    free(fp_id);
 }
 
 static void
@@ -336,16 +385,6 @@ on_eda_add_via(GSimpleAction *action, GVariant *param, gpointer userdata)
     DC_EdaView *ev = dc_app_window_get_eda_view(window);
     if (!ev) return;
     dc_pcb_editor_set_mode(dc_eda_view_get_pcb_editor(ev), DC_PCB_MODE_PLACE_VIA);
-}
-
-static void
-on_eda_add_footprint(GSimpleAction *action, GVariant *param, gpointer userdata)
-{
-    (void)action; (void)param;
-    GtkWidget *window = userdata;
-    DC_EdaView *ev = dc_app_window_get_eda_view(window);
-    if (!ev) return;
-    dc_pcb_editor_set_mode(dc_eda_view_get_pcb_editor(ev), DC_PCB_MODE_PLACE_FOOTPRINT);
 }
 
 static void
@@ -874,6 +913,11 @@ dc_app_window_create(GtkApplication *app)
         dc_sch_editor_set_place_callback(
             dc_eda_view_get_sch_editor(eda_view),
             on_sch_place_request, window);
+
+        /* Wire FP button to open footprint browser via place callback */
+        dc_pcb_editor_set_place_callback(
+            dc_eda_view_get_pcb_editor(eda_view),
+            on_pcb_place_request, window);
     }
 
     /* Tab 3: Assembly (placeholder) */
