@@ -8,6 +8,7 @@
 #include "voxel/voxel.h"
 #include "core/log.h"
 #include "cubeiform/cubeiform.h"
+#include "cubeiform/cubeiform_eda.h"
 
 /* Trinity Site — native OpenSCAD interpreter (replaces OpenSCAD subprocess) */
 #include "ts_eval.h"
@@ -543,9 +544,75 @@ do_render(DC_ScadPreview *pv)
         return;
     }
 
-    /* Transpile Cubeiform → OpenSCAD if needed */
+    /* =====================================================================
+     * THE PURE PATH — Cubeiform voxel{} blocks render directly to SDF.
+     * No triangles. No STL. No mesh. Just math.
+     * ===================================================================== */
+
+    /* Check if the source contains a voxel{} block */
+    int has_voxel = (strstr(text, "voxel") != NULL && strstr(text, "{") != NULL);
+
+    if (has_voxel) {
+        /* DIRECT SDF RENDERING — the holy path */
+        gtk_label_set_text(GTK_LABEL(pv->status_label), "Executing voxel SDF...");
+
+        DC_Error err = {0};
+        DC_VoxelGrid *grid = NULL;
+        dc_cubeiform_execute_full(text, NULL, NULL, &grid, NULL, &err);
+        free(text);
+
+        if (grid) {
+            dc_gl_viewport_clear_objects(pv->viewport);
+            dc_gl_viewport_clear_mesh(pv->viewport);
+            dc_voxel_grid_free(pv->voxel_grid);
+            pv->voxel_grid = grid;
+            dc_gl_viewport_set_voxel_grid(pv->viewport, grid);
+
+            size_t active = dc_voxel_grid_active_count(grid);
+            int res = dc_voxel_grid_size_x(grid);
+
+            /* Fit camera to voxel bounds */
+            if (!pv->camera_fitted) {
+                float vmin[3] = {0}, vmax[3] = {0};
+                dc_voxel_grid_bounds(grid, &vmin[0], &vmin[1], &vmin[2],
+                                           &vmax[0], &vmax[1], &vmax[2]);
+                float cx = (vmin[0]+vmax[0])*0.5f;
+                float cy = (vmin[1]+vmax[1])*0.5f;
+                float cz = (vmin[2]+vmax[2])*0.5f;
+                float dx = vmax[0]-vmin[0], dy = vmax[1]-vmin[1], dz = vmax[2]-vmin[2];
+                float diag = sqrtf(dx*dx + dy*dy + dz*dz);
+                dc_gl_viewport_set_camera_center(pv->viewport, cx, cy, cz);
+                dc_gl_viewport_set_camera_dist(pv->viewport, diag * 1.5f);
+                pv->camera_fitted = 1;
+            }
+
+            char status[192];
+            snprintf(status, sizeof(status),
+                     "Voxelized: %zu voxels (%dx%dx%d) — pure SDF, no triangles",
+                     active, res, res, res);
+            gtk_label_set_text(GTK_LABEL(pv->status_label), status);
+
+            dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+                   "PURE SDF RENDER: %zu active voxels, resolution %d", active, res);
+        } else {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Voxel error: %.200s",
+                     err.message[0] ? err.message : "no voxel output");
+            gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
+        }
+        return;
+    }
+
+    /* =====================================================================
+     * LEGACY PATH — OpenSCAD/Cubeiform without voxel{} blocks.
+     * Transpile to OpenSCAD and render via Trinity Site.
+     * Triangles are produced but ONLY for the STL intermediary.
+     * The result is voxelized before reaching the GPU.
+     * TODO: Auto-wrap OpenSCAD primitives into voxel{} SDF blocks
+     *       to eliminate this path entirely.
+     * ===================================================================== */
     const char *path = dc_code_editor_get_path(pv->code_ed);
-    int is_dcad = 1; /* default (untitled.dcad) */
+    int is_dcad = 1;
     if (path) {
         const char *ext = strrchr(path, '.');
         is_dcad = (ext && strcmp(ext, ".dcad") == 0);
@@ -562,27 +629,18 @@ do_render(DC_ScadPreview *pv)
         }
         free(text);
         text = scad;
-        dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP,
-               "transpiled Cubeiform → OpenSCAD (%zu bytes)", strlen(text));
     }
 
-    /* Cancel any in-flight HQ render */
     pv->hq_cancel = 1;
-
-    /* Increment generation — all older results will be discarded */
     pv->render_gen++;
-
-    /* Don't clear objects here — they stay visible until results arrive.
-     * clear_objects is called in the result callback before loading new meshes. */
-
     pv->rendering = 1;
     gtk_widget_set_sensitive(pv->render_btn, FALSE);
     gtk_label_set_text(GTK_LABEL(pv->status_label),
-                       "Preview rendering...");
+                       "Legacy render (voxelizing STL)...");
     progress_start(pv);
 
     RenderTaskData *td = calloc(1, sizeof(*td));
-    td->source   = text;  /* takes ownership */
+    td->source   = text;
     td->gen      = pv->render_gen;
     td->is_hq    = 0;
     td->cancel   = NULL;
@@ -593,8 +651,8 @@ do_render(DC_ScadPreview *pv)
     g_task_run_in_thread(task, render_thread_func);
     g_object_unref(task);
 
-    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "progressive render started (gen %u)",
-           pv->render_gen);
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "LEGACY render (STL→voxel) started (gen %u)", pv->render_gen);
 }
 
 /* -------------------------------------------------------------------------
