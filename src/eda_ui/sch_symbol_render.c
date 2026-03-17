@@ -527,8 +527,9 @@ preview_render_primitive(cairo_t *cr, const DC_Sexpr *prim,
     const char *tag = dc_sexpr_tag(prim);
     if (!tag) return;
 
+/* KiCad symbol coords: Y-up. Screen coords: Y-down. Negate Y. */
 #define PX(lx) (ox + (lx) * scale)
-#define PY(ly) (oy + (ly) * scale)
+#define PY(ly) (oy - (ly) * scale)
 
     if (strcmp(tag, "rectangle") == 0) {
         DC_Sexpr *s = dc_sexpr_find(prim, "start");
@@ -539,7 +540,7 @@ preview_render_primitive(cairo_t *cr, const DC_Sexpr *prim,
         parse_xy(e, &x2, &y2);
         cairo_set_source_rgb(cr, 0.7, 0.2, 0.2);
         cairo_set_line_width(cr, 2.0);
-        cairo_rectangle(cr, PX(x1), PY(y1), (x2 - x1) * scale, (y2 - y1) * scale);
+        cairo_rectangle(cr, PX(x1), PY(y1), (x2 - x1) * scale, -(y2 - y1) * scale);
 
         DC_Sexpr *fill = dc_sexpr_find(prim, "fill");
         if (fill) {
@@ -644,6 +645,45 @@ preview_render_primitive(cairo_t *cr, const DC_Sexpr *prim,
         cairo_stroke(cr);
         cairo_arc(cr, PX(px), PY(py), 2.5, 0, 2 * M_PI);
         cairo_fill(cr);
+
+        /* Pin name label (near body end) */
+        DC_Sexpr *name_node = dc_sexpr_find(prim, "name");
+        const char *pin_name = name_node ? dc_sexpr_value(name_node) : NULL;
+        if (pin_name && strcmp(pin_name, "~") != 0) {
+            cairo_set_source_rgb(cr, 0.0, 0.8, 0.8);
+            double font_sz = fmax(7.0, fmin(1.0 * scale, 14.0));
+            cairo_set_font_size(cr, font_sz);
+            /* Position label near body end, offset perpendicular to pin */
+            double bx = PX(ex), by = PY(ey);
+            int angle_deg = (int)pin_angle % 360;
+            if (angle_deg < 0) angle_deg += 360;
+            if (angle_deg == 0)        { bx += 3; by -= 3; }  /* pin points right */
+            else if (angle_deg == 180) { bx -= 3; by -= 3; cairo_text_extents_t te; cairo_text_extents(cr, pin_name, &te); bx -= te.width; }
+            else if (angle_deg == 90)  { bx += 3; by += font_sz; }  /* pin points up (Y-flip: screen down) */
+            else if (angle_deg == 270) { bx += 3; by -= 3; }  /* pin points down (Y-flip: screen up) */
+            else                       { bx += 3; by -= 3; }
+            cairo_move_to(cr, bx, by);
+            cairo_show_text(cr, pin_name);
+        }
+
+        /* Pin number label (near tip) */
+        DC_Sexpr *num_node = dc_sexpr_find(prim, "number");
+        const char *pin_num = num_node ? dc_sexpr_value(num_node) : NULL;
+        if (pin_num) {
+            cairo_set_source_rgb(cr, 0.8, 0.8, 0.3);
+            double font_sz = fmax(6.0, fmin(0.8 * scale, 11.0));
+            cairo_set_font_size(cr, font_sz);
+            double tx = PX(px), ty = PY(py);
+            int angle_deg = (int)pin_angle % 360;
+            if (angle_deg < 0) angle_deg += 360;
+            if (angle_deg == 0)        { tx -= 3; ty += font_sz + 2; cairo_text_extents_t te; cairo_text_extents(cr, pin_num, &te); tx -= te.width; }
+            else if (angle_deg == 180) { tx += 3; ty += font_sz + 2; }
+            else if (angle_deg == 90)  { tx -= font_sz; ty -= 3; }
+            else if (angle_deg == 270) { tx += 3; ty -= 3; }
+            else                       { tx += 3; ty += font_sz; }
+            cairo_move_to(cr, tx, ty);
+            cairo_show_text(cr, pin_num);
+        }
     }
 
 #undef PX
@@ -704,9 +744,11 @@ render_preview_impl(cairo_t *cr, const DC_Sexpr *sym_def,
     double bh = maxy - miny;
     double scale = (tw / bw < th / bh) ? tw / bw : th / bh;
 
-    /* Center in target rect */
+    /* Center in target rect.
+     * PX(lx) = ox + lx * scale  →  ox maps minx to left edge
+     * PY(ly) = oy - ly * scale  →  oy maps maxy to top edge (Y-flip) */
     double ox = x + margin + (tw - bw * scale) / 2.0 - minx * scale;
-    double oy = y + margin + (th - bh * scale) / 2.0 - miny * scale;
+    double oy = y + margin + (th - bh * scale) / 2.0 + maxy * scale;
 
     /* Render all sub-units */
     for (size_t i = 0; i < dc_sexpr_child_count(sym_def); i++) {
