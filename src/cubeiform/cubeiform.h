@@ -25,4 +25,13 @@
  * Caller must free() the returned string. */
 char *dc_cubeiform_to_scad(const char *dcad_src, DC_Error *err);
 
+/* =========================================================================
+ * EDA domain support — see cubeiform_eda.h for full API
+ *
+ * Cubeiform gains schematic{}, pcb{}, and assembly{} domain blocks.
+ * The OpenSCAD transpiler skips these blocks (emitting a comment).
+ * Use dc_cubeiform_parse_eda() from cubeiform_eda.h to extract and
+ * execute EDA operations.
+ * ========================================================================= */
+
 #endif /* DC_CUBEIFORM_H */

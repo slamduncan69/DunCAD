@@ -27,6 +27,7 @@ static const char HELP_ROOT[] =
 "  duncad-docs core          Foundation utilities (no external deps)\n"
 "  duncad-docs bezier        Bezier spline geometry and GTK4 editor\n"
 "  duncad-docs scad          OpenSCAD code generation\n"
+"  duncad-docs eda           Electronic design automation (EDA)\n"
 "  duncad-docs ui            GTK4 application window\n"
 "  duncad-docs inspect       Unix socket inspect/control server\n"
 "  duncad-docs build         Build system and test suite\n"
@@ -1901,6 +1902,210 @@ static const char HELP_SESSIONS_S012[] =
 "  duncad-docs sessions s011   Previous session (inline bezier)\n";
 
 
+/* ---- EDA MODULE ---- */
+
+static const char HELP_EDA[] =
+"EDA -- Electronic Design Automation Module\n"
+"\n"
+"src/eda/ contains the native EDA engine for schematic and PCB design.\n"
+"No GTK dependency -- all logic is in dc_core. Supports KiCad 6+ file\n"
+"formats (.kicad_sch, .kicad_pcb, .kicad_sym, .kicad_mod).\n"
+"\n"
+"TOPICS:\n"
+"  duncad-docs eda sexpr        S-expression parser for KiCad files\n"
+"  duncad-docs eda schematic    Schematic data model\n"
+"  duncad-docs eda pcb          PCB data model\n"
+"  duncad-docs eda library      Symbol/footprint library loader\n"
+"  duncad-docs eda netlist      Netlist structures\n"
+"  duncad-docs eda cubeiform    Cubeiform EDA transpiler\n"
+"  duncad-docs eda export       Cubeiform export (data model -> .dcad)\n"
+"  duncad-docs eda ui           EDA UI (schematic canvas, editor, tab)\n";
+
+static const char HELP_EDA_SEXPR[] =
+"EDA: SEXPR -- S-Expression Parser\n"
+"\n"
+"Generic recursive descent parser for KiCad s-expression file formats.\n"
+"Produces an AST of DC_Sexpr nodes (atoms, strings, lists).\n"
+"\n"
+"API (src/eda/sexpr.h):\n"
+"  DC_Sexpr  *dc_sexpr_parse(text, err)       parse text to AST\n"
+"  void       dc_sexpr_free(node)             free AST recursively\n"
+"  char      *dc_sexpr_write(node, err)       serialize back to text\n"
+"  DC_Sexpr  *dc_sexpr_find(parent, tag)      find first matching child\n"
+"  DC_Sexpr **dc_sexpr_find_all(parent, tag)  find all matching children\n"
+"  const char *dc_sexpr_tag(node)             get tag of list node\n"
+"  const char *dc_sexpr_value(node)           get first value after tag\n"
+"\n"
+"DESIGN:\n"
+"  All KiCad files use the same s-expr syntax. This parser handles\n"
+"  atoms (F.Cu, 1.27), quoted strings, and nested parenthesized lists.\n"
+"  Query helpers make tree navigation concise.\n";
+
+static const char HELP_EDA_SCHEMATIC[] =
+"EDA: SCHEMATIC -- Schematic Data Model\n"
+"\n"
+"Represents a KiCad-compatible schematic with symbols, wires, labels,\n"
+"junctions, and power ports.\n"
+"\n"
+"API (src/eda/eda_schematic.h):\n"
+"  DC_ESchematic *dc_eschematic_new/load/from_sexpr/free\n"
+"  dc_eschematic_add_symbol/wire/label/junction/power_port\n"
+"  dc_eschematic_find_symbol(sch, ref)    find by reference\n"
+"  dc_eschematic_symbol_property(sym, key)  get property\n"
+"  dc_eschematic_generate_netlist(sch)    extract connectivity\n"
+"  dc_eschematic_save/to_sexpr_string     KiCad format output\n"
+"\n"
+"NETLIST GENERATION:\n"
+"  Uses union-find on coordinate-based connectivity.\n"
+"  Labels and power ports create named nets.\n";
+
+static const char HELP_EDA_PCB[] =
+"EDA: PCB -- PCB Data Model\n"
+"\n"
+"Represents a KiCad-compatible PCB with footprints, tracks, vias,\n"
+"zones, nets, and design rules.\n"
+"\n"
+"API (src/eda/eda_pcb.h):\n"
+"  DC_EPcb *dc_epcb_new/load/from_sexpr/free\n"
+"  dc_epcb_add_footprint/track/via/net\n"
+"  dc_epcb_find_footprint(pcb, ref)    find by reference\n"
+"  dc_epcb_find_net(pcb, name)         find net by name\n"
+"  dc_epcb_import_netlist(pcb, nl)     schematic->PCB flow\n"
+"  dc_epcb_get_design_rules(pcb)       clearance, track width, etc.\n"
+"\n"
+"LAYERS:\n"
+"  DC_PcbLayerId enum: F.Cu(0), B.Cu(31), F.SilkS(36), etc.\n"
+"  dc_pcb_layer_from_name/to_name for string conversion.\n";
+
+static const char HELP_EDA_LIBRARY[] =
+"EDA: LIBRARY -- Symbol/Footprint Library Loader\n"
+"\n"
+"Loads KiCad .kicad_sym and .kicad_mod files, providing lookup by\n"
+"lib_id string (e.g. \"Device:R_Small\").\n"
+"\n"
+"API (src/eda/eda_library.h):\n"
+"  DC_ELibrary *dc_elibrary_new/free\n"
+"  dc_elibrary_load_symbols(lib, path)       load .kicad_sym\n"
+"  dc_elibrary_load_footprint(lib, path)     load .kicad_mod\n"
+"  dc_elibrary_find_symbol(lib, lib_id)      lookup by lib:name\n"
+"  dc_elibrary_find_symbol_by_name(lib, name) name-only search\n"
+"  dc_elibrary_symbol_count/symbol_name       enumerate\n"
+"\n"
+"DESIGN:\n"
+"  The library caches parsed ASTs. Returned DC_Sexpr pointers are\n"
+"  borrowed from the cached tree and must not be freed.\n";
+
+static const char HELP_EDA_NETLIST[] =
+"EDA: NETLIST -- Net Structures\n"
+"\n"
+"Bridges schematic to PCB: describes which component pins are\n"
+"electrically connected.\n"
+"\n"
+"API (src/eda/eda_netlist.h):\n"
+"  DC_Netlist *dc_netlist_new/free\n"
+"  dc_netlist_add_net/add_pin/add_component\n"
+"  dc_netlist_find_net(nl, name)      find net by name\n"
+"  dc_netlist_to_json(nl, err)        export as JSON\n"
+"\n"
+"STRUCTURES:\n"
+"  DC_Net        — name + array of DC_NetPin (comp_ref:pin_number)\n"
+"  DC_Netlist    — array of nets + array of DC_NetlistComponent\n";
+
+static const char HELP_EDA_CUBEIFORM[] =
+"EDA: CUBEIFORM -- Cubeiform EDA Transpiler\n"
+"\n"
+"Extends Cubeiform with schematic{}, pcb{}, assembly{} domain blocks.\n"
+"Parses EDA-specific syntax into typed IR operations, then applies them\n"
+"to the native C data models.\n"
+"\n"
+"FILES:\n"
+"  src/cubeiform/cubeiform_eda.h  — IR types (DC_SchOp, DC_PcbOp)\n"
+"  src/cubeiform/cubeiform_eda.c  — parser + apply functions\n"
+"  src/cubeiform/cubeiform.c      — token additions (21 EDA keywords)\n"
+"\n"
+"API (src/cubeiform/cubeiform_eda.h):\n"
+"  dc_cubeiform_parse_eda(src, err)           parse → DC_CubeiformEda*\n"
+"  dc_cubeiform_eda_free(eda)                 free parsed ops\n"
+"  dc_cubeiform_eda_apply_schematic(...)      apply sch ops to model\n"
+"  dc_cubeiform_eda_apply_pcb(...)            apply pcb ops to model\n"
+"  dc_cubeiform_execute(src, sch, pcb, ...)   one-shot parse + apply\n"
+"\n"
+"SCHEMATIC SYNTAX:\n"
+"  component R1 = \"Device:R_Small\" at 100, 50;\n"
+"  wire SIG: R1.2, LED1.1;\n"
+"  power VCC at 50, 30;\n"
+"  R1 >> value(\"10k\") >> footprint(\"R_0402\");\n"
+"\n"
+"PCB SYNTAX:\n"
+"  outline { rect(50, 30); }\n"
+"  rules { clearance = 0.15; track_width = 0.2; }\n"
+"  place R1 at 10, 15 on F.Cu >> rotate(45);\n"
+"  route SIG layer F.Cu width 0.2 { from 10,10; to 20,15; }\n"
+"  zone GND layer F.Cu { rect(0,0,50,30); }\n";
+
+static const char HELP_EDA_EXPORT[] =
+"EDA: EXPORT -- Cubeiform Export (Data Model -> .dcad)\n"
+"\n"
+"Generates readable Cubeiform source from schematic/PCB state.\n"
+"Enables bidirectional flow: GUI edit -> export .dcad -> agent reads.\n"
+"\n"
+"FILES:\n"
+"  src/eda/eda_cubeiform_export.h/.c\n"
+"\n"
+"API:\n"
+"  dc_eschematic_to_cubeiform(sch, err)   schematic -> Cubeiform string\n"
+"  dc_epcb_to_cubeiform(pcb, err)         PCB -> Cubeiform string\n";
+
+static const char HELP_EDA_UI[] =
+"EDA: UI -- EDA User Interface Components\n"
+"\n"
+"Three-tab system (GtkStack): 3D CAD | EDA | Assembly.\n"
+"EDA tab: schematic editor (left) + Cubeiform code editor (right).\n"
+"\n"
+"FILES:\n"
+"  src/eda_ui/sch_canvas.h/.c        Cairo 2D schematic canvas\n"
+"  src/eda_ui/sch_editor.h/.c        Interactive editor (modes + toolbar)\n"
+"  src/eda_ui/sch_symbol_render.h/.c Symbol rendering to Cairo\n"
+"  src/ui/eda_view.h/.c              EDA tab container (paned layout)\n"
+"  src/ui/app_window.c               Modified: GtkStack tab system\n"
+"\n"
+"CANVAS FEATURES:\n"
+"  50-mil grid (KiCad standard), zoom/pan, world<->screen transforms\n"
+"  Symbol rendering: body rect + pin stubs + ref/value text\n"
+"  Wire/junction/label/power port rendering\n"
+"\n"
+"INSPECT COMMANDS:\n"
+"  tab <name>              switch tab (3d_cad/eda/assembly)\n"
+"  tab_state               which tab is active\n"
+"  cubeiform_exec <src>    execute inline Cubeiform\n"
+"  cubeiform_validate      parse without executing\n"
+"  sch_state               symbol/wire/label counts + view state\n"
+"  sch_load/sch_save       load/save .kicad_sch\n"
+"  sch_export_dcad         export as Cubeiform\n"
+"  sch_add_symbol/wire/label  programmatic editing\n"
+"  sch_select/zoom/pan     view control\n"
+"  sch_render <path>       render to PNG\n"
+"\n"
+"PCB INSPECT COMMANDS:\n"
+"  pcb_state               footprint/track/via/zone counts + view state\n"
+"  pcb_load/pcb_save       load/save .kicad_pcb\n"
+"  pcb_add_track/via/footprint  programmatic copper placement\n"
+"  pcb_layer <id>          set active routing layer\n"
+"  pcb_layer_toggle <id>   toggle layer visibility\n"
+"  pcb_ratsnest             recompute + get ratsnest stats\n"
+"  pcb_import_netlist       import from schematic\n"
+"  pcb_export_dcad          export PCB as Cubeiform\n"
+"\n"
+"PCB UI FILES:\n"
+"  src/eda_ui/pcb_canvas.h/.c        Multi-layer Cairo canvas\n"
+"  src/eda_ui/pcb_editor.h/.c        Interactive PCB editor\n"
+"  src/eda_ui/pcb_layer_panel.h/.c   Layer visibility sidebar\n"
+"\n"
+"RATSNEST ENGINE:\n"
+"  src/eda/eda_ratsnest.h/.c   Union-find + MST per net\n"
+"  Computes shortest unrouted connections from pad/track/via positions\n";
+
+
 /* ---- TREE REGISTRY ---- */
 
 struct help_node {
@@ -1932,6 +2137,17 @@ static const struct help_node TREE[] = {
     { "scad",                  HELP_SCAD },
     { "scad.export",           HELP_SCAD_EXPORT },
     { "scad.runner",           HELP_SCAD_RUNNER },
+
+    /* eda */
+    { "eda",                   HELP_EDA },
+    { "eda.sexpr",             HELP_EDA_SEXPR },
+    { "eda.schematic",         HELP_EDA_SCHEMATIC },
+    { "eda.pcb",               HELP_EDA_PCB },
+    { "eda.library",           HELP_EDA_LIBRARY },
+    { "eda.netlist",           HELP_EDA_NETLIST },
+    { "eda.cubeiform",         HELP_EDA_CUBEIFORM },
+    { "eda.export",            HELP_EDA_EXPORT },
+    { "eda.ui",                HELP_EDA_UI },
 
     /* ui */
     { "ui",                    HELP_UI },

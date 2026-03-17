@@ -45,6 +45,14 @@ typedef enum {
     TOK_SHAPE, TOK_FN, TOK_FOR, TOK_IN, TOK_IF, TOK_ELSE,
     TOK_LET, TOK_INCLUDE, TOK_USE, TOK_ASSERT, TOK_ECHO,
     TOK_TRUE, TOK_FALSE, TOK_UNDEF,
+    /* EDA domain keywords */
+    TOK_SCHEMATIC, TOK_PCB, TOK_ASSEMBLY,
+    TOK_COMPONENT, TOK_WIRE, TOK_POWER,
+    TOK_OUTLINE, TOK_RULES, TOK_PLACE,
+    TOK_ROUTE, TOK_ZONE, TOK_ON,
+    TOK_LAYER, TOK_WIDTH, TOK_FROM,
+    TOK_TO, TOK_CONSTRAIN, TOK_ALIGNS,
+    TOK_VALUE, TOK_FOOTPRINT, TOK_AT,
 } TokType;
 
 typedef struct {
@@ -77,6 +85,27 @@ keyword_type(const char *s, int len)
     KW("true",    TOK_TRUE);
     KW("false",   TOK_FALSE);
     KW("undef",   TOK_UNDEF);
+    KW("schematic", TOK_SCHEMATIC);
+    KW("pcb",       TOK_PCB);
+    KW("assembly",  TOK_ASSEMBLY);
+    KW("component", TOK_COMPONENT);
+    KW("wire",      TOK_WIRE);
+    KW("power",     TOK_POWER);
+    KW("outline",   TOK_OUTLINE);
+    KW("rules",     TOK_RULES);
+    KW("place",     TOK_PLACE);
+    KW("route",     TOK_ROUTE);
+    KW("zone",      TOK_ZONE);
+    KW("on",        TOK_ON);
+    KW("layer",     TOK_LAYER);
+    KW("width",     TOK_WIDTH);
+    KW("from",      TOK_FROM);
+    KW("to",        TOK_TO);
+    KW("constrain", TOK_CONSTRAIN);
+    KW("aligns",    TOK_ALIGNS);
+    KW("value",     TOK_VALUE);
+    KW("footprint", TOK_FOOTPRINT);
+    KW("at",        TOK_AT);
     #undef KW
     return TOK_IDENT;
 }
@@ -1158,6 +1187,24 @@ static void parse_statement(Parser *p) {
             emit(p, ";\n");
         }
         free(rhs_name);
+        return;
+    }
+
+    /* --- EDA domain blocks: schematic {}, pcb {}, assembly {} --- */
+    if (t.type == TOK_SCHEMATIC || t.type == TOK_PCB || t.type == TOK_ASSEMBLY) {
+        /* Skip the entire domain block — handled by cubeiform_eda.c */
+        advance(p);
+        if (at(p, TOK_LBRACE)) {
+            int depth = 1;
+            advance(p); /* { */
+            while (!at_end(p) && depth > 0) {
+                if (at(p, TOK_LBRACE)) depth++;
+                if (at(p, TOK_RBRACE)) depth--;
+                if (depth > 0) advance(p);
+            }
+            if (at(p, TOK_RBRACE)) advance(p);
+        }
+        emit(p, "/* EDA domain block (handled natively) */\n");
         return;
     }
 

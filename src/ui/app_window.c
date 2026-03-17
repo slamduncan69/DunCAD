@@ -5,6 +5,7 @@
 #include "ui/terminal_panel.h"
 #include "ui/ai_chat.h"
 #include "ui/shape_menu.h"
+#include "ui/eda_view.h"
 #include "gl/gl_viewport.h"
 #include "bezier/bezier_editor.h"
 #include "inspect/inspect.h"
@@ -552,7 +553,37 @@ dc_app_window_create(GtkApplication *app)
 
     gtk_widget_set_vexpand(outer_paned, TRUE);
     gtk_widget_set_hexpand(outer_paned, TRUE);
-    gtk_box_append(GTK_BOX(outer_box), outer_paned);
+
+    /* --- Tab system: GtkStack wrapping 3D CAD, EDA, Assembly --- */
+    GtkWidget *stack = gtk_stack_new();
+    gtk_stack_set_transition_type(GTK_STACK(stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+    gtk_widget_set_vexpand(stack, TRUE);
+    gtk_widget_set_hexpand(stack, TRUE);
+
+    /* Tab 1: 3D CAD (existing layout) */
+    gtk_stack_add_titled(GTK_STACK(stack), outer_paned, "3d_cad", "3D CAD");
+
+    /* Tab 2: EDA */
+    DC_EdaView *eda_view = dc_eda_view_new();
+    if (eda_view) {
+        GtkWidget *eda_widget = dc_eda_view_widget(eda_view);
+        gtk_stack_add_titled(GTK_STACK(stack), eda_widget, "eda", "EDA");
+        g_object_set_data_full(G_OBJECT(window), "dc-eda-view", eda_view,
+                               (GDestroyNotify)dc_eda_view_free);
+    }
+
+    /* Tab 3: Assembly (placeholder) */
+    GtkWidget *asm_placeholder = gtk_label_new("Assembly — coming soon");
+    gtk_stack_add_titled(GTK_STACK(stack), asm_placeholder, "assembly", "Assembly");
+
+    /* Stack switcher in header bar */
+    GtkWidget *stack_switcher = gtk_stack_switcher_new();
+    gtk_stack_switcher_set_stack(GTK_STACK_SWITCHER(stack_switcher), GTK_STACK(stack));
+    gtk_header_bar_pack_start(GTK_HEADER_BAR(header), stack_switcher);
+
+    g_object_set_data(G_OBJECT(window), "dc-stack", stack);
+
+    gtk_box_append(GTK_BOX(outer_box), stack);
 
     /* --- Status bar --- */
     GtkWidget *status_frame = gtk_frame_new(NULL);
@@ -754,4 +785,21 @@ dc_app_window_get_scad_preview(GtkWidget *window)
 {
     if (!window) return NULL;
     return g_object_get_data(G_OBJECT(window), "dc-scad-preview-ref");
+}
+
+struct DC_EdaView *
+dc_app_window_get_eda_view(GtkWidget *window)
+{
+    if (!window) return NULL;
+    return g_object_get_data(G_OBJECT(window), "dc-eda-view");
+}
+
+void
+dc_app_window_set_tab(GtkWidget *window, const char *tab_name)
+{
+    if (!window || !tab_name) return;
+    GtkWidget *stack = g_object_get_data(G_OBJECT(window), "dc-stack");
+    if (stack) {
+        gtk_stack_set_visible_child_name(GTK_STACK(stack), tab_name);
+    }
 }

@@ -71,6 +71,9 @@ dc_error_string(DC_ErrorCode code)
         case DC_ERROR_PARSE:      return "PARSE";
         case DC_ERROR_NOT_FOUND:  return "NOT_FOUND";
         case DC_ERROR_INVALID_ARG: return "INVALID_ARG";
+        case DC_ERROR_EDA_PARSE:  return "EDA_PARSE";
+        case DC_ERROR_EDA_DRC:    return "EDA_DRC";
+        case DC_ERROR_EDA_EXPORT: return "EDA_EXPORT";
         default:                  return "UNKNOWN";
     }
 }

@@ -41,7 +41,8 @@ typedef enum {
     DC_LOG_EVENT_FILE,
     DC_LOG_EVENT_BUILD,
     DC_LOG_EVENT_TOOL,
-    DC_LOG_EVENT_LLM
+    DC_LOG_EVENT_LLM,
+    DC_LOG_EVENT_EDA
 } DC_LogEventType;
 
 /* -------------------------------------------------------------------------

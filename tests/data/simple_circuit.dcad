@@ -1,0 +1,39 @@
+// Simple Cubeiform EDA test file — resistor + LED circuit
+
+schematic {
+    component R1 = "Device:R_Small" at 100, 50;
+    component LED1 = "Device:LED_Small" at 150, 50;
+
+    wire SIG: R1.2, LED1.1;
+
+    R1 >> value("10k") >> footprint("R_0402");
+    LED1 >> value("Red") >> footprint("LED_0402");
+
+    power VCC at 50, 30;
+    power GND at 50, 100;
+}
+
+pcb {
+    outline {
+        rect(30, 20);
+    }
+
+    rules {
+        clearance = 0.15;
+        track_width = 0.2;
+        via_size = 0.6;
+        via_drill = 0.3;
+    }
+
+    place R1 at 10, 10 on F.Cu;
+    place LED1 at 20, 10 on F.Cu >> rotate(180);
+
+    route SIG layer F.Cu width 0.2 {
+        from 10, 10;
+        to 20, 10;
+    }
+
+    zone GND layer F.Cu {
+        rect(0, 0, 30, 20);
+    }
+}

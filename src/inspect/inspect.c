@@ -4,11 +4,22 @@
 #include "ui/code_editor.h"
 #include "ui/scad_preview.h"
 #include "ui/transform_panel.h"
+#include "ui/eda_view.h"
 #include "gl/gl_viewport.h"
 #include "bezier/bezier_editor.h"
 #include "bezier/bezier_canvas.h"
 #include "scad/scad_runner.h"
+#include "cubeiform/cubeiform_eda.h"
+#include "eda/eda_schematic.h"
+#include "eda/eda_pcb.h"
+#include "eda/eda_cubeiform_export.h"
+#include "eda_ui/sch_editor.h"
+#include "eda_ui/sch_canvas.h"
+#include "eda_ui/pcb_editor.h"
+#include "eda_ui/pcb_canvas.h"
+#include "eda/eda_ratsnest.h"
 #include "core/string_builder.h"
+#include "core/error.h"
 #include "core/log.h"
 
 #include <gio/gio.h>
@@ -28,6 +39,7 @@ static GtkWidget       *s_window  = NULL;
 static DC_BezierEditor  *get_editor(void)  { return dc_app_window_get_editor(s_window); }
 static DC_CodeEditor    *get_code_ed(void) { return dc_app_window_get_code_editor(s_window); }
 static DC_ScadPreview   *get_preview(void) { return dc_app_window_get_scad_preview(s_window); }
+static DC_EdaView       *get_eda_view(void){ return dc_app_window_get_eda_view(s_window); }
 
 static DC_GlViewport *
 get_viewport(void)
@@ -934,6 +946,456 @@ cmd_help(void)
     );
 }
 
+/* =========================================================================
+ * EDA / Cubeiform commands
+ * ========================================================================= */
+
+/* tab <name> — switch active tab */
+static char *cmd_tab(const char *args) {
+    if (!args || !*args)
+        return strdup("{\"error\":\"usage: tab <3d_cad|eda|assembly>\"}\n");
+    dc_app_window_set_tab(s_window, args);
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_appendf(sb, "{\"ok\":true,\"tab\":\"%s\"}\n", args);
+    return dc_sb_take(sb);
+}
+
+/* tab_state — which tab is active */
+static char *cmd_tab_state(void) {
+    GtkWidget *stack = s_window ? g_object_get_data(G_OBJECT(s_window), "dc-stack") : NULL;
+    if (!stack) return strdup("{\"error\":\"no stack\"}\n");
+    const char *name = gtk_stack_get_visible_child_name(GTK_STACK(stack));
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_appendf(sb, "{\"tab\":\"%s\"}\n", name ? name : "unknown");
+    return dc_sb_take(sb);
+}
+
+/* cubeiform_exec <source> — execute inline Cubeiform (any domain) */
+static char *cmd_cubeiform_exec(const char *args) {
+    if (!args || !*args)
+        return strdup("{\"error\":\"usage: cubeiform_exec <source>\"}\n");
+
+    DC_EdaView *ev = get_eda_view();
+    DC_ESchematic *sch = NULL;
+    if (ev) {
+        DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+        sch = dc_sch_editor_get_schematic(ed);
+    }
+
+    DC_Error err = {0};
+    int rc = dc_cubeiform_execute(args, sch, NULL, NULL, NULL, &err);
+    if (rc != 0) {
+        DC_StringBuilder *sb = dc_sb_new();
+        dc_sb_appendf(sb, "{\"error\":\"%s\"}\n", err.message);
+        return dc_sb_take(sb);
+    }
+
+    /* Refresh canvas */
+    if (ev) {
+        DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+        DC_SchCanvas *canvas = dc_sch_editor_get_canvas(ed);
+        dc_sch_canvas_queue_redraw(canvas);
+    }
+
+    return strdup("{\"ok\":true}\n");
+}
+
+/* cubeiform_validate <source> — parse without executing */
+static char *cmd_cubeiform_validate(const char *args) {
+    if (!args || !*args)
+        return strdup("{\"error\":\"usage: cubeiform_validate <source>\"}\n");
+
+    DC_Error err = {0};
+    DC_CubeiformEda *eda = dc_cubeiform_parse_eda(args, &err);
+    if (!eda) {
+        DC_StringBuilder *sb = dc_sb_new();
+        dc_sb_appendf(sb, "{\"valid\":false,\"error\":\"%s\"}\n", err.message);
+        return dc_sb_take(sb);
+    }
+
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_appendf(sb, "{\"valid\":true,\"sch_ops\":%zu,\"pcb_ops\":%zu}\n",
+                   dc_cubeiform_eda_sch_op_count(eda),
+                   dc_cubeiform_eda_pcb_op_count(eda));
+    dc_cubeiform_eda_free(eda);
+    return dc_sb_take(sb);
+}
+
+/* sch_state — symbol/wire count, selected, zoom/pan */
+static char *cmd_sch_state(void) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+    DC_ESchematic *sch = dc_sch_editor_get_schematic(ed);
+    DC_SchCanvas *canvas = dc_sch_editor_get_canvas(ed);
+
+    double px = 0, py = 0;
+    dc_sch_canvas_get_pan(canvas, &px, &py);
+
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_appendf(sb,
+        "{\"symbols\":%zu,\"wires\":%zu,\"labels\":%zu,"
+        "\"junctions\":%zu,\"power_ports\":%zu,"
+        "\"selected\":%d,\"zoom\":%.3f,\"pan\":[%.1f,%.1f]}\n",
+        dc_eschematic_symbol_count(sch),
+        dc_eschematic_wire_count(sch),
+        dc_eschematic_label_count(sch),
+        dc_eschematic_junction_count(sch),
+        dc_eschematic_power_port_count(sch),
+        dc_sch_canvas_get_selected_symbol(canvas),
+        dc_sch_canvas_get_zoom(canvas),
+        px, py);
+    return dc_sb_take(sb);
+}
+
+/* sch_load <path> — load .kicad_sch */
+static char *cmd_sch_load(const char *args) {
+    if (!args || !*args)
+        return strdup("{\"error\":\"usage: sch_load <path>\"}\n");
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+    int rc = dc_sch_editor_load(ed, args);
+    if (rc != 0) return strdup("{\"error\":\"load failed\"}\n");
+    return strdup("{\"ok\":true}\n");
+}
+
+/* sch_save [path] — save current schematic */
+static char *cmd_sch_save(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+    const char *path = (args && *args) ? args : NULL;
+    int rc = dc_sch_editor_save(ed, path);
+    if (rc != 0) return strdup("{\"error\":\"save failed\"}\n");
+    return strdup("{\"ok\":true}\n");
+}
+
+/* sch_export_dcad [path] — export as Cubeiform source */
+static char *cmd_sch_export_dcad(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+    DC_ESchematic *sch = dc_sch_editor_get_schematic(ed);
+
+    DC_Error err = {0};
+    char *dcad = dc_eschematic_to_cubeiform(sch, &err);
+    if (!dcad) {
+        DC_StringBuilder *sb = dc_sb_new();
+        dc_sb_appendf(sb, "{\"error\":\"%s\"}\n", err.message);
+        return dc_sb_take(sb);
+    }
+
+    if (args && *args) {
+        /* Write to file */
+        FILE *f = fopen(args, "w");
+        if (!f) { free(dcad); return strdup("{\"error\":\"file write failed\"}\n"); }
+        fputs(dcad, f);
+        fclose(f);
+        free(dcad);
+        return strdup("{\"ok\":true}\n");
+    }
+
+    /* Return inline */
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_append(sb, "{\"dcad\":");
+    sb_append_json_str(sb, dcad);
+    dc_sb_append(sb, "}\n");
+    free(dcad);
+    return dc_sb_take(sb);
+}
+
+/* sch_add_symbol <lib_id> <x> <y> [angle] */
+static char *cmd_sch_add_symbol(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    char lib_id[256];
+    double x, y;
+    int n = sscanf(args, "%255s %lf %lf", lib_id, &x, &y);
+    if (n < 3) return strdup("{\"error\":\"usage: sch_add_symbol <lib_id> <x> <y>\"}\n");
+
+    DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+    DC_ESchematic *sch = dc_sch_editor_get_schematic(ed);
+
+    /* Auto-generate reference from lib_id */
+    char ref[32];
+    snprintf(ref, sizeof(ref), "U%zu", dc_eschematic_symbol_count(sch) + 1);
+
+    size_t idx = dc_eschematic_add_symbol(sch, lib_id, ref, x, y);
+    if (idx == (size_t)-1) return strdup("{\"error\":\"add failed\"}\n");
+
+    dc_sch_canvas_queue_redraw(dc_sch_editor_get_canvas(ed));
+
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_appendf(sb, "{\"ok\":true,\"ref\":\"%s\",\"index\":%zu}\n", ref, idx);
+    return dc_sb_take(sb);
+}
+
+/* sch_add_wire <x1> <y1> <x2> <y2> */
+static char *cmd_sch_add_wire(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    double x1, y1, x2, y2;
+    if (sscanf(args, "%lf %lf %lf %lf", &x1, &y1, &x2, &y2) != 4)
+        return strdup("{\"error\":\"usage: sch_add_wire <x1> <y1> <x2> <y2>\"}\n");
+
+    DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+    dc_eschematic_add_wire(dc_sch_editor_get_schematic(ed), x1, y1, x2, y2);
+    dc_sch_canvas_queue_redraw(dc_sch_editor_get_canvas(ed));
+    return strdup("{\"ok\":true}\n");
+}
+
+/* sch_add_label <name> <x> <y> */
+static char *cmd_sch_add_label(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    char name[256];
+    double x, y;
+    if (sscanf(args, "%255s %lf %lf", name, &x, &y) != 3)
+        return strdup("{\"error\":\"usage: sch_add_label <name> <x> <y>\"}\n");
+
+    DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+    dc_eschematic_add_label(dc_sch_editor_get_schematic(ed), name, x, y);
+    dc_sch_canvas_queue_redraw(dc_sch_editor_get_canvas(ed));
+    return strdup("{\"ok\":true}\n");
+}
+
+/* sch_select <type> <index> */
+static char *cmd_sch_select(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    int index;
+    if (sscanf(args, "%*s %d", &index) < 1)
+        return strdup("{\"error\":\"usage: sch_select <type> <index>\"}\n");
+
+    DC_SchEditor *ed = dc_eda_view_get_sch_editor(ev);
+    dc_sch_canvas_set_selected_symbol(dc_sch_editor_get_canvas(ed), index);
+    return strdup("{\"ok\":true}\n");
+}
+
+/* sch_zoom <level> */
+static char *cmd_sch_zoom(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    double z;
+    if (sscanf(args, "%lf", &z) != 1)
+        return strdup("{\"error\":\"usage: sch_zoom <level>\"}\n");
+
+    dc_sch_canvas_set_zoom(dc_sch_editor_get_canvas(dc_eda_view_get_sch_editor(ev)), z);
+    return strdup("{\"ok\":true}\n");
+}
+
+/* sch_pan <x> <y> */
+static char *cmd_sch_pan(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    double x, y;
+    if (sscanf(args, "%lf %lf", &x, &y) != 2)
+        return strdup("{\"error\":\"usage: sch_pan <x> <y>\"}\n");
+
+    dc_sch_canvas_set_pan(dc_sch_editor_get_canvas(dc_eda_view_get_sch_editor(ev)), x, y);
+    return strdup("{\"ok\":true}\n");
+}
+
+/* sch_render <path> [width] [height] */
+static char *cmd_sch_render(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    char path[512];
+    int w = 0, h = 0;
+    sscanf(args, "%511s %d %d", path, &w, &h);
+
+    DC_SchCanvas *canvas = dc_sch_editor_get_canvas(dc_eda_view_get_sch_editor(ev));
+    int rc = dc_sch_canvas_render_to_png(canvas, path, w, h);
+    if (rc != 0) return strdup("{\"error\":\"render failed\"}\n");
+    return strdup("{\"ok\":true}\n");
+}
+
+/* =========================================================================
+ * PCB commands
+ * ========================================================================= */
+
+static char *cmd_pcb_state(void) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+    DC_PcbEditor *ed = dc_eda_view_get_pcb_editor(ev);
+    DC_EPcb *pcb = dc_pcb_editor_get_pcb(ed);
+    DC_PcbCanvas *canvas = dc_pcb_editor_get_canvas(ed);
+    double px = 0, py = 0;
+    dc_pcb_canvas_get_pan(canvas, &px, &py);
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_appendf(sb,
+        "{\"footprints\":%zu,\"tracks\":%zu,\"vias\":%zu,"
+        "\"zones\":%zu,\"nets\":%zu,"
+        "\"selected\":%d,\"zoom\":%.3f,\"pan\":[%.2f,%.2f],"
+        "\"active_layer\":%d}\n",
+        dc_epcb_footprint_count(pcb), dc_epcb_track_count(pcb),
+        dc_epcb_via_count(pcb), dc_epcb_zone_count(pcb),
+        dc_epcb_net_count(pcb),
+        dc_pcb_canvas_get_selected_footprint(canvas),
+        dc_pcb_canvas_get_zoom(canvas), px, py,
+        dc_pcb_canvas_get_active_layer(canvas));
+    return dc_sb_take(sb);
+}
+
+static char *cmd_pcb_load(const char *args) {
+    if (!args || !*args) return strdup("{\"error\":\"usage: pcb_load <path>\"}\n");
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+    int rc = dc_pcb_editor_load(dc_eda_view_get_pcb_editor(ev), args);
+    return rc == 0 ? strdup("{\"ok\":true}\n") : strdup("{\"error\":\"load failed\"}\n");
+}
+
+static char *cmd_pcb_save(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+    int rc = dc_pcb_editor_save(dc_eda_view_get_pcb_editor(ev),
+                                  (args && *args) ? args : NULL);
+    return rc == 0 ? strdup("{\"ok\":true}\n") : strdup("{\"error\":\"save failed\"}\n");
+}
+
+static char *cmd_pcb_add_track(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+    double x1, y1, x2, y2, w;
+    int layer, net;
+    if (sscanf(args, "%lf %lf %lf %lf %lf %d %d", &x1, &y1, &x2, &y2, &w, &layer, &net) < 7)
+        return strdup("{\"error\":\"usage: pcb_add_track <x1> <y1> <x2> <y2> <width> <layer> <net_id>\"}\n");
+    DC_EPcb *pcb = dc_pcb_editor_get_pcb(dc_eda_view_get_pcb_editor(ev));
+    dc_epcb_add_track(pcb, x1, y1, x2, y2, w, layer, net);
+    dc_pcb_canvas_queue_redraw(dc_pcb_editor_get_canvas(dc_eda_view_get_pcb_editor(ev)));
+    return strdup("{\"ok\":true}\n");
+}
+
+static char *cmd_pcb_add_via(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+    double x, y, sz, dr;
+    int net;
+    if (sscanf(args, "%lf %lf %lf %lf %d", &x, &y, &sz, &dr, &net) < 5)
+        return strdup("{\"error\":\"usage: pcb_add_via <x> <y> <size> <drill> <net_id>\"}\n");
+    DC_EPcb *pcb = dc_pcb_editor_get_pcb(dc_eda_view_get_pcb_editor(ev));
+    dc_epcb_add_via(pcb, x, y, sz, dr, net);
+    dc_pcb_canvas_queue_redraw(dc_pcb_editor_get_canvas(dc_eda_view_get_pcb_editor(ev)));
+    return strdup("{\"ok\":true}\n");
+}
+
+static char *cmd_pcb_add_footprint(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+    char lib_id[256], ref[64];
+    double x, y;
+    int layer;
+    if (sscanf(args, "%255s %63s %lf %lf %d", lib_id, ref, &x, &y, &layer) < 5)
+        return strdup("{\"error\":\"usage: pcb_add_footprint <lib_id> <ref> <x> <y> <layer>\"}\n");
+    DC_EPcb *pcb = dc_pcb_editor_get_pcb(dc_eda_view_get_pcb_editor(ev));
+    dc_epcb_add_footprint(pcb, lib_id, ref, x, y, layer);
+    dc_pcb_canvas_queue_redraw(dc_pcb_editor_get_canvas(dc_eda_view_get_pcb_editor(ev)));
+    return strdup("{\"ok\":true}\n");
+}
+
+static char *cmd_pcb_layer(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+    int layer;
+    if (sscanf(args, "%d", &layer) != 1)
+        return strdup("{\"error\":\"usage: pcb_layer <layer_id>\"}\n");
+    dc_pcb_canvas_set_active_layer(dc_pcb_editor_get_canvas(dc_eda_view_get_pcb_editor(ev)), layer);
+    return strdup("{\"ok\":true}\n");
+}
+
+static char *cmd_pcb_layer_toggle(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+    int layer;
+    if (sscanf(args, "%d", &layer) != 1)
+        return strdup("{\"error\":\"usage: pcb_layer_toggle <layer_id>\"}\n");
+    DC_PcbCanvas *canvas = dc_pcb_editor_get_canvas(dc_eda_view_get_pcb_editor(ev));
+    int cur = dc_pcb_canvas_get_layer_visible(canvas, layer);
+    dc_pcb_canvas_set_layer_visible(canvas, layer, !cur);
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_appendf(sb, "{\"ok\":true,\"layer\":%d,\"visible\":%s}\n", layer, !cur ? "true" : "false");
+    return dc_sb_take(sb);
+}
+
+static char *cmd_pcb_ratsnest(void) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+    DC_PcbEditor *ed = dc_eda_view_get_pcb_editor(ev);
+    dc_pcb_editor_update_ratsnest(ed);
+
+    /* Build JSON response with ratsnest lines */
+    DC_EPcb *pcb = dc_pcb_editor_get_pcb(ed);
+    DC_Ratsnest *rn = dc_ratsnest_compute(pcb);
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_appendf(sb, "{\"lines\":%zu,\"incomplete_nets\":%zu}\n",
+                   dc_ratsnest_line_count(rn),
+                   dc_ratsnest_incomplete_net_count(rn));
+    dc_ratsnest_free(rn);
+    return dc_sb_take(sb);
+}
+
+static char *cmd_pcb_import_netlist(void) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    DC_SchEditor *sch_ed = dc_eda_view_get_sch_editor(ev);
+    DC_ESchematic *sch = dc_sch_editor_get_schematic(sch_ed);
+
+    DC_Error err = {0};
+    DC_Netlist *nl = dc_eschematic_generate_netlist(sch, &err);
+    if (!nl) {
+        DC_StringBuilder *sb = dc_sb_new();
+        dc_sb_appendf(sb, "{\"error\":\"%s\"}\n", err.message);
+        return dc_sb_take(sb);
+    }
+
+    DC_PcbEditor *pcb_ed = dc_eda_view_get_pcb_editor(ev);
+    DC_EPcb *pcb = dc_pcb_editor_get_pcb(pcb_ed);
+    dc_epcb_import_netlist(pcb, nl, &err);
+    dc_netlist_free(nl);
+
+    dc_pcb_canvas_queue_redraw(dc_pcb_editor_get_canvas(pcb_ed));
+    dc_pcb_editor_update_ratsnest(pcb_ed);
+
+    return strdup("{\"ok\":true}\n");
+}
+
+static char *cmd_pcb_export_dcad(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+    DC_EPcb *pcb = dc_pcb_editor_get_pcb(dc_eda_view_get_pcb_editor(ev));
+    DC_Error err = {0};
+    char *dcad = dc_epcb_to_cubeiform(pcb, &err);
+    if (!dcad) return strdup("{\"error\":\"export failed\"}\n");
+
+    if (args && *args) {
+        FILE *f = fopen(args, "w");
+        if (!f) { free(dcad); return strdup("{\"error\":\"write failed\"}\n"); }
+        fputs(dcad, f);
+        fclose(f);
+        free(dcad);
+        return strdup("{\"ok\":true}\n");
+    }
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_append(sb, "{\"dcad\":");
+    sb_append_json_str(sb, dcad);
+    dc_sb_append(sb, "}\n");
+    free(dcad);
+    return dc_sb_take(sb);
+}
+
 /* -------------------------------------------------------------------------
  * Command dispatch
  * ---------------------------------------------------------------------- */
@@ -1017,6 +1479,40 @@ dispatch(const char *cmd)
         snprintf(r, 128, "{\"ok\":true,\"action\":\"%s\"}\n", args);
         return r;
     }
+
+    /* Tab system */
+    if (strcmp(name, "tab")       == 0) return cmd_tab(args);
+    if (strcmp(name, "tab_state") == 0) return cmd_tab_state();
+
+    /* Cubeiform */
+    if (strcmp(name, "cubeiform_exec")     == 0) return cmd_cubeiform_exec(args);
+    if (strcmp(name, "cubeiform_validate") == 0) return cmd_cubeiform_validate(args);
+
+    /* Schematic */
+    if (strcmp(name, "sch_state")       == 0) return cmd_sch_state();
+    if (strcmp(name, "sch_load")        == 0) return cmd_sch_load(args);
+    if (strcmp(name, "sch_save")        == 0) return cmd_sch_save(args);
+    if (strcmp(name, "sch_export_dcad") == 0) return cmd_sch_export_dcad(args);
+    if (strcmp(name, "sch_add_symbol")  == 0) return cmd_sch_add_symbol(args);
+    if (strcmp(name, "sch_add_wire")    == 0) return cmd_sch_add_wire(args);
+    if (strcmp(name, "sch_add_label")   == 0) return cmd_sch_add_label(args);
+    if (strcmp(name, "sch_select")      == 0) return cmd_sch_select(args);
+    if (strcmp(name, "sch_zoom")        == 0) return cmd_sch_zoom(args);
+    if (strcmp(name, "sch_pan")         == 0) return cmd_sch_pan(args);
+    if (strcmp(name, "sch_render")      == 0) return cmd_sch_render(args);
+
+    /* PCB */
+    if (strcmp(name, "pcb_state")          == 0) return cmd_pcb_state();
+    if (strcmp(name, "pcb_load")           == 0) return cmd_pcb_load(args);
+    if (strcmp(name, "pcb_save")           == 0) return cmd_pcb_save(args);
+    if (strcmp(name, "pcb_add_track")      == 0) return cmd_pcb_add_track(args);
+    if (strcmp(name, "pcb_add_via")        == 0) return cmd_pcb_add_via(args);
+    if (strcmp(name, "pcb_add_footprint")  == 0) return cmd_pcb_add_footprint(args);
+    if (strcmp(name, "pcb_layer")          == 0) return cmd_pcb_layer(args);
+    if (strcmp(name, "pcb_layer_toggle")   == 0) return cmd_pcb_layer_toggle(args);
+    if (strcmp(name, "pcb_ratsnest")       == 0) return cmd_pcb_ratsnest();
+    if (strcmp(name, "pcb_import_netlist") == 0) return cmd_pcb_import_netlist();
+    if (strcmp(name, "pcb_export_dcad")    == 0) return cmd_pcb_export_dcad(args);
 
     /* Meta */
     if (strcmp(name, "help") == 0) return cmd_help();

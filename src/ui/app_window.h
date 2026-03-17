@@ -70,4 +70,20 @@ struct DC_CodeEditor *dc_app_window_get_code_editor(GtkWidget *window);
  * ---------------------------------------------------------------------- */
 struct DC_ScadPreview *dc_app_window_get_scad_preview(GtkWidget *window);
 
+/* -------------------------------------------------------------------------
+ * dc_app_window_get_eda_view — retrieve the EDA view attached to window.
+ *
+ * Returns: borrowed DC_EdaView*, or NULL if not found.
+ * ---------------------------------------------------------------------- */
+struct DC_EdaView *dc_app_window_get_eda_view(GtkWidget *window);
+
+/* -------------------------------------------------------------------------
+ * dc_app_window_set_tab — switch the active tab.
+ *
+ * Parameters:
+ *   window   — the GtkWidget * returned by dc_app_window_create()
+ *   tab_name — "3d_cad", "eda", or "assembly"
+ * ---------------------------------------------------------------------- */
+void dc_app_window_set_tab(GtkWidget *window, const char *tab_name);
+
 #endif /* DC_APP_WINDOW_H */

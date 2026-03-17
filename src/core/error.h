@@ -20,7 +20,10 @@ typedef enum {
     DC_ERROR_IO,
     DC_ERROR_PARSE,
     DC_ERROR_NOT_FOUND,
-    DC_ERROR_INVALID_ARG
+    DC_ERROR_INVALID_ARG,
+    DC_ERROR_EDA_PARSE,
+    DC_ERROR_EDA_DRC,
+    DC_ERROR_EDA_EXPORT
 } DC_ErrorCode;
 
 /* -------------------------------------------------------------------------

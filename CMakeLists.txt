@@ -73,6 +73,14 @@ add_library(dc_core STATIC
     src/cubeiform/cubeiform.c
     src/scad/scad_export.c
     src/scad/scad_splitter.c
+    src/eda/sexpr.c
+    src/eda/eda_netlist.c
+    src/eda/eda_schematic.c
+    src/eda/eda_pcb.c
+    src/eda/eda_library.c
+    src/eda/eda_cubeiform_export.c
+    src/eda/eda_ratsnest.c
+    src/cubeiform/cubeiform_eda.c
 )
 target_include_directories(dc_core PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(dc_core
@@ -84,6 +92,15 @@ target_link_libraries(dc_core
 # ---------------------------------------------------------------------------
 # Main application
 # ---------------------------------------------------------------------------
+set(DC_EDA_UI_SOURCES
+    src/eda_ui/sch_canvas.c
+    src/eda_ui/sch_editor.c
+    src/eda_ui/sch_symbol_render.c
+    src/eda_ui/pcb_canvas.c
+    src/eda_ui/pcb_editor.c
+    src/eda_ui/pcb_layer_panel.c
+)
+
 add_executable(duncad
     src/main.c
     src/ui/app_window.c
@@ -94,12 +111,14 @@ add_executable(duncad
     src/ui/terminal_panel.c
     src/ui/ai_chat.c
     src/ui/shape_menu.c
+    src/ui/eda_view.c
     src/gl/gl_viewport.c
     src/gl/stl_loader.c
     src/bezier/bezier_canvas.c
     src/bezier/bezier_editor.c
     src/inspect/inspect.c
     src/scad/scad_runner.c
+    ${DC_EDA_UI_SOURCES}
 )
 target_include_directories(duncad PRIVATE
     "${CMAKE_SOURCE_DIR}/src"
@@ -157,6 +176,21 @@ dc_add_test(test_bezier_fit   tests/test_bezier_fit.c)
 dc_add_test(test_scad_export tests/test_scad_export.c)
 dc_add_test(test_cubeiform   tests/test_cubeiform.c)
 
+# EDA tests — no GTK dependency, use dc_core
+dc_add_test(test_sexpr            tests/test_sexpr.c)
+dc_add_test(test_eda_schematic    tests/test_eda_schematic.c)
+dc_add_test(test_eda_pcb          tests/test_eda_pcb.c)
+dc_add_test(test_eda_library      tests/test_eda_library.c)
+
+# Cubeiform EDA test
+dc_add_test(test_cubeiform_eda    tests/test_cubeiform_eda.c)
+
+# Pass test data directory to EDA tests
+set(DC_EDA_TEST_TARGETS test_sexpr test_eda_schematic test_eda_pcb test_eda_library test_cubeiform_eda)
+foreach(target ${DC_EDA_TEST_TARGETS})
+    target_compile_definitions(${target} PRIVATE DC_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data")
+endforeach()
+
 # Topology test — pure C, no GTK dependency (single-header dc_topo.h)
 add_executable(test_topo tests/test_topo.c)
 target_include_directories(test_topo PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -196,10 +230,12 @@ add_executable(test_bezier_canvas
     src/ui/terminal_panel.c
     src/ui/ai_chat.c
     src/ui/shape_menu.c
+    src/ui/eda_view.c
     src/gl/gl_viewport.c
     src/gl/stl_loader.c
     src/inspect/inspect.c
     src/scad/scad_runner.c
+    ${DC_EDA_UI_SOURCES}
 )
 target_include_directories(test_bezier_canvas PRIVATE
     "${CMAKE_SOURCE_DIR}/src"
@@ -234,10 +270,12 @@ add_executable(test_bezier_editor
     src/ui/terminal_panel.c
     src/ui/ai_chat.c
     src/ui/shape_menu.c
+    src/ui/eda_view.c
     src/gl/gl_viewport.c
     src/gl/stl_loader.c
     src/inspect/inspect.c
     src/scad/scad_runner.c
+    ${DC_EDA_UI_SOURCES}
 )
 target_include_directories(test_bezier_editor PRIVATE
     "${CMAKE_SOURCE_DIR}/src"
@@ -281,6 +319,6 @@ set_tests_properties(test_scad_runner PROPERTIES
 # ---------------------------------------------------------------------------
 add_custom_target(tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_bezier_fit test_scad_export test_cubeiform test_topo test_edge_profile test_bezier_canvas test_bezier_editor test_scad_runner
+    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_bezier_fit test_scad_export test_cubeiform test_sexpr test_eda_schematic test_eda_pcb test_eda_library test_cubeiform_eda test_topo test_edge_profile test_bezier_canvas test_bezier_editor test_scad_runner
     COMMENT "Building and running all DunCAD tests"
 )
