@@ -81,6 +81,8 @@ add_library(dc_core STATIC
     src/eda/eda_cubeiform_export.c
     src/eda/eda_ratsnest.c
     src/cubeiform/cubeiform_eda.c
+    src/voxel/voxel.c
+    src/voxel/sdf.c
 )
 target_include_directories(dc_core PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(dc_core
@@ -189,6 +191,9 @@ dc_add_test(test_eda_library      tests/test_eda_library.c)
 
 # Cubeiform EDA test
 dc_add_test(test_cubeiform_eda    tests/test_cubeiform_eda.c)
+
+# Voxel test
+dc_add_test(test_voxel            tests/test_voxel.c)
 
 # Pass test data directory to EDA tests
 set(DC_EDA_TEST_TARGETS test_sexpr test_eda_schematic test_eda_pcb test_eda_library test_cubeiform_eda)
@@ -324,6 +329,6 @@ set_tests_properties(test_scad_runner PROPERTIES
 # ---------------------------------------------------------------------------
 add_custom_target(tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_bezier_fit test_scad_export test_cubeiform test_sexpr test_eda_schematic test_eda_pcb test_eda_library test_cubeiform_eda test_topo test_edge_profile test_bezier_canvas test_bezier_editor test_scad_runner
+    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_bezier_fit test_scad_export test_cubeiform test_sexpr test_eda_schematic test_eda_pcb test_eda_library test_cubeiform_eda test_voxel test_topo test_edge_profile test_bezier_canvas test_bezier_editor test_scad_runner
     COMMENT "Building and running all DunCAD tests"
 )
