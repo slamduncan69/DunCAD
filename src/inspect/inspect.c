@@ -20,6 +20,8 @@
 #include "eda_ui/sch_symbol_render.h"
 #include "eda_ui/pcb_footprint_render.h"
 #include "eda/eda_library.h"
+#include "voxel/voxel.h"
+#include "voxel/sdf.h"
 #include "eda/eda_ratsnest.h"
 #include "core/string_builder.h"
 #include "core/error.h"
@@ -1634,6 +1636,138 @@ static char *cmd_eda_fp_list(void) {
     return dc_sb_take(sb);
 }
 
+/* =========================================================================
+ * Voxel commands
+ * ========================================================================= */
+
+/* Global voxel grid — persists across commands */
+static DC_VoxelGrid *s_voxel_grid = NULL;
+
+/* voxel_sphere <cx> <cy> <cz> <radius> [resolution] [cell_size]
+ * Create a sphere SDF, activate, color by normal, display in viewport. */
+static char *cmd_voxel_sphere(const char *args) {
+    float cx = 0, cy = 0, cz = 0, radius = 10;
+    int res = 32;
+    float cs = 1.0f;
+    sscanf(args, "%f %f %f %f %d %f", &cx, &cy, &cz, &radius, &res, &cs);
+
+    dc_voxel_grid_free(s_voxel_grid);
+    s_voxel_grid = dc_voxel_grid_new(res, res, res, cs);
+    if (!s_voxel_grid) return strdup("{\"error\":\"grid alloc failed\"}\n");
+
+    dc_sdf_sphere(s_voxel_grid, cx, cy, cz, radius);
+    dc_sdf_activate_color(s_voxel_grid, 200, 80, 80);
+    dc_sdf_color_by_normal(s_voxel_grid);
+
+    /* Display in viewport */
+    DC_GlViewport *vp = get_viewport();
+    if (vp)
+        dc_gl_viewport_set_voxel_grid(vp, s_voxel_grid);
+
+    size_t active = dc_voxel_grid_active_count(s_voxel_grid);
+    char *resp = malloc(256);
+    snprintf(resp, 256, "{\"ok\":true,\"active\":%zu,\"resolution\":%d,\"cell_size\":%.2f}\n",
+             active, res, cs);
+    return resp;
+}
+
+/* voxel_box <x0> <y0> <z0> <x1> <y1> <z1> [resolution] [cell_size] */
+static char *cmd_voxel_box(const char *args) {
+    float x0 = 0, y0 = 0, z0 = 0, x1 = 10, y1 = 10, z1 = 10;
+    int res = 32;
+    float cs = 1.0f;
+    sscanf(args, "%f %f %f %f %f %f %d %f", &x0, &y0, &z0, &x1, &y1, &z1, &res, &cs);
+
+    dc_voxel_grid_free(s_voxel_grid);
+    s_voxel_grid = dc_voxel_grid_new(res, res, res, cs);
+    if (!s_voxel_grid) return strdup("{\"error\":\"grid alloc failed\"}\n");
+
+    dc_sdf_box(s_voxel_grid, x0, y0, z0, x1, y1, z1);
+    dc_sdf_activate_color(s_voxel_grid, 80, 80, 200);
+    dc_sdf_color_by_normal(s_voxel_grid);
+
+    DC_GlViewport *vp = get_viewport();
+    if (vp)
+        dc_gl_viewport_set_voxel_grid(vp, s_voxel_grid);
+
+    size_t active = dc_voxel_grid_active_count(s_voxel_grid);
+    char *resp = malloc(256);
+    snprintf(resp, 256, "{\"ok\":true,\"active\":%zu}\n", active);
+    return resp;
+}
+
+/* voxel_csg <op> — combine current grid with a sphere.
+ * op: "union", "subtract", "intersect"
+ * Adds a sphere at grid center with radius = grid_size/4 */
+static char *cmd_voxel_csg(const char *args) {
+    if (!s_voxel_grid) return strdup("{\"error\":\"no voxel grid — create one first\"}\n");
+    if (!args || !*args) return strdup("{\"error\":\"usage: voxel_csg union|subtract|intersect\"}\n");
+
+    char op[32];
+    sscanf(args, "%31s", op);
+
+    int res = dc_voxel_grid_size_x(s_voxel_grid);
+    float cs = dc_voxel_grid_cell_size(s_voxel_grid);
+    float center = res * cs * 0.5f;
+    float radius = res * cs * 0.25f;
+
+    DC_VoxelGrid *b = dc_voxel_grid_new(res, res, res, cs);
+    if (!b) return strdup("{\"error\":\"alloc failed\"}\n");
+    dc_sdf_sphere(b, center, center, center, radius);
+
+    DC_VoxelGrid *out = dc_voxel_grid_new(res, res, res, cs);
+    if (!out) { dc_voxel_grid_free(b); return strdup("{\"error\":\"alloc failed\"}\n"); }
+
+    int rc;
+    if (strcmp(op, "union") == 0)          rc = dc_sdf_union(s_voxel_grid, b, out);
+    else if (strcmp(op, "subtract") == 0)  rc = dc_sdf_subtract(s_voxel_grid, b, out);
+    else if (strcmp(op, "intersect") == 0) rc = dc_sdf_intersect(s_voxel_grid, b, out);
+    else { dc_voxel_grid_free(b); dc_voxel_grid_free(out);
+           return strdup("{\"error\":\"unknown op — use union|subtract|intersect\"}\n"); }
+
+    dc_voxel_grid_free(b);
+    if (rc != 0) { dc_voxel_grid_free(out); return strdup("{\"error\":\"CSG failed\"}\n"); }
+
+    dc_sdf_activate(out);
+    dc_sdf_color_by_normal(out);
+
+    dc_voxel_grid_free(s_voxel_grid);
+    s_voxel_grid = out;
+
+    DC_GlViewport *vp = get_viewport();
+    if (vp) dc_gl_viewport_set_voxel_grid(vp, s_voxel_grid);
+
+    size_t active = dc_voxel_grid_active_count(s_voxel_grid);
+    char *resp = malloc(256);
+    snprintf(resp, 256, "{\"ok\":true,\"op\":\"%s\",\"active\":%zu}\n", op, active);
+    return resp;
+}
+
+/* voxel_clear — remove voxels from viewport */
+static char *cmd_voxel_clear(void) {
+    DC_GlViewport *vp = get_viewport();
+    if (vp) dc_gl_viewport_set_voxel_grid(vp, NULL);
+    dc_voxel_grid_free(s_voxel_grid);
+    s_voxel_grid = NULL;
+    return strdup("{\"ok\":true}\n");
+}
+
+/* voxel_state — info about current voxel grid */
+static char *cmd_voxel_state(void) {
+    if (!s_voxel_grid) return strdup("{\"loaded\":false}\n");
+    int sx = dc_voxel_grid_size_x(s_voxel_grid);
+    int sy = dc_voxel_grid_size_y(s_voxel_grid);
+    int sz = dc_voxel_grid_size_z(s_voxel_grid);
+    float cs = dc_voxel_grid_cell_size(s_voxel_grid);
+    size_t active = dc_voxel_grid_active_count(s_voxel_grid);
+    char *resp = malloc(256);
+    snprintf(resp, 256,
+             "{\"loaded\":true,\"size\":[%d,%d,%d],\"cell_size\":%.3f,"
+             "\"active\":%zu,\"total\":%d}\n",
+             sx, sy, sz, cs, active, sx*sy*sz);
+    return resp;
+}
+
 /* -------------------------------------------------------------------------
  * Command dispatch
  * ---------------------------------------------------------------------- */
@@ -1762,6 +1896,13 @@ dispatch(const char *cmd)
     if (strcmp(name, "eda_fp_list")        == 0) return cmd_eda_fp_list();
     if (strcmp(name, "eda_fp_lib_list")    == 0) return cmd_eda_fp_lib_list();
     if (strcmp(name, "eda_fp_lib_footprints") == 0) return cmd_eda_fp_lib_footprints(args);
+
+    /* Voxel */
+    if (strcmp(name, "voxel_sphere")       == 0) return cmd_voxel_sphere(args);
+    if (strcmp(name, "voxel_box")          == 0) return cmd_voxel_box(args);
+    if (strcmp(name, "voxel_csg")          == 0) return cmd_voxel_csg(args);
+    if (strcmp(name, "voxel_clear")        == 0) return cmd_voxel_clear();
+    if (strcmp(name, "voxel_state")        == 0) return cmd_voxel_state();
 
     /* Meta */
     if (strcmp(name, "help") == 0) return cmd_help();

@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gl/gl_viewport.h"
+#include "gl/gl_voxel.h"
+#include "voxel/voxel.h"
 #include "gl/stl_loader.h"
 #include "gl/dc_topo.h"
 #include "core/log.h"
@@ -273,6 +275,11 @@ struct DC_GlViewport {
 
     /* Interaction lock (AI working — block picking/moving) */
     int          locked;
+
+    /* Voxel rendering */
+    DC_GlVoxelBuf *voxel_buf;     /* NULL if no voxels loaded */
+    int             voxel_pending; /* 1 if grid needs upload on next frame */
+    const DC_VoxelGrid *voxel_grid_pending; /* grid to upload */
 };
 
 /* Forward declarations for lazy topology builders */
@@ -542,6 +549,8 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
     float eye[3];
     camera_eye(vp, eye);
     float up[3] = {0, 1, 0};
+    float light_dir[3] = {0.5f, 0.8f, 0.3f};
+    vec3_normalize(light_dir);
 
     float view[16], proj[16], vp_mat[16];
     mat4_lookat(view, eye, vp->cam_center, up);
@@ -598,8 +607,6 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         float nmat[9] = {1,0,0, 0,1,0, 0,0,1};
         glUniformMatrix3fv(loc_nmat, 1, GL_FALSE, nmat);
 
-        float light_dir[3] = {0.5f, 0.8f, 0.3f};
-        vec3_normalize(light_dir);
         glUniform3fv(loc_light, 1, light_dir);
         glUniform3fv(loc_view, 1, eye);
 
@@ -793,6 +800,23 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
 
     glBindVertexArray(0);
     glUseProgram(0);
+
+    /* --- Voxel rendering --- */
+    if (vp->voxel_pending && vp->voxel_grid_pending) {
+        if (!vp->voxel_buf)
+            vp->voxel_buf = dc_gl_voxel_buf_new();
+        if (vp->voxel_buf) {
+            dc_gl_voxel_buf_upload(vp->voxel_buf, vp->voxel_grid_pending);
+            dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+                   "gl_viewport: uploaded %d voxel instances",
+                   dc_gl_voxel_buf_instance_count(vp->voxel_buf));
+        }
+        vp->voxel_pending = 0;
+        vp->voxel_grid_pending = NULL;
+    }
+    if (vp->voxel_buf && dc_gl_voxel_buf_instance_count(vp->voxel_buf) > 0) {
+        dc_gl_voxel_buf_draw(vp->voxel_buf, vp_mat, light_dir, eye, vp->mesh_prog);
+    }
 
     /* Capture screenshot if requested */
     if (vp->capture_path) {
@@ -2075,6 +2099,28 @@ int
 dc_gl_viewport_get_locked(DC_GlViewport *vp)
 {
     return vp ? vp->locked : 0;
+}
+
+/* =========================================================================
+ * Voxel rendering
+ * ========================================================================= */
+void
+dc_gl_viewport_set_voxel_grid(DC_GlViewport *vp, const DC_VoxelGrid *grid)
+{
+    if (!vp) return;
+    if (!grid) {
+        /* Clear voxels */
+        dc_gl_voxel_buf_free(vp->voxel_buf);
+        vp->voxel_buf = NULL;
+        vp->voxel_pending = 0;
+        vp->voxel_grid_pending = NULL;
+        gtk_widget_queue_draw(vp->gl_area);
+        return;
+    }
+    /* Defer upload to next GL render (must be in GL context) */
+    vp->voxel_grid_pending = grid;
+    vp->voxel_pending = 1;
+    gtk_widget_queue_draw(vp->gl_area);
 }
 
 /* =========================================================================

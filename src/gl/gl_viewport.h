@@ -130,6 +130,15 @@ void dc_gl_viewport_select_object_quiet(DC_GlViewport *vp, int obj_idx);
 void dc_gl_viewport_set_locked(DC_GlViewport *vp, int locked);
 int  dc_gl_viewport_get_locked(DC_GlViewport *vp);
 
+/* ---- Voxel rendering ---- */
+
+struct DC_VoxelGrid;
+
+/* Set a voxel grid to render in the viewport. Uploads to GPU on next frame.
+ * Pass NULL to clear. The grid data is copied to GPU — caller retains ownership. */
+void dc_gl_viewport_set_voxel_grid(DC_GlViewport *vp,
+                                     const struct DC_VoxelGrid *grid);
+
 /* ---- Selection modes ---- */
 
 typedef enum {
