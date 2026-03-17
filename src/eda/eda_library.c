@@ -45,7 +45,8 @@ struct DC_ELibrary {
     DC_Array *symbols;    /* SymEntry */
     DC_Array *footprints; /* SymEntry (reuse same struct) */
     DC_Array *files;      /* LibFile */
-    DC_Array *pending;    /* PendingLib — registered but not loaded */
+    DC_Array *pending;    /* PendingLib — registered but not loaded (symbols) */
+    DC_Array *fp_pending; /* PendingLib — registered but not loaded (footprint dirs) */
 };
 
 /* ---- Cleanup ---- */
@@ -100,8 +101,9 @@ dc_elibrary_new(void)
     lib->footprints = dc_array_new(sizeof(SymEntry));
     lib->files      = dc_array_new(sizeof(LibFile));
     lib->pending    = dc_array_new(sizeof(PendingLib));
+    lib->fp_pending = dc_array_new(sizeof(PendingLib));
 
-    if (!lib->symbols || !lib->footprints || !lib->files || !lib->pending) {
+    if (!lib->symbols || !lib->footprints || !lib->files || !lib->pending || !lib->fp_pending) {
         dc_elibrary_free(lib);
         return NULL;
     }
@@ -131,6 +133,11 @@ dc_elibrary_free(DC_ELibrary *lib)
         for (size_t i = 0; i < dc_array_length(lib->pending); i++)
             pending_lib_cleanup(dc_array_get(lib->pending, i));
         dc_array_free(lib->pending);
+    }
+    if (lib->fp_pending) {
+        for (size_t i = 0; i < dc_array_length(lib->fp_pending); i++)
+            pending_lib_cleanup(dc_array_get(lib->fp_pending, i));
+        dc_array_free(lib->fp_pending);
     }
     free(lib);
 }
@@ -318,6 +325,10 @@ dc_elibrary_load_footprint(DC_ELibrary *lib, const char *path, DC_Error *err)
     return 0;
 }
 
+/* Forward declarations for lazy loading */
+static int ensure_lib_loaded(DC_ELibrary *lib, const char *lib_name);
+static int ensure_fp_lib_loaded(DC_ELibrary *lib, const char *lib_name);
+
 /* =========================================================================
  * Lookup
  * ========================================================================= */
@@ -374,6 +385,17 @@ dc_elibrary_find_footprint(const DC_ELibrary *lib, const char *lib_id)
 
     const char *colon = strchr(lib_id, ':');
     const char *fp_name = colon ? colon + 1 : lib_id;
+
+    /* Lazy-load footprint library if needed */
+    if (colon) {
+        char lname_buf[256];
+        size_t lib_len = (size_t)(colon - lib_id);
+        if (lib_len < sizeof(lname_buf)) {
+            memcpy(lname_buf, lib_id, lib_len);
+            lname_buf[lib_len] = '\0';
+            ensure_fp_lib_loaded((DC_ELibrary *)lib, lname_buf);
+        }
+    }
 
     for (size_t i = 0; i < dc_array_length(lib->footprints); i++) {
         SymEntry *e = dc_array_get(lib->footprints, i);
@@ -566,6 +588,9 @@ dc_elibrary_load_footprint_dir(DC_ELibrary *lib, const char *dir_path,
         return -1;
     }
 
+    /* Derive library name from directory (e.g. "Resistor_SMD.pretty" → "Resistor_SMD") */
+    char *dir_lib_name = lib_name_from_path(dir_path);
+
     int loaded = 0;
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
@@ -582,15 +607,170 @@ dc_elibrary_load_footprint_dir(DC_ELibrary *lib, const char *dir_path,
         fpath[plen] = '/';
         memcpy(fpath + plen + 1, ent->d_name, nlen + 1);
 
+        size_t before = dc_array_length(lib->footprints);
         DC_Error lerr = {0};
-        if (dc_elibrary_load_footprint(lib, fpath, &lerr) == 0)
+        if (dc_elibrary_load_footprint(lib, fpath, &lerr) == 0) {
             loaded++;
+            /* Override lib_name from file-derived to dir-derived */
+            if (dir_lib_name && dc_array_length(lib->footprints) > before) {
+                SymEntry *e = dc_array_get(lib->footprints,
+                                            dc_array_length(lib->footprints) - 1);
+                if (e) {
+                    free(e->lib_name);
+                    e->lib_name = strdup(dir_lib_name);
+                }
+            }
+        }
 
         free(fpath);
     }
 
     closedir(dir);
+    free(dir_lib_name);
     return loaded;
+}
+
+/* =========================================================================
+ * Footprint directory registration (lazy loading)
+ * ========================================================================= */
+
+int
+dc_elibrary_register_footprint_dir(DC_ELibrary *lib, const char *dir_path)
+{
+    if (!lib || !dir_path) return -1;
+
+    /* Derive lib name from dir: "/path/to/Resistor_SMD.pretty" → "Resistor_SMD" */
+    char *lname = lib_name_from_path(dir_path);
+    if (!lname) return -1;
+
+    /* Strip .pretty suffix if present */
+    char *dot = strrchr(lname, '.');
+    if (dot && strcmp(dot, ".pretty") == 0) {
+        /* lib_name_from_path already stripped the extension for us,
+         * but the dir name IS "Resistor_SMD.pretty" — we stripped ".pretty".
+         * Actually lib_name_from_path strips the last extension, so
+         * "Resistor_SMD.pretty" → "Resistor_SMD". Good. */
+    }
+
+    PendingLib pl = {
+        .path = strdup(dir_path),
+        .lib_name = lname,
+    };
+    if (!pl.path) { free(lname); return -1; }
+    dc_array_push(lib->fp_pending, &pl);
+    return 0;
+}
+
+/* Lazy-load a footprint library by name */
+static int
+ensure_fp_lib_loaded(DC_ELibrary *lib, const char *lib_name)
+{
+    if (!lib || !lib_name) return 0;
+
+    /* Check if any footprints from this lib are already loaded */
+    size_t nfp = dc_array_length(lib->footprints);
+    for (size_t i = 0; i < nfp; i++) {
+        SymEntry *e = dc_array_get(lib->footprints, i);
+        if (strcmp(e->lib_name, lib_name) == 0) return 1;
+    }
+
+    /* Find in pending and load */
+    size_t npend = dc_array_length(lib->fp_pending);
+    for (size_t i = 0; i < npend; i++) {
+        PendingLib *pl = dc_array_get(lib->fp_pending, i);
+        if (strcmp(pl->lib_name, lib_name) == 0) {
+            DC_Error err = {0};
+            dc_elibrary_load_footprint_dir(lib, pl->path, &err);
+            pending_lib_cleanup(pl);
+            dc_array_remove(lib->fp_pending, i);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+size_t
+dc_elibrary_fp_lib_count(const DC_ELibrary *lib)
+{
+    if (!lib) return 0;
+    /* Count distinct lib names from loaded footprints + pending fp dirs */
+    size_t count = 0;
+
+    /* Loaded: count distinct lib_names in footprints array */
+    size_t nfp = dc_array_length(lib->footprints);
+    for (size_t i = 0; i < nfp; i++) {
+        SymEntry *e = dc_array_get(lib->footprints, i);
+        int dup = 0;
+        for (size_t j = 0; j < i; j++) {
+            SymEntry *prev = dc_array_get(lib->footprints, j);
+            if (strcmp(e->lib_name, prev->lib_name) == 0) { dup = 1; break; }
+        }
+        if (!dup) count++;
+    }
+
+    /* Pending fp dirs */
+    size_t npend = dc_array_length(lib->fp_pending);
+    for (size_t i = 0; i < npend; i++) {
+        PendingLib *pl = dc_array_get(lib->fp_pending, i);
+        int dup = 0;
+        /* Check against loaded */
+        for (size_t j = 0; j < nfp; j++) {
+            SymEntry *e = dc_array_get(lib->footprints, j);
+            if (strcmp(e->lib_name, pl->lib_name) == 0) { dup = 1; break; }
+        }
+        if (!dup) {
+            for (size_t j = 0; j < i; j++) {
+                PendingLib *prev = dc_array_get(lib->fp_pending, j);
+                if (strcmp(pl->lib_name, prev->lib_name) == 0) { dup = 1; break; }
+            }
+        }
+        if (!dup) count++;
+    }
+    return count;
+}
+
+const char *
+dc_elibrary_fp_lib_name(const DC_ELibrary *lib, size_t index)
+{
+    if (!lib) return NULL;
+    size_t count = 0;
+
+    /* Loaded footprint lib names */
+    size_t nfp = dc_array_length(lib->footprints);
+    for (size_t i = 0; i < nfp; i++) {
+        SymEntry *e = dc_array_get(lib->footprints, i);
+        int dup = 0;
+        for (size_t j = 0; j < i; j++) {
+            SymEntry *prev = dc_array_get(lib->footprints, j);
+            if (strcmp(e->lib_name, prev->lib_name) == 0) { dup = 1; break; }
+        }
+        if (!dup) {
+            if (count == index) return e->lib_name;
+            count++;
+        }
+    }
+
+    /* Pending fp dirs */
+    size_t npend = dc_array_length(lib->fp_pending);
+    for (size_t i = 0; i < npend; i++) {
+        PendingLib *pl = dc_array_get(lib->fp_pending, i);
+        int dup = 0;
+        for (size_t j = 0; j < nfp; j++) {
+            SymEntry *e = dc_array_get(lib->footprints, j);
+            if (strcmp(e->lib_name, pl->lib_name) == 0) { dup = 1; break; }
+        }
+        if (!dup) {
+            for (size_t j = 0; j < i; j++) {
+                PendingLib *prev = dc_array_get(lib->fp_pending, j);
+                if (strcmp(pl->lib_name, prev->lib_name) == 0) { dup = 1; break; }
+            }
+        }
+        if (!dup) {
+            if (count == index) return pl->lib_name;
+            count++;
+        }
+    }
+    return NULL;
 }
 
 /* =========================================================================

@@ -112,6 +112,17 @@ const char *dc_elibrary_footprint_lib_name(const DC_ELibrary *lib, size_t index)
 int dc_elibrary_load_footprint_dir(DC_ELibrary *lib, const char *dir_path,
                                      DC_Error *err);
 
+/* Register a .pretty footprint directory without loading.
+ * Footprints are loaded on demand when accessed. O(1) per call. */
+int dc_elibrary_register_footprint_dir(DC_ELibrary *lib, const char *dir_path);
+
+/* Get the number of registered footprint library directories
+ * (loaded + pending). */
+size_t dc_elibrary_fp_lib_count(const DC_ELibrary *lib);
+
+/* Get the Nth footprint library name. Borrowed pointer. */
+const char *dc_elibrary_fp_lib_name(const DC_ELibrary *lib, size_t index);
+
 /* =========================================================================
  * Symbol property / pin inspection
  * ========================================================================= */

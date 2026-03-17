@@ -1565,6 +1565,53 @@ static char *cmd_eda_sym_info(const char *args) {
     return dc_sb_take(sb);
 }
 
+/* eda_fp_lib_list — JSON array of footprint library names (loaded + pending) */
+static char *cmd_eda_fp_lib_list(void) {
+    DC_ELibrary *lib = dc_app_window_get_library();
+    if (!lib) return strdup("{\"error\":\"no library\"}\n");
+
+    size_t count = dc_elibrary_fp_lib_count(lib);
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_append(sb, "{\"libraries\":[");
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) dc_sb_append(sb, ",");
+        const char *name = dc_elibrary_fp_lib_name(lib, i);
+        sb_append_json_str(sb, name ? name : "");
+    }
+    dc_sb_appendf(sb, "],\"count\":%zu}\n", count);
+    return dc_sb_take(sb);
+}
+
+/* eda_fp_lib_footprints <lib_name> — list footprints in a library (triggers lazy load) */
+static char *cmd_eda_fp_lib_footprints(const char *args) {
+    DC_ELibrary *lib = dc_app_window_get_library();
+    if (!lib) return strdup("{\"error\":\"no library\"}\n");
+    if (!args || !*args) return strdup("{\"error\":\"usage: eda_fp_lib_footprints <lib_name>\"}\n");
+
+    char lib_name[256];
+    sscanf(args, "%255s", lib_name);
+
+    /* Trigger lazy load by looking up a dummy footprint in this lib */
+    char dummy_id[512];
+    snprintf(dummy_id, sizeof(dummy_id), "%s:__trigger_load__", lib_name);
+    dc_elibrary_find_footprint(lib, dummy_id);
+
+    size_t total = dc_elibrary_footprint_count(lib);
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_appendf(sb, "{\"library\":\"%s\",\"footprints\":[", lib_name);
+    int added = 0;
+    for (size_t i = 0; i < total; i++) {
+        const char *lname = dc_elibrary_footprint_lib_name(lib, i);
+        if (!lname || strcmp(lname, lib_name) != 0) continue;
+        if (added > 0) dc_sb_append(sb, ",");
+        const char *name = dc_elibrary_footprint_name(lib, i);
+        sb_append_json_str(sb, name ? name : "");
+        added++;
+    }
+    dc_sb_appendf(sb, "],\"count\":%d}\n", added);
+    return dc_sb_take(sb);
+}
+
 /* eda_fp_list — JSON array of loaded footprint lib:name entries */
 static char *cmd_eda_fp_list(void) {
     DC_ELibrary *lib = dc_app_window_get_library();
@@ -1713,6 +1760,8 @@ dispatch(const char *cmd)
     if (strcmp(name, "eda_sym_info")       == 0) return cmd_eda_sym_info(args);
     if (strcmp(name, "eda_fp_preview")     == 0) return cmd_eda_fp_preview(args);
     if (strcmp(name, "eda_fp_list")        == 0) return cmd_eda_fp_list();
+    if (strcmp(name, "eda_fp_lib_list")    == 0) return cmd_eda_fp_lib_list();
+    if (strcmp(name, "eda_fp_lib_footprints") == 0) return cmd_eda_fp_lib_footprints(args);
 
     /* Meta */
     if (strcmp(name, "help") == 0) return cmd_help();

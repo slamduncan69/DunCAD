@@ -189,6 +189,25 @@ ensure_library_loaded(void)
                "Could not open KiCad symbols directory: %s", lib_dir);
     }
 
+    /* Register footprint directories (lazy — no scanning yet) */
+    const char *fp_dir = "/usr/share/kicad/footprints/";
+    GDir *fp_gdir = g_dir_open(fp_dir, 0, NULL);
+    if (fp_gdir) {
+        const gchar *name;
+        int fp_count = 0;
+        while ((name = g_dir_read_name(fp_gdir)) != NULL) {
+            if (!g_str_has_suffix(name, ".pretty")) continue;
+            char path[512];
+            snprintf(path, sizeof(path), "%s%s", fp_dir, name);
+            if (dc_elibrary_register_footprint_dir(s_eda_lib, path) == 0)
+                fp_count++;
+        }
+        g_dir_close(fp_gdir);
+        dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA,
+               "Registered %d footprint libraries (lazy loading)",
+               fp_count);
+    }
+
     return s_eda_lib;
 }
 
