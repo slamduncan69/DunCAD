@@ -1784,6 +1784,31 @@ static char *cmd_voxel_resolution(const char *args) {
     return resp;
 }
 
+/* voxel_blocky [0|1] — toggle blocky/smooth rendering */
+static char *cmd_voxel_blocky(const char *args) {
+    DC_GlViewport *vp = get_viewport();
+    if (!vp) return strdup("{\"error\":\"no viewport\"}\n");
+
+    /* Get the voxel buf from the viewport — we need to expose it or
+     * store a reference. For now, use the global s_voxel_grid approach:
+     * the voxel_buf is managed by the viewport. We need a direct accessor. */
+
+    /* Simpler: store blocky state, apply on next upload */
+    if (args && *args) {
+        int val = atoi(args);
+        /* We need access to the DC_GlVoxelBuf. Access via viewport internals
+         * is not clean. Let's add a viewport-level API. */
+        dc_gl_viewport_set_voxel_blocky(vp, val);
+        char *resp = malloc(128);
+        snprintf(resp, 128, "{\"ok\":true,\"blocky\":%d}\n", val ? 1 : 0);
+        return resp;
+    }
+    int val = dc_gl_viewport_get_voxel_blocky(vp);
+    char *resp = malloc(128);
+    snprintf(resp, 128, "{\"blocky\":%d}\n", val);
+    return resp;
+}
+
 /* voxel_state — info about current voxel grid */
 static char *cmd_voxel_state(void) {
     if (!s_voxel_grid) return strdup("{\"loaded\":false}\n");
@@ -1936,6 +1961,7 @@ dispatch(const char *cmd)
     if (strcmp(name, "voxel_clear")        == 0) return cmd_voxel_clear();
     if (strcmp(name, "voxel_state")        == 0) return cmd_voxel_state();
     if (strcmp(name, "voxel_resolution")   == 0) return cmd_voxel_resolution(args);
+    if (strcmp(name, "voxel_blocky")      == 0) return cmd_voxel_blocky(args);
 
     /* Meta */
     if (strcmp(name, "help") == 0) return cmd_help();

@@ -150,6 +150,7 @@ struct DC_GlVoxelBuf {
     float   cell_size;
     float   bbox_min[3];
     float   bbox_max[3];
+    int     blocky;       /* 0 = smooth (GL_LINEAR), 1 = blocky (GL_NEAREST) */
 };
 
 static const float QUAD_VERTS[] = {
@@ -368,4 +369,30 @@ dc_gl_voxel_buf_bounds(const DC_GlVoxelBuf *b, float *min_out, float *max_out)
     if (!b) return;
     if (min_out) { min_out[0] = b->bbox_min[0]; min_out[1] = b->bbox_min[1]; min_out[2] = b->bbox_min[2]; }
     if (max_out) { max_out[0] = b->bbox_max[0]; max_out[1] = b->bbox_max[1]; max_out[2] = b->bbox_max[2]; }
+}
+
+void
+dc_gl_voxel_buf_set_blocky(DC_GlVoxelBuf *b, int blocky)
+{
+    if (!b) return;
+    b->blocky = blocky ? 1 : 0;
+    /* Update texture filter modes immediately if textures exist */
+    GLint filter = blocky ? GL_NEAREST : GL_LINEAR;
+    if (b->color_tex) {
+        glBindTexture(GL_TEXTURE_3D, b->color_tex);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, filter);
+    }
+    if (b->sdf_tex) {
+        glBindTexture(GL_TEXTURE_3D, b->sdf_tex);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, filter);
+    }
+    glBindTexture(GL_TEXTURE_3D, 0);
+}
+
+int
+dc_gl_voxel_buf_get_blocky(const DC_GlVoxelBuf *b)
+{
+    return b ? b->blocky : 0;
 }

@@ -139,6 +139,10 @@ struct DC_VoxelGrid;
 void dc_gl_viewport_set_voxel_grid(DC_GlViewport *vp,
                                      const struct DC_VoxelGrid *grid);
 
+/* Toggle blocky (nearest-neighbor) vs smooth (trilinear) voxel rendering. */
+void dc_gl_viewport_set_voxel_blocky(DC_GlViewport *vp, int blocky);
+int  dc_gl_viewport_get_voxel_blocky(DC_GlViewport *vp);
+
 /* ---- Selection modes ---- */
 
 typedef enum {

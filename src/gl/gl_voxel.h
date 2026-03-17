@@ -52,4 +52,9 @@ void dc_gl_voxel_buf_draw(const DC_GlVoxelBuf *buf,
 void dc_gl_voxel_buf_bounds(const DC_GlVoxelBuf *buf,
                               float *min_out, float *max_out);
 
+/* Toggle between smooth (trilinear) and blocky (nearest) SDF sampling.
+ * 0 = smooth (GL_LINEAR), 1 = blocky (GL_NEAREST). Default: smooth. */
+void dc_gl_voxel_buf_set_blocky(DC_GlVoxelBuf *buf, int blocky);
+int  dc_gl_voxel_buf_get_blocky(const DC_GlVoxelBuf *buf);
+
 #endif /* DC_GL_VOXEL_H */

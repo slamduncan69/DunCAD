@@ -2154,6 +2154,22 @@ dc_gl_viewport_set_voxel_grid(DC_GlViewport *vp, const DC_VoxelGrid *grid)
     gtk_widget_queue_draw(vp->gl_area);
 }
 
+void
+dc_gl_viewport_set_voxel_blocky(DC_GlViewport *vp, int blocky)
+{
+    if (!vp) return;
+    if (vp->voxel_buf)
+        dc_gl_voxel_buf_set_blocky(vp->voxel_buf, blocky);
+    gtk_widget_queue_draw(vp->gl_area);
+}
+
+int
+dc_gl_viewport_get_voxel_blocky(DC_GlViewport *vp)
+{
+    if (!vp || !vp->voxel_buf) return 0;
+    return dc_gl_voxel_buf_get_blocky(vp->voxel_buf);
+}
+
 /* =========================================================================
  * Selection mode + topology
  * ========================================================================= */
