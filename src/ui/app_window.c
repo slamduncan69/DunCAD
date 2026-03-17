@@ -1083,6 +1083,12 @@ dc_app_window_get_eda_view(GtkWidget *window)
     return g_object_get_data(G_OBJECT(window), "dc-eda-view");
 }
 
+DC_ELibrary *
+dc_app_window_get_library(void)
+{
+    return ensure_library_loaded();
+}
+
 void
 dc_app_window_set_tab(GtkWidget *window, const char *tab_name)
 {

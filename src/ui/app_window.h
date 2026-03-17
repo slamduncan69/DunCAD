@@ -86,4 +86,7 @@ struct DC_EdaView *dc_app_window_get_eda_view(GtkWidget *window);
  * ---------------------------------------------------------------------- */
 void dc_app_window_set_tab(GtkWidget *window, const char *tab_name);
 
+/* Get the global EDA library (lazy-loaded). May return NULL. */
+struct DC_ELibrary *dc_app_window_get_library(void);
+
 #endif /* DC_APP_WINDOW_H */

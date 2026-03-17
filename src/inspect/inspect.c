@@ -17,6 +17,9 @@
 #include "eda_ui/sch_canvas.h"
 #include "eda_ui/pcb_editor.h"
 #include "eda_ui/pcb_canvas.h"
+#include "eda_ui/sch_symbol_render.h"
+#include "eda_ui/pcb_footprint_render.h"
+#include "eda/eda_library.h"
 #include "eda/eda_ratsnest.h"
 #include "core/string_builder.h"
 #include "core/error.h"
@@ -1396,6 +1399,196 @@ static char *cmd_pcb_export_dcad(const char *args) {
     return dc_sb_take(sb);
 }
 
+/* =========================================================================
+ * EDA Library / Browser / Preview inspect commands
+ * ========================================================================= */
+
+/* pcb_render <path> [width] [height] */
+static char *cmd_pcb_render(const char *args) {
+    DC_EdaView *ev = get_eda_view();
+    if (!ev) return strdup("{\"error\":\"no eda view\"}\n");
+
+    char path[512];
+    int w = 0, h = 0;
+    sscanf(args, "%511s %d %d", path, &w, &h);
+
+    DC_PcbCanvas *canvas = dc_pcb_editor_get_canvas(dc_eda_view_get_pcb_editor(ev));
+    int rc = dc_pcb_canvas_render_to_png(canvas, path, w, h);
+    if (rc != 0) return strdup("{\"error\":\"pcb render failed\"}\n");
+
+    char *resp = malloc(640);
+    snprintf(resp, 640, "{\"ok\":true,\"path\":\"%s\"}\n", path);
+    return resp;
+}
+
+/* eda_lib_list — JSON array of available library names */
+static char *cmd_eda_lib_list(void) {
+    DC_ELibrary *lib = dc_app_window_get_library();
+    if (!lib) return strdup("{\"error\":\"no library\"}\n");
+
+    size_t count = dc_elibrary_lib_count(lib);
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_append(sb, "{\"libraries\":[");
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) dc_sb_append(sb, ",");
+        const char *name = dc_elibrary_lib_name(lib, i);
+        sb_append_json_str(sb, name ? name : "");
+    }
+    dc_sb_appendf(sb, "],\"count\":%zu}\n", count);
+    return dc_sb_take(sb);
+}
+
+/* eda_lib_symbols <lib_name> — JSON array of symbol names in a library */
+static char *cmd_eda_lib_symbols(const char *args) {
+    DC_ELibrary *lib = dc_app_window_get_library();
+    if (!lib) return strdup("{\"error\":\"no library\"}\n");
+    if (!args || !*args) return strdup("{\"error\":\"usage: eda_lib_symbols <lib_name>\"}\n");
+
+    char lib_name[256];
+    sscanf(args, "%255s", lib_name);
+
+    size_t count = dc_elibrary_lib_symbol_count(lib, lib_name);
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_appendf(sb, "{\"library\":\"%s\",\"symbols\":[", lib_name);
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) dc_sb_append(sb, ",");
+        const char *name = dc_elibrary_lib_symbol_name(lib, lib_name, i);
+        sb_append_json_str(sb, name ? name : "");
+    }
+    dc_sb_appendf(sb, "],\"count\":%zu}\n", count);
+    return dc_sb_take(sb);
+}
+
+/* eda_sym_preview <lib_id> [path] [width] [height]
+ * Render a symbol to PNG using standalone preview renderer. */
+static char *cmd_eda_sym_preview(const char *args) {
+    DC_ELibrary *lib = dc_app_window_get_library();
+    if (!lib) return strdup("{\"error\":\"no library\"}\n");
+
+    char lib_id[256];
+    char path[512] = "/tmp/duncad-sym-preview.png";
+    int w = 400, h = 300;
+    int n = sscanf(args, "%255s %511s %d %d", lib_id, path, &w, &h);
+    if (n < 1 || !*lib_id)
+        return strdup("{\"error\":\"usage: eda_sym_preview <lib_id> [path] [w] [h]\"}\n");
+
+    const DC_Sexpr *sym = dc_elibrary_find_symbol(lib, lib_id);
+    if (!sym) {
+        char *resp = malloc(512);
+        snprintf(resp, 512, "{\"error\":\"symbol not found: %s\"}\n", lib_id);
+        return resp;
+    }
+
+    /* Render to Cairo image surface */
+    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    cairo_t *cr = cairo_create(surf);
+
+    /* Dark background */
+    cairo_set_source_rgb(cr, 0.12, 0.12, 0.14);
+    cairo_rectangle(cr, 0, 0, w, h);
+    cairo_fill(cr);
+
+    dc_sch_symbol_render_preview(cr, sym, 0, 0, (double)w, (double)h);
+
+    cairo_destroy(cr);
+    cairo_surface_write_to_png(surf, path);
+    cairo_surface_destroy(surf);
+
+    char *resp = malloc(1024);
+    snprintf(resp, 1024, "{\"ok\":true,\"path\":\"%s\",\"lib_id\":\"%s\"}\n", path, lib_id);
+    return resp;
+}
+
+/* eda_fp_preview <lib_id> [path] [width] [height]
+ * Render a footprint to PNG using standalone preview renderer. */
+static char *cmd_eda_fp_preview(const char *args) {
+    DC_ELibrary *lib = dc_app_window_get_library();
+    if (!lib) return strdup("{\"error\":\"no library\"}\n");
+
+    char lib_id[256];
+    char path[512] = "/tmp/duncad-fp-preview.png";
+    int w = 400, h = 300;
+    int n = sscanf(args, "%255s %511s %d %d", lib_id, path, &w, &h);
+    if (n < 1 || !*lib_id)
+        return strdup("{\"error\":\"usage: eda_fp_preview <lib_id> [path] [w] [h]\"}\n");
+
+    const DC_Sexpr *fp = dc_elibrary_find_footprint(lib, lib_id);
+    if (!fp) {
+        char *resp = malloc(512);
+        snprintf(resp, 512, "{\"error\":\"footprint not found: %s\"}\n", lib_id);
+        return resp;
+    }
+
+    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    cairo_t *cr = cairo_create(surf);
+
+    cairo_set_source_rgb(cr, 0.1, 0.15, 0.1);
+    cairo_rectangle(cr, 0, 0, w, h);
+    cairo_fill(cr);
+
+    dc_pcb_footprint_render_preview(cr, fp, 0, 0, (double)w, (double)h);
+
+    cairo_destroy(cr);
+    cairo_surface_write_to_png(surf, path);
+    cairo_surface_destroy(surf);
+
+    char *resp = malloc(1024);
+    snprintf(resp, 1024, "{\"ok\":true,\"path\":\"%s\",\"lib_id\":\"%s\"}\n", path, lib_id);
+    return resp;
+}
+
+/* eda_sym_info <lib_id> — symbol properties + pin count */
+static char *cmd_eda_sym_info(const char *args) {
+    DC_ELibrary *lib = dc_app_window_get_library();
+    if (!lib) return strdup("{\"error\":\"no library\"}\n");
+
+    char lib_id[256];
+    if (!args || sscanf(args, "%255s", lib_id) != 1)
+        return strdup("{\"error\":\"usage: eda_sym_info <lib_id>\"}\n");
+
+    const DC_Sexpr *sym = dc_elibrary_find_symbol(lib, lib_id);
+    if (!sym) return strdup("{\"error\":\"symbol not found\"}\n");
+
+    const char *desc = dc_elibrary_symbol_property(sym, "Description");
+    const char *ref  = dc_elibrary_symbol_property(sym, "Reference");
+    const char *fp   = dc_elibrary_symbol_property(sym, "Footprint");
+    const char *val  = dc_elibrary_symbol_property(sym, "Value");
+    size_t pins = dc_elibrary_symbol_pin_count(sym);
+
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_append(sb, "{");
+    dc_sb_append(sb, "\"lib_id\":"); sb_append_json_str(sb, lib_id);
+    dc_sb_appendf(sb, ",\"pins\":%zu", pins);
+    dc_sb_append(sb, ",\"reference\":"); sb_append_json_str(sb, ref ? ref : "");
+    dc_sb_append(sb, ",\"value\":"); sb_append_json_str(sb, val ? val : "");
+    dc_sb_append(sb, ",\"footprint\":"); sb_append_json_str(sb, fp ? fp : "");
+    dc_sb_append(sb, ",\"description\":"); sb_append_json_str(sb, desc ? desc : "");
+    dc_sb_append(sb, "}\n");
+    return dc_sb_take(sb);
+}
+
+/* eda_fp_list — JSON array of loaded footprint lib:name entries */
+static char *cmd_eda_fp_list(void) {
+    DC_ELibrary *lib = dc_app_window_get_library();
+    if (!lib) return strdup("{\"error\":\"no library\"}\n");
+
+    size_t count = dc_elibrary_footprint_count(lib);
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_append(sb, "{\"footprints\":[");
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) dc_sb_append(sb, ",");
+        const char *name = dc_elibrary_footprint_name(lib, i);
+        const char *lname = dc_elibrary_footprint_lib_name(lib, i);
+        dc_sb_append(sb, "{\"name\":");
+        sb_append_json_str(sb, name ? name : "");
+        dc_sb_append(sb, ",\"lib\":");
+        sb_append_json_str(sb, lname ? lname : "");
+        dc_sb_append(sb, "}");
+    }
+    dc_sb_appendf(sb, "],\"count\":%zu}\n", count);
+    return dc_sb_take(sb);
+}
+
 /* -------------------------------------------------------------------------
  * Command dispatch
  * ---------------------------------------------------------------------- */
@@ -1513,6 +1706,15 @@ dispatch(const char *cmd)
     if (strcmp(name, "pcb_ratsnest")       == 0) return cmd_pcb_ratsnest();
     if (strcmp(name, "pcb_import_netlist") == 0) return cmd_pcb_import_netlist();
     if (strcmp(name, "pcb_export_dcad")    == 0) return cmd_pcb_export_dcad(args);
+    if (strcmp(name, "pcb_render")         == 0) return cmd_pcb_render(args);
+
+    /* EDA Library / Browser / Preview */
+    if (strcmp(name, "eda_lib_list")       == 0) return cmd_eda_lib_list();
+    if (strcmp(name, "eda_lib_symbols")    == 0) return cmd_eda_lib_symbols(args);
+    if (strcmp(name, "eda_sym_preview")    == 0) return cmd_eda_sym_preview(args);
+    if (strcmp(name, "eda_sym_info")       == 0) return cmd_eda_sym_info(args);
+    if (strcmp(name, "eda_fp_preview")     == 0) return cmd_eda_fp_preview(args);
+    if (strcmp(name, "eda_fp_list")        == 0) return cmd_eda_fp_list();
 
     /* Meta */
     if (strcmp(name, "help") == 0) return cmd_help();
