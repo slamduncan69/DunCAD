@@ -2,54 +2,53 @@
 #define DC_GL_VOXEL_H
 
 /*
- * gl_voxel.h — GPU-instanced voxel renderer for DC_GlViewport.
+ * gl_voxel.h — SDF raycast voxel renderer.
  *
- * Renders active voxels as instanced cubes. Each active voxel becomes
- * one instance with position (cell center) and color (RGB). Uses the
- * existing mesh shader with a model matrix per instance.
+ * Pure volumetric rendering. No mesh geometry. The entire scene is a
+ * 3D texture containing signed distance values. A fullscreen quad
+ * invokes a fragment shader that marches rays through the volume,
+ * finds surface intersections via SDF zero-crossings, computes normals
+ * from the SDF gradient, and lights the result with Phong shading.
+ *
+ * The voxel grid is uploaded as a GL_TEXTURE_3D. The shader reads it
+ * with trilinear interpolation, giving sub-voxel surface precision
+ * for free. No cubes. No triangles. No instancing. Just math and light.
  *
  * Usage:
  *   DC_GlVoxelBuf *buf = dc_gl_voxel_buf_new();
- *   dc_gl_voxel_buf_upload(buf, grid);   // builds GPU buffers
- *   dc_gl_voxel_buf_draw(buf, mvp, ...); // renders instanced cubes
+ *   dc_gl_voxel_buf_upload(buf, grid);
+ *   dc_gl_voxel_buf_draw(buf, view_proj_inv, eye, ...);
  *   dc_gl_voxel_buf_free(buf);
- *
- * The buf must be created/drawn from the GL context thread.
  */
 
 #include <epoxy/gl.h>
 
 struct DC_VoxelGrid;
 
-/* Opaque handle to GPU voxel buffers */
 typedef struct DC_GlVoxelBuf DC_GlVoxelBuf;
 
-/* Create a new voxel buffer (no GPU state yet — call upload). */
 DC_GlVoxelBuf *dc_gl_voxel_buf_new(void);
-
-/* Free GPU buffers and the struct. Safe with NULL. */
 void dc_gl_voxel_buf_free(DC_GlVoxelBuf *buf);
 
-/* Upload a voxel grid to GPU. Rebuilds all buffers.
- * Must be called from GL context. Returns 0 on success. */
+/* Upload voxel grid as 3D texture. Must be called from GL context. */
 int dc_gl_voxel_buf_upload(DC_GlVoxelBuf *buf,
                              const struct DC_VoxelGrid *grid);
 
-/* Get the number of active voxel instances. */
+/* Get active voxel count (from last upload). */
 int dc_gl_voxel_buf_instance_count(const DC_GlVoxelBuf *buf);
 
-/* Draw the voxel instances.
- * view_proj: 4x4 view-projection matrix (column-major)
- * light_dir: 3-float normalized light direction
- * view_pos:  3-float camera position (for specular)
- * mesh_prog: the compiled mesh shader program from gl_viewport */
+/* Draw via SDF raycast.
+ * view_proj_inv: inverse of view*projection matrix (to reconstruct rays)
+ * eye:           camera position in world space (3 floats)
+ * light_dir:     normalized light direction (3 floats)
+ * screen_w/h:    viewport pixel dimensions */
 void dc_gl_voxel_buf_draw(const DC_GlVoxelBuf *buf,
-                            const float *view_proj,
+                            const float *view_proj_inv,
+                            const float *eye,
                             const float *light_dir,
-                            const float *view_pos,
-                            GLuint mesh_prog);
+                            int screen_w, int screen_h);
 
-/* Get the world-space bounding box of uploaded voxels. */
+/* World-space bounding box of the volume. */
 void dc_gl_voxel_buf_bounds(const DC_GlVoxelBuf *buf,
                               float *min_out, float *max_out);
 
