@@ -9,6 +9,15 @@
 #include <string.h>
 #include <ctype.h>
 
+/* qsort comparator for C strings (via pointer-to-pointer) */
+static int
+cmp_strings(const void *a, const void *b)
+{
+    const char *sa = *(const char *const *)a;
+    const char *sb = *(const char *const *)b;
+    return strcmp(sa, sb);
+}
+
 /* =========================================================================
  * Three-pane library browser dialog
  *
@@ -72,10 +81,18 @@ populate_lib_list(BrowserCtx *ctx)
         gtk_list_box_remove(GTK_LIST_BOX(ctx->lib_list), child);
 
     size_t nlibs = dc_elibrary_lib_count(ctx->lib);
+    if (nlibs == 0) return;
+
+    /* Collect names and sort alphabetically */
+    const char **names = malloc(nlibs * sizeof(const char *));
+    if (!names) return;
+    for (size_t i = 0; i < nlibs; i++)
+        names[i] = dc_elibrary_lib_name(ctx->lib, i);
+    qsort(names, nlibs, sizeof(const char *), cmp_strings);
+
     for (size_t i = 0; i < nlibs; i++) {
-        const char *name = dc_elibrary_lib_name(ctx->lib, i);
-        if (!name) continue;
-        GtkWidget *label = gtk_label_new(name);
+        if (!names[i]) continue;
+        GtkWidget *label = gtk_label_new(names[i]);
         gtk_label_set_xalign(GTK_LABEL(label), 0.0);
         gtk_widget_set_margin_start(label, 6);
         gtk_widget_set_margin_end(label, 6);
@@ -83,6 +100,7 @@ populate_lib_list(BrowserCtx *ctx)
         gtk_widget_set_margin_bottom(label, 2);
         gtk_list_box_append(GTK_LIST_BOX(ctx->lib_list), label);
     }
+    free(names);
 }
 
 /* =========================================================================
@@ -98,10 +116,19 @@ populate_sym_list_for_lib(BrowserCtx *ctx, const char *lib_name)
     if (!lib_name) return;
 
     size_t count = dc_elibrary_lib_symbol_count(ctx->lib, lib_name);
-    for (size_t i = 0; i < count && i < 2000; i++) {
-        const char *name = dc_elibrary_lib_symbol_name(ctx->lib, lib_name, i);
-        if (!name) continue;
-        GtkWidget *label = gtk_label_new(name);
+    if (count == 0) return;
+    if (count > 2000) count = 2000;
+
+    /* Collect and sort symbol names */
+    const char **names = malloc(count * sizeof(const char *));
+    if (!names) return;
+    for (size_t i = 0; i < count; i++)
+        names[i] = dc_elibrary_lib_symbol_name(ctx->lib, lib_name, i);
+    qsort(names, count, sizeof(const char *), cmp_strings);
+
+    for (size_t i = 0; i < count; i++) {
+        if (!names[i]) continue;
+        GtkWidget *label = gtk_label_new(names[i]);
         gtk_label_set_xalign(GTK_LABEL(label), 0.0);
         gtk_widget_set_margin_start(label, 6);
         gtk_widget_set_margin_end(label, 6);
@@ -109,6 +136,7 @@ populate_sym_list_for_lib(BrowserCtx *ctx, const char *lib_name)
         gtk_widget_set_margin_bottom(label, 2);
         gtk_list_box_append(GTK_LIST_BOX(ctx->sym_list), label);
     }
+    free(names);
 }
 
 /* =========================================================================
@@ -287,36 +315,30 @@ on_search_changed(GtkSearchEntry *entry, gpointer userdata)
     update_preview(ctx, NULL);
 }
 
-static void
-on_sym_activated(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
+/* Build a lib_id result from the currently selected symbol row */
+static char *
+build_result_from_row(BrowserCtx *ctx, GtkListBoxRow *row)
 {
-    (void)box;
-    BrowserCtx *ctx = userdata;
-    if (!row) return;
-
+    if (!row) return NULL;
     GtkWidget *label = gtk_list_box_row_get_child(row);
-    if (!label) return;
+    if (!label) return NULL;
     const char *text = gtk_label_get_text(GTK_LABEL(label));
-    if (!text) return;
+    if (!text) return NULL;
 
-    free(ctx->result);
     if (ctx->searching) {
-        ctx->result = strdup(text);
+        return strdup(text);
     } else if (ctx->selected_lib) {
         size_t llen = strlen(ctx->selected_lib);
         size_t nlen = strlen(text);
-        ctx->result = malloc(llen + 1 + nlen + 1);
-        if (ctx->result) {
-            memcpy(ctx->result, ctx->selected_lib, llen);
-            ctx->result[llen] = ':';
-            memcpy(ctx->result + llen + 1, text, nlen + 1);
+        char *result = malloc(llen + 1 + nlen + 1);
+        if (result) {
+            memcpy(result, ctx->selected_lib, llen);
+            result[llen] = ':';
+            memcpy(result + llen + 1, text, nlen + 1);
         }
-    } else {
-        ctx->result = strdup(text);
+        return result;
     }
-
-    ctx->done = 1;
-    g_main_loop_quit(ctx->loop);
+    return strdup(text);
 }
 
 static void
@@ -325,10 +347,12 @@ on_ok_clicked(GtkButton *btn, gpointer userdata)
     (void)btn;
     BrowserCtx *ctx = userdata;
     GtkListBoxRow *row = gtk_list_box_get_selected_row(GTK_LIST_BOX(ctx->sym_list));
-    if (row) {
-        /* Simulate double-click on selected row */
-        on_sym_activated(GTK_LIST_BOX(ctx->sym_list), row, ctx);
-    }
+    if (!row) return; /* nothing selected — do nothing */
+
+    free(ctx->result);
+    ctx->result = build_result_from_row(ctx, row);
+    ctx->done = 1;
+    g_main_loop_quit(ctx->loop);
 }
 
 static void
@@ -413,7 +437,6 @@ dc_eda_library_browser_run(GtkWindow *parent,
     ctx.sym_list = gtk_list_box_new();
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(ctx.sym_list), GTK_SELECTION_SINGLE);
     g_signal_connect(ctx.sym_list, "row-selected", G_CALLBACK(on_sym_selected), &ctx);
-    g_signal_connect(ctx.sym_list, "row-activated", G_CALLBACK(on_sym_activated), &ctx);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sym_scroll), ctx.sym_list);
     gtk_frame_set_child(GTK_FRAME(sym_frame), sym_scroll);
     gtk_box_append(GTK_BOX(hbox), sym_frame);

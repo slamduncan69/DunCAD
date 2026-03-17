@@ -234,8 +234,8 @@ on_eda_add_symbol(GSimpleAction *action, GVariant *param, gpointer userdata)
     if (!ev) return;
 
     DC_ELibrary *lib = ensure_library_loaded();
-    if (!lib || dc_elibrary_symbol_count(lib) == 0) {
-        dc_log(DC_LOG_WARN, DC_LOG_EVENT_EDA, "No symbols loaded in library");
+    if (!lib || dc_elibrary_lib_count(lib) == 0) {
+        dc_log(DC_LOG_WARN, DC_LOG_EVENT_EDA, "No symbol libraries available");
         return;
     }
 
