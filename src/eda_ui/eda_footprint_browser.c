@@ -315,36 +315,29 @@ on_fp_search_changed(GtkSearchEntry *entry, gpointer userdata)
     update_fp_preview(ctx, NULL);
 }
 
-static void
-on_fp_activated(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
+static char *
+build_fp_result_from_row(FPBrowserCtx *ctx, GtkListBoxRow *row)
 {
-    (void)box;
-    FPBrowserCtx *ctx = userdata;
-    if (!row) return;
-
+    if (!row) return NULL;
     GtkWidget *label = gtk_list_box_row_get_child(row);
-    if (!label) return;
+    if (!label) return NULL;
     const char *text = gtk_label_get_text(GTK_LABEL(label));
-    if (!text) return;
+    if (!text) return NULL;
 
-    free(ctx->result);
     if (ctx->searching) {
-        ctx->result = strdup(text);
+        return strdup(text);
     } else if (ctx->selected_lib) {
         size_t llen = strlen(ctx->selected_lib);
         size_t nlen = strlen(text);
-        ctx->result = malloc(llen + 1 + nlen + 1);
-        if (ctx->result) {
-            memcpy(ctx->result, ctx->selected_lib, llen);
-            ctx->result[llen] = ':';
-            memcpy(ctx->result + llen + 1, text, nlen + 1);
+        char *result = malloc(llen + 1 + nlen + 1);
+        if (result) {
+            memcpy(result, ctx->selected_lib, llen);
+            result[llen] = ':';
+            memcpy(result + llen + 1, text, nlen + 1);
         }
-    } else {
-        ctx->result = strdup(text);
+        return result;
     }
-
-    ctx->done = 1;
-    g_main_loop_quit(ctx->loop);
+    return strdup(text);
 }
 
 static void
@@ -353,8 +346,12 @@ on_fp_ok_clicked(GtkButton *btn, gpointer userdata)
     (void)btn;
     FPBrowserCtx *ctx = userdata;
     GtkListBoxRow *row = gtk_list_box_get_selected_row(GTK_LIST_BOX(ctx->fp_list));
-    if (row)
-        on_fp_activated(GTK_LIST_BOX(ctx->fp_list), row, ctx);
+    if (!row) return;
+
+    free(ctx->result);
+    ctx->result = build_fp_result_from_row(ctx, row);
+    ctx->done = 1;
+    g_main_loop_quit(ctx->loop);
 }
 
 static void
@@ -435,7 +432,6 @@ dc_eda_footprint_browser_run(GtkWindow *parent, DC_ELibrary *lib)
     ctx.fp_list = gtk_list_box_new();
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(ctx.fp_list), GTK_SELECTION_SINGLE);
     g_signal_connect(ctx.fp_list, "row-selected", G_CALLBACK(on_fp_selected), &ctx);
-    g_signal_connect(ctx.fp_list, "row-activated", G_CALLBACK(on_fp_activated), &ctx);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(fp_scroll), ctx.fp_list);
     gtk_frame_set_child(GTK_FRAME(fp_frame), fp_scroll);
     gtk_box_append(GTK_BOX(hbox), fp_frame);
