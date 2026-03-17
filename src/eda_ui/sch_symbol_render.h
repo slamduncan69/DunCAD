@@ -23,4 +23,10 @@ void dc_sch_symbol_render(cairo_t *cr,
                            DC_ELibrary *lib,
                            int selected);
 
+/* Render a symbol definition as a standalone preview.
+ * Fits the symbol bbox into the rectangle (x,y,w,h) in Cairo user coords.
+ * No SchCanvas needed — uses a simple affine fit. */
+void dc_sch_symbol_render_preview(cairo_t *cr, const DC_Sexpr *sym_def,
+                                    double x, double y, double w, double h);
+
 #endif /* DC_SCH_SYMBOL_RENDER_H */

@@ -105,4 +105,44 @@ const char *dc_sexpr_value(const DC_Sexpr *node);
 /* Count direct children of a list node. Returns 0 for atom/string. */
 size_t dc_sexpr_child_count(const DC_Sexpr *node);
 
+/* =========================================================================
+ * Creation — build nodes programmatically (Phase 4A)
+ * ========================================================================= */
+
+/* Create an atom node (unquoted token). Value is copied. */
+DC_Sexpr *dc_sexpr_new_atom(const char *value);
+
+/* Create a string node (quoted). Value is copied. */
+DC_Sexpr *dc_sexpr_new_string(const char *value);
+
+/* Create an empty list node. Use dc_sexpr_add_child() to populate. */
+DC_Sexpr *dc_sexpr_new_list(void);
+
+/* Deep copy of a node and all descendants. Returns NULL on error. */
+DC_Sexpr *dc_sexpr_clone(const DC_Sexpr *node);
+
+/* =========================================================================
+ * Mutation — modify existing trees
+ * ========================================================================= */
+
+/* Append child to a list node. Takes ownership of child. Returns 0/-1. */
+int dc_sexpr_add_child(DC_Sexpr *parent, DC_Sexpr *child);
+
+/* Remove child at index from a list node. Frees the removed child. Returns 0/-1. */
+int dc_sexpr_remove_child(DC_Sexpr *parent, size_t index);
+
+/* Replace child at index. Frees old child, takes ownership of new. Returns 0/-1. */
+int dc_sexpr_replace_child(DC_Sexpr *parent, size_t index, DC_Sexpr *new_child);
+
+/* Change the value of an ATOM or STRING node. New value is copied. */
+int dc_sexpr_set_value(DC_Sexpr *node, const char *new_value);
+
+/* =========================================================================
+ * Pretty writer — KiCad-style indented output
+ * ========================================================================= */
+
+/* Serialize with proper KiCad indentation. Returns malloc'd string.
+ * Caller must free(). */
+char *dc_sexpr_write_pretty(const DC_Sexpr *node, DC_Error *err);
+
 #endif /* DC_SEXPR_H */

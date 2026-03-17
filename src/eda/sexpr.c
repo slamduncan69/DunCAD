@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /*
  * sexpr.c — Generic s-expression parser for KiCad file formats.
  *
@@ -424,4 +425,135 @@ dc_sexpr_child_count(const DC_Sexpr *node)
 {
     if (!node || node->type != DC_SEXPR_LIST) return 0;
     return node->child_count;
+}
+
+/* =========================================================================
+ * Creation API (Phase 4A)
+ * ========================================================================= */
+
+DC_Sexpr *
+dc_sexpr_new_atom(const char *value)
+{
+    DC_Sexpr *n = sexpr_new(DC_SEXPR_ATOM, 0);
+    if (!n) return NULL;
+    n->value = value ? strdup(value) : strdup("");
+    if (!n->value) { free(n); return NULL; }
+    return n;
+}
+
+DC_Sexpr *
+dc_sexpr_new_string(const char *value)
+{
+    DC_Sexpr *n = sexpr_new(DC_SEXPR_STRING, 0);
+    if (!n) return NULL;
+    n->value = value ? strdup(value) : strdup("");
+    if (!n->value) { free(n); return NULL; }
+    return n;
+}
+
+DC_Sexpr *
+dc_sexpr_new_list(void)
+{
+    return sexpr_new(DC_SEXPR_LIST, 0);
+}
+
+DC_Sexpr *
+dc_sexpr_clone(const DC_Sexpr *node)
+{
+    if (!node) return NULL;
+
+    DC_Sexpr *copy = sexpr_new(node->type, node->line);
+    if (!copy) return NULL;
+
+    if (node->value) {
+        copy->value = strdup(node->value);
+        if (!copy->value) { free(copy); return NULL; }
+    }
+
+    if (node->type == DC_SEXPR_LIST && node->child_count > 0) {
+        for (size_t i = 0; i < node->child_count; i++) {
+            DC_Sexpr *child_copy = dc_sexpr_clone(node->children[i]);
+            if (!child_copy) { dc_sexpr_free(copy); return NULL; }
+            if (sexpr_add_child(copy, child_copy) != 0) {
+                dc_sexpr_free(child_copy);
+                dc_sexpr_free(copy);
+                return NULL;
+            }
+        }
+    }
+
+    return copy;
+}
+
+/* =========================================================================
+ * Mutation API
+ * ========================================================================= */
+
+int
+dc_sexpr_add_child(DC_Sexpr *parent, DC_Sexpr *child)
+{
+    if (!parent || parent->type != DC_SEXPR_LIST || !child) return -1;
+    return sexpr_add_child(parent, child);
+}
+
+int
+dc_sexpr_remove_child(DC_Sexpr *parent, size_t index)
+{
+    if (!parent || parent->type != DC_SEXPR_LIST) return -1;
+    if (index >= parent->child_count) return -1;
+
+    dc_sexpr_free(parent->children[index]);
+
+    /* Shift remaining children left */
+    for (size_t i = index; i + 1 < parent->child_count; i++)
+        parent->children[i] = parent->children[i + 1];
+    parent->child_count--;
+    return 0;
+}
+
+int
+dc_sexpr_replace_child(DC_Sexpr *parent, size_t index, DC_Sexpr *new_child)
+{
+    if (!parent || parent->type != DC_SEXPR_LIST || !new_child) return -1;
+    if (index >= parent->child_count) return -1;
+
+    dc_sexpr_free(parent->children[index]);
+    parent->children[index] = new_child;
+    return 0;
+}
+
+int
+dc_sexpr_set_value(DC_Sexpr *node, const char *new_value)
+{
+    if (!node || node->type == DC_SEXPR_LIST) return -1;
+    char *copy = new_value ? strdup(new_value) : strdup("");
+    if (!copy) return -1;
+    free(node->value);
+    node->value = copy;
+    return 0;
+}
+
+/* =========================================================================
+ * Pretty writer
+ * ========================================================================= */
+
+char *
+dc_sexpr_write_pretty(const DC_Sexpr *node, DC_Error *err)
+{
+    if (!node) {
+        if (err) DC_SET_ERROR(err, DC_ERROR_INVALID_ARG, "NULL node");
+        return NULL;
+    }
+
+    DC_StringBuilder *sb = dc_sb_new();
+    if (!sb) {
+        if (err) DC_SET_ERROR(err, DC_ERROR_MEMORY, "sb alloc");
+        return NULL;
+    }
+
+    sexpr_write_node(node, sb, 0, 1);
+    dc_sb_append(sb, "\n");
+    char *result = dc_sb_take(sb);
+    dc_sb_free(sb);
+    return result;
 }

@@ -166,7 +166,8 @@ ensure_library_loaded(void)
     s_eda_lib = dc_elibrary_new();
     if (!s_eda_lib) return NULL;
 
-    /* Load ALL KiCad symbol libraries from system install */
+    /* Register ALL KiCad symbol libraries (lazy — no parsing yet).
+     * Libraries are parsed on demand when accessed in the browser. */
     const char *lib_dir = "/usr/share/kicad/symbols/";
     GDir *dir = g_dir_open(lib_dir, 0, NULL);
     if (dir) {
@@ -176,14 +177,13 @@ ensure_library_loaded(void)
             if (!g_str_has_suffix(name, ".kicad_sym")) continue;
             char path[512];
             snprintf(path, sizeof(path), "%s%s", lib_dir, name);
-            DC_Error err = {0};
-            if (dc_elibrary_load_symbols(s_eda_lib, path, &err) == 0)
+            if (dc_elibrary_register_symbols(s_eda_lib, path) == 0)
                 count++;
         }
         g_dir_close(dir);
         dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA,
-               "Loaded %d symbol libraries (%zu symbols total)",
-               count, dc_elibrary_symbol_count(s_eda_lib));
+               "Registered %d symbol libraries (lazy loading)",
+               count);
     } else {
         dc_log(DC_LOG_WARN, DC_LOG_EVENT_EDA,
                "Could not open KiCad symbols directory: %s", lib_dir);

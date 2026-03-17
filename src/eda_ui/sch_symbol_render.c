@@ -425,3 +425,284 @@ dc_sch_symbol_render(cairo_t *cr,
         cairo_show_text(cr, val);
     }
 }
+
+/* =========================================================================
+ * Standalone preview renderer (no SchCanvas needed)
+ *
+ * Scans the symbol sexpr for bbox, fits into target rect, renders all
+ * primitives with a simple translate+scale transform.
+ * ========================================================================= */
+
+/* Collect bounding box from all draw primitives */
+static void
+preview_bbox_update(double *minx, double *miny, double *maxx, double *maxy,
+                    double px, double py)
+{
+    if (px < *minx) *minx = px;
+    if (py < *miny) *miny = py;
+    if (px > *maxx) *maxx = px;
+    if (py > *maxy) *maxy = py;
+}
+
+static void
+preview_scan_bbox(const DC_Sexpr *unit,
+                  double *minx, double *miny, double *maxx, double *maxy)
+{
+    for (size_t i = 0; i < dc_sexpr_child_count(unit); i++) {
+        DC_Sexpr *child = unit->children[i];
+        if (child->type != DC_SEXPR_LIST) continue;
+        const char *tag = dc_sexpr_tag(child);
+        if (!tag) continue;
+
+        if (strcmp(tag, "rectangle") == 0) {
+            DC_Sexpr *s = dc_sexpr_find(child, "start");
+            DC_Sexpr *e = dc_sexpr_find(child, "end");
+            if (s && e) {
+                double x1, y1, x2, y2;
+                parse_xy(s, &x1, &y1);
+                parse_xy(e, &x2, &y2);
+                preview_bbox_update(minx, miny, maxx, maxy, x1, y1);
+                preview_bbox_update(minx, miny, maxx, maxy, x2, y2);
+            }
+        } else if (strcmp(tag, "polyline") == 0) {
+            DC_Sexpr *pts = dc_sexpr_find(child, "pts");
+            if (pts) {
+                size_t nc = 0;
+                DC_Sexpr **xys = dc_sexpr_find_all(pts, "xy", &nc);
+                if (xys) {
+                    for (size_t j = 0; j < nc; j++) {
+                        double px, py;
+                        parse_xy(xys[j], &px, &py);
+                        preview_bbox_update(minx, miny, maxx, maxy, px, py);
+                    }
+                    free(xys);
+                }
+            }
+        } else if (strcmp(tag, "circle") == 0) {
+            DC_Sexpr *center = dc_sexpr_find(child, "center");
+            DC_Sexpr *radius = dc_sexpr_find(child, "radius");
+            if (center && radius) {
+                double cx, cy;
+                parse_xy(center, &cx, &cy);
+                double r = sexpr_float(radius, 0);
+                preview_bbox_update(minx, miny, maxx, maxy, cx - r, cy - r);
+                preview_bbox_update(minx, miny, maxx, maxy, cx + r, cy + r);
+            }
+        } else if (strcmp(tag, "arc") == 0) {
+            DC_Sexpr *s = dc_sexpr_find(child, "start");
+            DC_Sexpr *m = dc_sexpr_find(child, "mid");
+            DC_Sexpr *e = dc_sexpr_find(child, "end");
+            if (s && m && e) {
+                double x1, y1, xm, ym, x2, y2;
+                parse_xy(s, &x1, &y1);
+                parse_xy(m, &xm, &ym);
+                parse_xy(e, &x2, &y2);
+                preview_bbox_update(minx, miny, maxx, maxy, x1, y1);
+                preview_bbox_update(minx, miny, maxx, maxy, xm, ym);
+                preview_bbox_update(minx, miny, maxx, maxy, x2, y2);
+            }
+        } else if (strcmp(tag, "pin") == 0) {
+            DC_Sexpr *at = dc_sexpr_find(child, "at");
+            DC_Sexpr *length_node = dc_sexpr_find(child, "length");
+            if (at && length_node) {
+                double px = sexpr_float(at, 0);
+                double py = sexpr_float(at, 1);
+                double pin_angle = sexpr_float(at, 2);
+                double pin_len = sexpr_float(length_node, 0);
+                double rad = pin_angle * M_PI / 180.0;
+                double ex = px + pin_len * cos(rad);
+                double ey = py - pin_len * sin(rad);
+                preview_bbox_update(minx, miny, maxx, maxy, px, py);
+                preview_bbox_update(minx, miny, maxx, maxy, ex, ey);
+            }
+        }
+    }
+}
+
+/* Render a single primitive in preview coords */
+static void
+preview_render_primitive(cairo_t *cr, const DC_Sexpr *prim,
+                         double ox, double oy, double scale)
+{
+    const char *tag = dc_sexpr_tag(prim);
+    if (!tag) return;
+
+#define PX(lx) (ox + (lx) * scale)
+#define PY(ly) (oy + (ly) * scale)
+
+    if (strcmp(tag, "rectangle") == 0) {
+        DC_Sexpr *s = dc_sexpr_find(prim, "start");
+        DC_Sexpr *e = dc_sexpr_find(prim, "end");
+        if (!s || !e) return;
+        double x1, y1, x2, y2;
+        parse_xy(s, &x1, &y1);
+        parse_xy(e, &x2, &y2);
+        cairo_set_source_rgb(cr, 0.7, 0.2, 0.2);
+        cairo_set_line_width(cr, 2.0);
+        cairo_rectangle(cr, PX(x1), PY(y1), (x2 - x1) * scale, (y2 - y1) * scale);
+
+        DC_Sexpr *fill = dc_sexpr_find(prim, "fill");
+        if (fill) {
+            DC_Sexpr *ft = dc_sexpr_find(fill, "type");
+            const char *ftype = ft ? dc_sexpr_value(ft) : NULL;
+            if (ftype && strcmp(ftype, "background") == 0) {
+                cairo_set_source_rgba(cr, 0.7, 0.2, 0.2, 0.15);
+                cairo_fill_preserve(cr);
+                cairo_set_source_rgb(cr, 0.7, 0.2, 0.2);
+            }
+        }
+        cairo_stroke(cr);
+
+    } else if (strcmp(tag, "polyline") == 0) {
+        DC_Sexpr *pts = dc_sexpr_find(prim, "pts");
+        if (!pts) return;
+        size_t nc = 0;
+        DC_Sexpr **xys = dc_sexpr_find_all(pts, "xy", &nc);
+        if (!xys || nc < 2) { free(xys); return; }
+
+        cairo_set_source_rgb(cr, 0.7, 0.2, 0.2);
+        cairo_set_line_width(cr, 2.0);
+        for (size_t i = 0; i < nc; i++) {
+            double lx, ly;
+            parse_xy(xys[i], &lx, &ly);
+            if (i == 0) cairo_move_to(cr, PX(lx), PY(ly));
+            else        cairo_line_to(cr, PX(lx), PY(ly));
+        }
+        free(xys);
+
+        DC_Sexpr *fill = dc_sexpr_find(prim, "fill");
+        if (fill) {
+            DC_Sexpr *ft = dc_sexpr_find(fill, "type");
+            const char *ftype = ft ? dc_sexpr_value(ft) : NULL;
+            if (ftype && strcmp(ftype, "background") == 0) {
+                cairo_set_source_rgba(cr, 0.7, 0.2, 0.2, 0.15);
+                cairo_fill_preserve(cr);
+                cairo_set_source_rgb(cr, 0.7, 0.2, 0.2);
+            }
+        }
+        cairo_stroke(cr);
+
+    } else if (strcmp(tag, "circle") == 0) {
+        DC_Sexpr *center = dc_sexpr_find(prim, "center");
+        DC_Sexpr *radius = dc_sexpr_find(prim, "radius");
+        if (!center || !radius) return;
+        double cx, cy;
+        parse_xy(center, &cx, &cy);
+        double r = sexpr_float(radius, 0);
+
+        cairo_set_source_rgb(cr, 0.7, 0.2, 0.2);
+        cairo_set_line_width(cr, 2.0);
+        cairo_arc(cr, PX(cx), PY(cy), r * scale, 0, 2 * M_PI);
+
+        DC_Sexpr *fill = dc_sexpr_find(prim, "fill");
+        if (fill) {
+            DC_Sexpr *ft = dc_sexpr_find(fill, "type");
+            const char *ftype = ft ? dc_sexpr_value(ft) : NULL;
+            if (ftype && strcmp(ftype, "background") == 0) {
+                cairo_set_source_rgba(cr, 0.7, 0.2, 0.2, 0.15);
+                cairo_fill_preserve(cr);
+                cairo_set_source_rgb(cr, 0.7, 0.2, 0.2);
+            }
+        }
+        cairo_stroke(cr);
+
+    } else if (strcmp(tag, "arc") == 0) {
+        DC_Sexpr *s = dc_sexpr_find(prim, "start");
+        DC_Sexpr *m = dc_sexpr_find(prim, "mid");
+        DC_Sexpr *e = dc_sexpr_find(prim, "end");
+        if (!s || !m || !e) return;
+        double x1, y1, xm, ym, x2, y2;
+        parse_xy(s, &x1, &y1);
+        parse_xy(m, &xm, &ym);
+        parse_xy(e, &x2, &y2);
+
+        cairo_set_source_rgb(cr, 0.7, 0.2, 0.2);
+        cairo_set_line_width(cr, 2.0);
+        cairo_move_to(cr, PX(x1), PY(y1));
+        double cp1x = 2.0 * PX(xm) - 0.5 * PX(x1) - 0.5 * PX(x2);
+        double cp1y = 2.0 * PY(ym) - 0.5 * PY(y1) - 0.5 * PY(y2);
+        cairo_curve_to(cr, cp1x, cp1y, cp1x, cp1y, PX(x2), PY(y2));
+        cairo_stroke(cr);
+
+    } else if (strcmp(tag, "pin") == 0) {
+        DC_Sexpr *at = dc_sexpr_find(prim, "at");
+        DC_Sexpr *length_node = dc_sexpr_find(prim, "length");
+        if (!at || !length_node) return;
+
+        double px = sexpr_float(at, 0);
+        double py = sexpr_float(at, 1);
+        double pin_angle = sexpr_float(at, 2);
+        double pin_len = sexpr_float(length_node, 0);
+        double rad = pin_angle * M_PI / 180.0;
+        double ex = px + pin_len * cos(rad);
+        double ey = py - pin_len * sin(rad);
+
+        cairo_set_source_rgb(cr, 0.0, 0.6, 0.0);
+        cairo_set_line_width(cr, 1.5);
+        cairo_move_to(cr, PX(px), PY(py));
+        cairo_line_to(cr, PX(ex), PY(ey));
+        cairo_stroke(cr);
+        cairo_arc(cr, PX(px), PY(py), 2.5, 0, 2 * M_PI);
+        cairo_fill(cr);
+    }
+
+#undef PX
+#undef PY
+}
+
+void
+dc_sch_symbol_render_preview(cairo_t *cr, const DC_Sexpr *sym_def,
+                               double x, double y, double w, double h)
+{
+    if (!cr || !sym_def || w <= 0 || h <= 0) return;
+
+    /* Compute bbox across all sub-units */
+    double minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
+
+    for (size_t i = 0; i < dc_sexpr_child_count(sym_def); i++) {
+        DC_Sexpr *child = sym_def->children[i];
+        if (child->type != DC_SEXPR_LIST) continue;
+        const char *ctag = dc_sexpr_tag(child);
+        if (ctag && strcmp(ctag, "symbol") == 0) {
+            preview_scan_bbox(child, &minx, &miny, &maxx, &maxy);
+        }
+    }
+    /* Also scan top-level primitives */
+    preview_scan_bbox(sym_def, &minx, &miny, &maxx, &maxy);
+
+    if (minx >= maxx || miny >= maxy) return; /* nothing to draw */
+
+    /* Compute scale to fit bbox into target rect with margin */
+    double margin = 8.0;
+    double tw = w - 2 * margin;
+    double th = h - 2 * margin;
+    if (tw <= 0 || th <= 0) return;
+
+    double bw = maxx - minx;
+    double bh = maxy - miny;
+    double scale = (tw / bw < th / bh) ? tw / bw : th / bh;
+
+    /* Center in target rect */
+    double ox = x + margin + (tw - bw * scale) / 2.0 - minx * scale;
+    double oy = y + margin + (th - bh * scale) / 2.0 - miny * scale;
+
+    /* Render all sub-units */
+    for (size_t i = 0; i < dc_sexpr_child_count(sym_def); i++) {
+        DC_Sexpr *child = sym_def->children[i];
+        if (child->type != DC_SEXPR_LIST) continue;
+        const char *ctag = dc_sexpr_tag(child);
+        if (!ctag) continue;
+
+        if (strcmp(ctag, "symbol") == 0) {
+            /* Render primitives within this sub-unit */
+            for (size_t j = 0; j < dc_sexpr_child_count(child); j++) {
+                DC_Sexpr *prim = child->children[j];
+                if (prim->type == DC_SEXPR_LIST)
+                    preview_render_primitive(cr, prim, ox, oy, scale);
+            }
+        } else {
+            /* Top-level primitive */
+            preview_render_primitive(cr, child, ox, oy, scale);
+        }
+    }
+}

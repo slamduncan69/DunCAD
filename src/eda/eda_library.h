@@ -37,6 +37,12 @@ void dc_elibrary_free(DC_ELibrary *lib);
  * Symbols are indexed by their names within the file. */
 int dc_elibrary_load_symbols(DC_ELibrary *lib, const char *path, DC_Error *err);
 
+/* Register a .kicad_sym library file path without parsing.
+ * The library name is derived from the filename. Symbols are loaded
+ * on demand when accessed via per-library enumeration or lookup.
+ * This is O(1) per call — suitable for registering hundreds of libs. */
+int dc_elibrary_register_symbols(DC_ELibrary *lib, const char *path);
+
 /* Load a .kicad_mod footprint file (single footprint).
  * The footprint is indexed by its name. */
 int dc_elibrary_load_footprint(DC_ELibrary *lib, const char *path, DC_Error *err);
@@ -70,5 +76,56 @@ size_t dc_elibrary_symbol_count(const DC_ELibrary *lib);
 
 /* Get the name of the Nth loaded symbol. Borrowed pointer. */
 const char *dc_elibrary_symbol_name(const DC_ELibrary *lib, size_t index);
+
+/* =========================================================================
+ * Per-library enumeration
+ * ========================================================================= */
+
+/* Get the number of distinct loaded library names. */
+size_t dc_elibrary_lib_count(const DC_ELibrary *lib);
+
+/* Get the Nth library name. Borrowed pointer. */
+const char *dc_elibrary_lib_name(const DC_ELibrary *lib, size_t index);
+
+/* Get the number of symbols in a specific library. */
+size_t dc_elibrary_lib_symbol_count(const DC_ELibrary *lib, const char *lib_name);
+
+/* Get the name of the Nth symbol in a specific library. Borrowed pointer. */
+const char *dc_elibrary_lib_symbol_name(const DC_ELibrary *lib,
+                                          const char *lib_name, size_t index);
+
+/* =========================================================================
+ * Footprint enumeration + batch loading
+ * ========================================================================= */
+
+/* Get the number of loaded footprints across all libraries. */
+size_t dc_elibrary_footprint_count(const DC_ELibrary *lib);
+
+/* Get the name of the Nth loaded footprint. Borrowed pointer. */
+const char *dc_elibrary_footprint_name(const DC_ELibrary *lib, size_t index);
+
+/* Get the library name of the Nth loaded footprint. Borrowed pointer. */
+const char *dc_elibrary_footprint_lib_name(const DC_ELibrary *lib, size_t index);
+
+/* Scan a .pretty directory and load all .kicad_mod files within.
+ * The library name is derived from the directory name (e.g. "Resistor_SMD"). */
+int dc_elibrary_load_footprint_dir(DC_ELibrary *lib, const char *dir_path,
+                                     DC_Error *err);
+
+/* =========================================================================
+ * Symbol property / pin inspection
+ * ========================================================================= */
+
+/* Extract a property value from a symbol definition sexpr node.
+ * Searches for (property "key" "value" ...) children.
+ * Returns borrowed pointer or NULL. */
+const char *dc_elibrary_symbol_property(const DC_Sexpr *sym_node,
+                                          const char *key);
+
+/* Count all pins across all sub-units of a symbol definition. */
+size_t dc_elibrary_symbol_pin_count(const DC_Sexpr *sym_node);
+
+/* Get the library name of the Nth loaded symbol. Borrowed pointer. */
+const char *dc_elibrary_symbol_lib_name(const DC_ELibrary *lib, size_t index);
 
 #endif /* DC_EDA_LIBRARY_H */

@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "eda_library_browser.h"
-#include "sch_symbol_render.h"
+#include "eda_footprint_browser.h"
+#include "pcb_footprint_render.h"
 #include "eda/eda_library.h"
 #include "core/log.h"
 
@@ -10,37 +10,28 @@
 #include <ctype.h>
 
 /* =========================================================================
- * Three-pane library browser dialog
- *
- * +----------------+------------------+--------------------+
- * | Libraries      | Symbols          | Preview + Info     |
- * | (GtkListBox)   | (GtkListBox)     | (GtkDrawingArea)   |
- * +----------------+------------------+--------------------+
- * | [Search: ____________________________________________] |
- * | [OK] [Cancel]                                         |
+ * Three-pane footprint browser — same pattern as symbol browser.
  * ========================================================================= */
 
 typedef struct {
     GtkWidget    *dialog;
     GtkWidget    *search;
-    GtkWidget    *lib_list;      /* left pane: library names */
-    GtkWidget    *sym_list;      /* center pane: symbols in selected lib */
-    GtkWidget    *preview_area;  /* right pane: symbol preview */
-    GtkWidget    *info_label;    /* right pane: info text below preview */
+    GtkWidget    *lib_list;
+    GtkWidget    *fp_list;
+    GtkWidget    *preview_area;
+    GtkWidget    *info_label;
     DC_ELibrary  *lib;
-    char         *selected_lib;  /* currently selected library name — owned */
-    char         *result;        /* owned — selected lib_id, or NULL */
+    char         *selected_lib;
+    char         *result;
     int           done;
-    int           searching;     /* 1 if search is active (flat results mode) */
+    int           searching;
     GMainLoop    *loop;
-
-    /* Currently previewed symbol definition (borrowed) */
-    const DC_Sexpr *preview_sym;
-} BrowserCtx;
+    const DC_Sexpr *preview_fp;
+} FPBrowserCtx;
 
 /* Case-insensitive substring match */
 static int
-str_contains_ci(const char *haystack, const char *needle)
+fp_str_contains_ci(const char *haystack, const char *needle)
 {
     if (!needle || !*needle) return 1;
     if (!haystack) return 0;
@@ -62,20 +53,31 @@ str_contains_ci(const char *haystack, const char *needle)
 }
 
 /* =========================================================================
- * Populate library list (left pane)
+ * Populate library list — distinct footprint library names
  * ========================================================================= */
 static void
-populate_lib_list(BrowserCtx *ctx)
+populate_fp_lib_list(FPBrowserCtx *ctx)
 {
     GtkWidget *child;
     while ((child = gtk_widget_get_first_child(ctx->lib_list)) != NULL)
         gtk_list_box_remove(GTK_LIST_BOX(ctx->lib_list), child);
 
-    size_t nlibs = dc_elibrary_lib_count(ctx->lib);
-    for (size_t i = 0; i < nlibs; i++) {
-        const char *name = dc_elibrary_lib_name(ctx->lib, i);
-        if (!name) continue;
-        GtkWidget *label = gtk_label_new(name);
+    /* Collect distinct library names from footprints */
+    size_t count = dc_elibrary_footprint_count(ctx->lib);
+    /* Simple O(n^2) distinct — footprint libs are typically small */
+    for (size_t i = 0; i < count; i++) {
+        const char *lname = dc_elibrary_footprint_lib_name(ctx->lib, i);
+        if (!lname) continue;
+
+        /* Check if already added */
+        int dup = 0;
+        for (size_t j = 0; j < i; j++) {
+            const char *prev = dc_elibrary_footprint_lib_name(ctx->lib, j);
+            if (prev && strcmp(lname, prev) == 0) { dup = 1; break; }
+        }
+        if (dup) continue;
+
+        GtkWidget *label = gtk_label_new(lname);
         gtk_label_set_xalign(GTK_LABEL(label), 0.0);
         gtk_widget_set_margin_start(label, 6);
         gtk_widget_set_margin_end(label, 6);
@@ -85,50 +87,50 @@ populate_lib_list(BrowserCtx *ctx)
     }
 }
 
-/* =========================================================================
- * Populate symbol list for a given library (center pane)
- * ========================================================================= */
+/* Populate footprint list for a given library */
 static void
-populate_sym_list_for_lib(BrowserCtx *ctx, const char *lib_name)
+populate_fp_list_for_lib(FPBrowserCtx *ctx, const char *lib_name)
 {
     GtkWidget *child;
-    while ((child = gtk_widget_get_first_child(ctx->sym_list)) != NULL)
-        gtk_list_box_remove(GTK_LIST_BOX(ctx->sym_list), child);
+    while ((child = gtk_widget_get_first_child(ctx->fp_list)) != NULL)
+        gtk_list_box_remove(GTK_LIST_BOX(ctx->fp_list), child);
 
     if (!lib_name) return;
 
-    size_t count = dc_elibrary_lib_symbol_count(ctx->lib, lib_name);
-    for (size_t i = 0; i < count && i < 2000; i++) {
-        const char *name = dc_elibrary_lib_symbol_name(ctx->lib, lib_name, i);
-        if (!name) continue;
+    size_t count = dc_elibrary_footprint_count(ctx->lib);
+    int added = 0;
+    for (size_t i = 0; i < count && added < 2000; i++) {
+        const char *lname = dc_elibrary_footprint_lib_name(ctx->lib, i);
+        const char *name = dc_elibrary_footprint_name(ctx->lib, i);
+        if (!lname || !name) continue;
+        if (strcmp(lname, lib_name) != 0) continue;
+
         GtkWidget *label = gtk_label_new(name);
         gtk_label_set_xalign(GTK_LABEL(label), 0.0);
         gtk_widget_set_margin_start(label, 6);
         gtk_widget_set_margin_end(label, 6);
         gtk_widget_set_margin_top(label, 2);
         gtk_widget_set_margin_bottom(label, 2);
-        gtk_list_box_append(GTK_LIST_BOX(ctx->sym_list), label);
+        gtk_list_box_append(GTK_LIST_BOX(ctx->fp_list), label);
+        added++;
     }
 }
 
-/* =========================================================================
- * Populate sym list with flat search results across all libs
- * ========================================================================= */
+/* Flat search across all footprint libs */
 static void
-populate_sym_list_search(BrowserCtx *ctx, const char *filter)
+populate_fp_list_search(FPBrowserCtx *ctx, const char *filter)
 {
     GtkWidget *child;
-    while ((child = gtk_widget_get_first_child(ctx->sym_list)) != NULL)
-        gtk_list_box_remove(GTK_LIST_BOX(ctx->sym_list), child);
+    while ((child = gtk_widget_get_first_child(ctx->fp_list)) != NULL)
+        gtk_list_box_remove(GTK_LIST_BOX(ctx->fp_list), child);
 
-    size_t total = dc_elibrary_symbol_count(ctx->lib);
+    size_t count = dc_elibrary_footprint_count(ctx->lib);
     int added = 0;
-    for (size_t i = 0; i < total && added < 500; i++) {
-        const char *name = dc_elibrary_symbol_name(ctx->lib, i);
-        const char *lname = dc_elibrary_symbol_lib_name(ctx->lib, i);
+    for (size_t i = 0; i < count && added < 500; i++) {
+        const char *name = dc_elibrary_footprint_name(ctx->lib, i);
+        const char *lname = dc_elibrary_footprint_lib_name(ctx->lib, i);
         if (!name || !lname) continue;
 
-        /* Build "lib:name" for display and filtering */
         size_t llen = strlen(lname);
         size_t nlen = strlen(name);
         char *lib_id = malloc(llen + 1 + nlen + 1);
@@ -137,7 +139,7 @@ populate_sym_list_search(BrowserCtx *ctx, const char *filter)
         lib_id[llen] = ':';
         memcpy(lib_id + llen + 1, name, nlen + 1);
 
-        if (!str_contains_ci(lib_id, filter)) { free(lib_id); continue; }
+        if (!fp_str_contains_ci(lib_id, filter)) { free(lib_id); continue; }
 
         GtkWidget *label = gtk_label_new(lib_id);
         free(lib_id);
@@ -146,44 +148,44 @@ populate_sym_list_search(BrowserCtx *ctx, const char *filter)
         gtk_widget_set_margin_end(label, 6);
         gtk_widget_set_margin_top(label, 2);
         gtk_widget_set_margin_bottom(label, 2);
-        gtk_list_box_append(GTK_LIST_BOX(ctx->sym_list), label);
+        gtk_list_box_append(GTK_LIST_BOX(ctx->fp_list), label);
         added++;
     }
 }
 
-/* =========================================================================
- * Update preview + info for selected symbol
- * ========================================================================= */
+/* Update preview + info */
 static void
-update_preview(BrowserCtx *ctx, const char *lib_id)
+update_fp_preview(FPBrowserCtx *ctx, const char *lib_id)
 {
-    ctx->preview_sym = NULL;
+    ctx->preview_fp = NULL;
 
     if (lib_id) {
-        ctx->preview_sym = dc_elibrary_find_symbol(ctx->lib, lib_id);
-        if (!ctx->preview_sym) {
-            /* Try name-only lookup */
-            const char *colon = strchr(lib_id, ':');
-            const char *name = colon ? colon + 1 : lib_id;
-            ctx->preview_sym = dc_elibrary_find_symbol_by_name(ctx->lib, name);
-        }
+        ctx->preview_fp = dc_elibrary_find_footprint(ctx->lib, lib_id);
     }
 
-    /* Update info label */
-    if (ctx->preview_sym) {
-        const char *desc = dc_elibrary_symbol_property(ctx->preview_sym, "Description");
-        const char *fp = dc_elibrary_symbol_property(ctx->preview_sym, "Footprint");
-        size_t pins = dc_elibrary_symbol_pin_count(ctx->preview_sym);
+    if (ctx->preview_fp) {
+        /* Count pads */
+        size_t pad_count = 0;
+        DC_Sexpr **pads = dc_sexpr_find_all(ctx->preview_fp, "pad", &pad_count);
+        free(pads);
+
+        const char *desc = NULL;
+        DC_Sexpr *desc_node = dc_sexpr_find(ctx->preview_fp, "descr");
+        if (desc_node) desc = dc_sexpr_value(desc_node);
+
+        const char *tags = NULL;
+        DC_Sexpr *tags_node = dc_sexpr_find(ctx->preview_fp, "tags");
+        if (tags_node) tags = dc_sexpr_value(tags_node);
 
         char info[512];
         snprintf(info, sizeof(info),
-                 "Pins: %zu\nFP: %s\nDesc: %s",
-                 pins,
-                 fp ? fp : "(none)",
+                 "Pads: %zu\nTags: %s\nDesc: %s",
+                 pad_count,
+                 tags ? tags : "(none)",
                  desc ? desc : "(none)");
         gtk_label_set_text(GTK_LABEL(ctx->info_label), info);
     } else {
-        gtk_label_set_text(GTK_LABEL(ctx->info_label), "Select a symbol to preview");
+        gtk_label_set_text(GTK_LABEL(ctx->info_label), "Select a footprint to preview");
     }
 
     gtk_widget_queue_draw(ctx->preview_area);
@@ -193,10 +195,10 @@ update_preview(BrowserCtx *ctx, const char *lib_id)
  * Callbacks
  * ========================================================================= */
 static void
-on_lib_selected(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
+on_fp_lib_selected(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
 {
     (void)box;
-    BrowserCtx *ctx = userdata;
+    FPBrowserCtx *ctx = userdata;
     if (!row || ctx->searching) return;
 
     GtkWidget *label = gtk_list_box_row_get_child(row);
@@ -206,15 +208,15 @@ on_lib_selected(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
     free(ctx->selected_lib);
     ctx->selected_lib = lname ? strdup(lname) : NULL;
 
-    populate_sym_list_for_lib(ctx, ctx->selected_lib);
-    update_preview(ctx, NULL);
+    populate_fp_list_for_lib(ctx, ctx->selected_lib);
+    update_fp_preview(ctx, NULL);
 }
 
 static void
-on_sym_selected(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
+on_fp_selected(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
 {
     (void)box;
-    BrowserCtx *ctx = userdata;
+    FPBrowserCtx *ctx = userdata;
     if (!row) return;
 
     GtkWidget *label = gtk_list_box_row_get_child(row);
@@ -223,10 +225,8 @@ on_sym_selected(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
     if (!text) return;
 
     if (ctx->searching) {
-        /* text is already "lib:name" */
-        update_preview(ctx, text);
+        update_fp_preview(ctx, text);
     } else if (ctx->selected_lib) {
-        /* Build lib:name */
         size_t llen = strlen(ctx->selected_lib);
         size_t nlen = strlen(text);
         char *lib_id = malloc(llen + 1 + nlen + 1);
@@ -234,27 +234,26 @@ on_sym_selected(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
             memcpy(lib_id, ctx->selected_lib, llen);
             lib_id[llen] = ':';
             memcpy(lib_id + llen + 1, text, nlen + 1);
-            update_preview(ctx, lib_id);
+            update_fp_preview(ctx, lib_id);
             free(lib_id);
         }
     }
 }
 
 static void
-on_preview_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
-                gpointer userdata)
+on_fp_preview_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
+                   gpointer userdata)
 {
     (void)area;
-    BrowserCtx *ctx = userdata;
+    FPBrowserCtx *ctx = userdata;
 
-    /* Dark background */
-    cairo_set_source_rgb(cr, 0.12, 0.12, 0.14);
+    cairo_set_source_rgb(cr, 0.1, 0.15, 0.1);
     cairo_rectangle(cr, 0, 0, width, height);
     cairo_fill(cr);
 
-    if (ctx->preview_sym) {
-        dc_sch_symbol_render_preview(cr, ctx->preview_sym,
-                                      0, 0, (double)width, (double)height);
+    if (ctx->preview_fp) {
+        dc_pcb_footprint_render_preview(cr, ctx->preview_fp,
+                                         0, 0, (double)width, (double)height);
     } else {
         cairo_set_source_rgb(cr, 0.4, 0.4, 0.4);
         cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL,
@@ -266,32 +265,32 @@ on_preview_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
 }
 
 static void
-on_search_changed(GtkSearchEntry *entry, gpointer userdata)
+on_fp_search_changed(GtkSearchEntry *entry, gpointer userdata)
 {
-    BrowserCtx *ctx = userdata;
+    FPBrowserCtx *ctx = userdata;
     const char *text = gtk_editable_get_text(GTK_EDITABLE(entry));
 
     if (text && *text) {
         ctx->searching = 1;
-        populate_sym_list_search(ctx, text);
+        populate_fp_list_search(ctx, text);
     } else {
         ctx->searching = 0;
         if (ctx->selected_lib)
-            populate_sym_list_for_lib(ctx, ctx->selected_lib);
+            populate_fp_list_for_lib(ctx, ctx->selected_lib);
         else {
             GtkWidget *child;
-            while ((child = gtk_widget_get_first_child(ctx->sym_list)) != NULL)
-                gtk_list_box_remove(GTK_LIST_BOX(ctx->sym_list), child);
+            while ((child = gtk_widget_get_first_child(ctx->fp_list)) != NULL)
+                gtk_list_box_remove(GTK_LIST_BOX(ctx->fp_list), child);
         }
     }
-    update_preview(ctx, NULL);
+    update_fp_preview(ctx, NULL);
 }
 
 static void
-on_sym_activated(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
+on_fp_activated(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
 {
     (void)box;
-    BrowserCtx *ctx = userdata;
+    FPBrowserCtx *ctx = userdata;
     if (!row) return;
 
     GtkWidget *label = gtk_list_box_row_get_child(row);
@@ -320,22 +319,20 @@ on_sym_activated(GtkListBox *box, GtkListBoxRow *row, gpointer userdata)
 }
 
 static void
-on_ok_clicked(GtkButton *btn, gpointer userdata)
+on_fp_ok_clicked(GtkButton *btn, gpointer userdata)
 {
     (void)btn;
-    BrowserCtx *ctx = userdata;
-    GtkListBoxRow *row = gtk_list_box_get_selected_row(GTK_LIST_BOX(ctx->sym_list));
-    if (row) {
-        /* Simulate double-click on selected row */
-        on_sym_activated(GTK_LIST_BOX(ctx->sym_list), row, ctx);
-    }
+    FPBrowserCtx *ctx = userdata;
+    GtkListBoxRow *row = gtk_list_box_get_selected_row(GTK_LIST_BOX(ctx->fp_list));
+    if (row)
+        on_fp_activated(GTK_LIST_BOX(ctx->fp_list), row, ctx);
 }
 
 static void
-on_cancel_clicked(GtkButton *btn, gpointer userdata)
+on_fp_cancel_clicked(GtkButton *btn, gpointer userdata)
 {
     (void)btn;
-    BrowserCtx *ctx = userdata;
+    FPBrowserCtx *ctx = userdata;
     free(ctx->result);
     ctx->result = NULL;
     ctx->done = 1;
@@ -343,10 +340,10 @@ on_cancel_clicked(GtkButton *btn, gpointer userdata)
 }
 
 static gboolean
-on_close_request(GtkWindow *win, gpointer userdata)
+on_fp_close_request(GtkWindow *win, gpointer userdata)
 {
     (void)win;
-    BrowserCtx *ctx = userdata;
+    FPBrowserCtx *ctx = userdata;
     free(ctx->result);
     ctx->result = NULL;
     ctx->done = 1;
@@ -358,27 +355,23 @@ on_close_request(GtkWindow *win, gpointer userdata)
  * Public API
  * ========================================================================= */
 char *
-dc_eda_library_browser_run(GtkWindow *parent,
-                            DC_ELibrary *lib,
-                            const char *kind)
+dc_eda_footprint_browser_run(GtkWindow *parent, DC_ELibrary *lib)
 {
     if (!lib) return NULL;
-    (void)kind; /* TODO: separate footprint browsing via eda_footprint_browser */
 
-    BrowserCtx ctx = {0};
+    FPBrowserCtx ctx = {0};
     ctx.lib = lib;
     ctx.loop = g_main_loop_new(NULL, FALSE);
 
-    /* Build dialog window */
     ctx.dialog = gtk_window_new();
-    gtk_window_set_title(GTK_WINDOW(ctx.dialog), "Symbol Library Browser");
+    gtk_window_set_title(GTK_WINDOW(ctx.dialog), "Footprint Library Browser");
     gtk_window_set_default_size(GTK_WINDOW(ctx.dialog), 900, 600);
     gtk_window_set_modal(GTK_WINDOW(ctx.dialog), TRUE);
     if (parent)
         gtk_window_set_transient_for(GTK_WINDOW(ctx.dialog), parent);
 
     g_signal_connect(ctx.dialog, "close-request",
-                     G_CALLBACK(on_close_request), &ctx);
+                     G_CALLBACK(on_fp_close_request), &ctx);
 
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_widget_set_margin_start(vbox, 8);
@@ -386,39 +379,39 @@ dc_eda_library_browser_run(GtkWindow *parent,
     gtk_widget_set_margin_top(vbox, 8);
     gtk_widget_set_margin_bottom(vbox, 8);
 
-    /* ---- Three-pane horizontal layout ---- */
+    /* Three-pane layout */
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_widget_set_vexpand(hbox, TRUE);
 
-    /* Left pane: library list */
+    /* Left: library list */
     GtkWidget *lib_frame = gtk_frame_new("Libraries");
     GtkWidget *lib_scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(lib_scroll),
                                     GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_widget_set_size_request(lib_scroll, 180, -1);
+    gtk_widget_set_size_request(lib_scroll, 200, -1);
     ctx.lib_list = gtk_list_box_new();
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(ctx.lib_list), GTK_SELECTION_SINGLE);
-    g_signal_connect(ctx.lib_list, "row-selected", G_CALLBACK(on_lib_selected), &ctx);
+    g_signal_connect(ctx.lib_list, "row-selected", G_CALLBACK(on_fp_lib_selected), &ctx);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(lib_scroll), ctx.lib_list);
     gtk_frame_set_child(GTK_FRAME(lib_frame), lib_scroll);
     gtk_box_append(GTK_BOX(hbox), lib_frame);
 
-    /* Center pane: symbol list */
-    GtkWidget *sym_frame = gtk_frame_new("Symbols");
-    GtkWidget *sym_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sym_scroll),
+    /* Center: footprint list */
+    GtkWidget *fp_frame = gtk_frame_new("Footprints");
+    GtkWidget *fp_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(fp_scroll),
                                     GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_widget_set_size_request(sym_scroll, 200, -1);
-    gtk_widget_set_hexpand(sym_scroll, TRUE);
-    ctx.sym_list = gtk_list_box_new();
-    gtk_list_box_set_selection_mode(GTK_LIST_BOX(ctx.sym_list), GTK_SELECTION_SINGLE);
-    g_signal_connect(ctx.sym_list, "row-selected", G_CALLBACK(on_sym_selected), &ctx);
-    g_signal_connect(ctx.sym_list, "row-activated", G_CALLBACK(on_sym_activated), &ctx);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sym_scroll), ctx.sym_list);
-    gtk_frame_set_child(GTK_FRAME(sym_frame), sym_scroll);
-    gtk_box_append(GTK_BOX(hbox), sym_frame);
+    gtk_widget_set_size_request(fp_scroll, 220, -1);
+    gtk_widget_set_hexpand(fp_scroll, TRUE);
+    ctx.fp_list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(ctx.fp_list), GTK_SELECTION_SINGLE);
+    g_signal_connect(ctx.fp_list, "row-selected", G_CALLBACK(on_fp_selected), &ctx);
+    g_signal_connect(ctx.fp_list, "row-activated", G_CALLBACK(on_fp_activated), &ctx);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(fp_scroll), ctx.fp_list);
+    gtk_frame_set_child(GTK_FRAME(fp_frame), fp_scroll);
+    gtk_box_append(GTK_BOX(hbox), fp_frame);
 
-    /* Right pane: preview + info */
+    /* Right: preview + info */
     GtkWidget *right_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_widget_set_size_request(right_box, 250, -1);
 
@@ -427,12 +420,12 @@ dc_eda_library_browser_run(GtkWindow *parent,
     gtk_widget_set_size_request(ctx.preview_area, 240, 200);
     gtk_widget_set_vexpand(ctx.preview_area, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(ctx.preview_area),
-                                    on_preview_draw, &ctx, NULL);
+                                    on_fp_preview_draw, &ctx, NULL);
     gtk_frame_set_child(GTK_FRAME(preview_frame), ctx.preview_area);
     gtk_box_append(GTK_BOX(right_box), preview_frame);
 
     GtkWidget *info_frame = gtk_frame_new("Info");
-    ctx.info_label = gtk_label_new("Select a symbol to preview");
+    ctx.info_label = gtk_label_new("Select a footprint to preview");
     gtk_label_set_xalign(GTK_LABEL(ctx.info_label), 0.0);
     gtk_label_set_wrap(GTK_LABEL(ctx.info_label), TRUE);
     gtk_widget_set_margin_start(ctx.info_label, 6);
@@ -445,41 +438,38 @@ dc_eda_library_browser_run(GtkWindow *parent,
     gtk_box_append(GTK_BOX(hbox), right_box);
     gtk_box_append(GTK_BOX(vbox), hbox);
 
-    /* ---- Search entry ---- */
+    /* Search entry */
     ctx.search = gtk_search_entry_new();
     gtk_widget_set_hexpand(ctx.search, TRUE);
     g_signal_connect(ctx.search, "search-changed",
-                     G_CALLBACK(on_search_changed), &ctx);
+                     G_CALLBACK(on_fp_search_changed), &ctx);
     gtk_box_append(GTK_BOX(vbox), ctx.search);
 
-    /* ---- Button bar ---- */
+    /* Button bar */
     GtkWidget *btn_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_halign(btn_bar, GTK_ALIGN_END);
     gtk_widget_set_margin_top(btn_bar, 4);
 
     GtkWidget *btn_cancel = gtk_button_new_with_label("Cancel");
     GtkWidget *btn_ok = gtk_button_new_with_label("OK");
-    g_signal_connect(btn_cancel, "clicked", G_CALLBACK(on_cancel_clicked), &ctx);
-    g_signal_connect(btn_ok, "clicked", G_CALLBACK(on_ok_clicked), &ctx);
+    g_signal_connect(btn_cancel, "clicked", G_CALLBACK(on_fp_cancel_clicked), &ctx);
+    g_signal_connect(btn_ok, "clicked", G_CALLBACK(on_fp_ok_clicked), &ctx);
     gtk_box_append(GTK_BOX(btn_bar), btn_cancel);
     gtk_box_append(GTK_BOX(btn_bar), btn_ok);
     gtk_box_append(GTK_BOX(vbox), btn_bar);
 
     gtk_window_set_child(GTK_WINDOW(ctx.dialog), vbox);
 
-    /* Populate library list */
-    populate_lib_list(&ctx);
+    populate_fp_lib_list(&ctx);
 
-    /* Show and run nested main loop */
     gtk_window_present(GTK_WINDOW(ctx.dialog));
     g_main_loop_run(ctx.loop);
     g_main_loop_unref(ctx.loop);
 
     gtk_window_destroy(GTK_WINDOW(ctx.dialog));
-
     free(ctx.selected_lib);
 
-    dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA, "Library browser: selected %s",
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA, "Footprint browser: selected %s",
            ctx.result ? ctx.result : "(cancelled)");
     return ctx.result;
 }

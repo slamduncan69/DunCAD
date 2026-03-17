@@ -100,6 +100,10 @@ set(DC_EDA_UI_SOURCES
     src/eda_ui/pcb_editor.c
     src/eda_ui/pcb_layer_panel.c
     src/eda_ui/eda_library_browser.c
+    src/eda_ui/pcb_footprint_render.c
+    src/eda_ui/eda_footprint_browser.c
+    src/eda_ui/sym_editor.c
+    src/eda_ui/fp_editor.c
 )
 
 add_executable(duncad

@@ -173,6 +173,106 @@ test_load_not_found(void)
     return 0;
 }
 
+/* ---- Phase 1: Per-library enumeration tests ---- */
+
+static int
+test_lib_count(void)
+{
+    DC_ELibrary *lib = dc_elibrary_new();
+    dc_elibrary_load_symbols(lib, DC_TEST_DATA_DIR "/Device.kicad_sym", NULL);
+
+    ASSERT(dc_elibrary_lib_count(lib) == 1);
+    const char *lname = dc_elibrary_lib_name(lib, 0);
+    ASSERT(lname != NULL);
+    ASSERT(strcmp(lname, "Device") == 0);
+
+    dc_elibrary_free(lib);
+    return 0;
+}
+
+static int
+test_lib_symbol_count(void)
+{
+    DC_ELibrary *lib = dc_elibrary_new();
+    dc_elibrary_load_symbols(lib, DC_TEST_DATA_DIR "/Device.kicad_sym", NULL);
+
+    size_t count = dc_elibrary_lib_symbol_count(lib, "Device");
+    ASSERT(count >= 3);
+
+    /* First symbol should be accessible */
+    const char *name = dc_elibrary_lib_symbol_name(lib, "Device", 0);
+    ASSERT(name != NULL);
+    ASSERT(strlen(name) > 0);
+
+    /* Wrong library name returns 0 */
+    ASSERT(dc_elibrary_lib_symbol_count(lib, "Nonexistent") == 0);
+
+    dc_elibrary_free(lib);
+    return 0;
+}
+
+static int
+test_symbol_lib_name(void)
+{
+    DC_ELibrary *lib = dc_elibrary_new();
+    dc_elibrary_load_symbols(lib, DC_TEST_DATA_DIR "/Device.kicad_sym", NULL);
+
+    ASSERT(dc_elibrary_symbol_count(lib) >= 1);
+    const char *lname = dc_elibrary_symbol_lib_name(lib, 0);
+    ASSERT(lname != NULL);
+    ASSERT(strcmp(lname, "Device") == 0);
+
+    dc_elibrary_free(lib);
+    return 0;
+}
+
+static int
+test_symbol_property(void)
+{
+    DC_ELibrary *lib = dc_elibrary_new();
+    dc_elibrary_load_symbols(lib, DC_TEST_DATA_DIR "/Device.kicad_sym", NULL);
+
+    const DC_Sexpr *sym = dc_elibrary_find_symbol(lib, "Device:R_Small");
+    ASSERT(sym != NULL);
+
+    /* R_Small should have a Reference property */
+    const char *ref = dc_elibrary_symbol_property(sym, "Reference");
+    ASSERT(ref != NULL);
+    ASSERT(strcmp(ref, "R") == 0);
+
+    /* Nonexistent property */
+    ASSERT(dc_elibrary_symbol_property(sym, "Nonexistent") == NULL);
+
+    dc_elibrary_free(lib);
+    return 0;
+}
+
+static int
+test_symbol_pin_count(void)
+{
+    DC_ELibrary *lib = dc_elibrary_new();
+    dc_elibrary_load_symbols(lib, DC_TEST_DATA_DIR "/Device.kicad_sym", NULL);
+
+    const DC_Sexpr *sym = dc_elibrary_find_symbol(lib, "Device:R_Small");
+    ASSERT(sym != NULL);
+
+    size_t pins = dc_elibrary_symbol_pin_count(sym);
+    ASSERT(pins == 2);
+
+    dc_elibrary_free(lib);
+    return 0;
+}
+
+static int
+test_footprint_count(void)
+{
+    DC_ELibrary *lib = dc_elibrary_new();
+    /* No footprints loaded yet */
+    ASSERT(dc_elibrary_footprint_count(lib) == 0);
+    dc_elibrary_free(lib);
+    return 0;
+}
+
 /* ---- main ---- */
 int
 main(void)
@@ -186,6 +286,14 @@ main(void)
     RUN_TEST(test_symbol_has_pins);
     RUN_TEST(test_symbol_names);
     RUN_TEST(test_load_not_found);
+
+    /* Phase 1 tests */
+    RUN_TEST(test_lib_count);
+    RUN_TEST(test_lib_symbol_count);
+    RUN_TEST(test_symbol_lib_name);
+    RUN_TEST(test_symbol_property);
+    RUN_TEST(test_symbol_pin_count);
+    RUN_TEST(test_footprint_count);
 
     fprintf(stderr, "=== %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;
