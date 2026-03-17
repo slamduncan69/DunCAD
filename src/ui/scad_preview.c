@@ -4,6 +4,8 @@
 #include "gl/gl_viewport.h"
 #include "scad/scad_splitter.h"
 #include "ui/transform_panel.h"
+#include "voxel/voxelize_stl.h"
+#include "voxel/voxel.h"
 #include "core/log.h"
 #include "cubeiform/cubeiform.h"
 
@@ -44,6 +46,10 @@ struct DC_ScadPreview {
     ts_progress     progress;       /* shared progress — worker writes, UI reads */
     int             camera_fitted;  /* 1 after first fit — skip auto-fit on re-renders */
     int             render_pending; /* 1 = re-render queued (dropped while busy) */
+
+    /* Voxel rendering — THE PURE PATH */
+    int             voxel_resolution; /* cells per longest axis (default 64) */
+    DC_VoxelGrid   *voxel_grid;      /* owned — last voxelized scene */
 };
 
 /* -------------------------------------------------------------------------
@@ -391,47 +397,72 @@ render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
         return;
     }
 
-    /* Load objects into viewport */
+    /* PURIFIED RENDERING PATH — voxelize all STL objects into SDF.
+     * No triangles survive into the rendering pipeline. */
     dc_gl_viewport_clear_objects(pv->viewport);
     dc_gl_viewport_clear_mesh(pv->viewport);
 
-    int loaded = 0;
+    /* Merge all STL objects by voxelizing the first one.
+     * TODO: union multiple objects via SDF composition. */
+    int voxelized = 0;
+    int vox_res = pv->voxel_resolution > 0 ? pv->voxel_resolution : 64;
+
     for (int i = 0; i < res->obj_count; i++) {
-        if (res->objs[i].stl_path) {
-            int idx = dc_gl_viewport_add_object(pv->viewport,
-                res->objs[i].stl_path,
-                res->objs[i].line_start,
-                res->objs[i].line_end);
-            if (idx >= 0) loaded++;
-            unlink(res->objs[i].stl_path);
+        if (!res->objs[i].stl_path) continue;
+
+        DC_Error verr = {0};
+        DC_VoxelGrid *grid = dc_voxelize_stl(res->objs[i].stl_path, vox_res, &verr);
+        unlink(res->objs[i].stl_path);
+
+        if (grid) {
+            /* Free previous grid */
+            dc_voxel_grid_free(pv->voxel_grid);
+            pv->voxel_grid = grid;
+            dc_gl_viewport_set_voxel_grid(pv->viewport, grid);
+            voxelized++;
+            DC_LOG_INFO_APP("voxelized object %d: %zu active voxels (res=%d)",
+                             i, dc_voxel_grid_active_count(grid), vox_res);
+        } else {
+            DC_LOG_INFO_APP("voxelize failed for object %d: %s", i, verr.message);
         }
+
+        break; /* First object only for now — TODO: SDF union of multiple */
     }
 
-    if (loaded > 0) {
-        /* Fit camera only on first preview render (not on re-renders from movement) */
+    if (voxelized > 0) {
+        /* Fit camera to voxel bounds */
         if (!res->is_hq && !pv->camera_fitted) {
-            DC_LOG_INFO_APP("fit_all_objects: fitting camera (first render), gen=%u", pv->render_gen);
-            dc_gl_viewport_fit_all_objects(pv->viewport);
+            DC_LOG_INFO_APP("fit camera to voxel scene (first render), gen=%u", pv->render_gen);
+            /* Compute center from voxel grid bounds */
+            float vmin[3] = {0}, vmax[3] = {0};
+            dc_voxel_grid_bounds(pv->voxel_grid, &vmin[0], &vmin[1], &vmin[2],
+                                                   &vmax[0], &vmax[1], &vmax[2]);
+            float cx = (vmin[0]+vmax[0])*0.5f;
+            float cy = (vmin[1]+vmax[1])*0.5f;
+            float cz = (vmin[2]+vmax[2])*0.5f;
+            float dx = vmax[0]-vmin[0], dy = vmax[1]-vmin[1], dz = vmax[2]-vmin[2];
+            float diag = sqrtf(dx*dx + dy*dy + dz*dz);
+            dc_gl_viewport_set_camera_center(pv->viewport, cx, cy, cz);
+            dc_gl_viewport_set_camera_dist(pv->viewport, diag * 1.5f);
             pv->camera_fitted = 1;
-        } else {
-            DC_LOG_INFO_APP("fit_all_objects: SKIPPED (is_hq=%d fitted=%d)",
-                            res->is_hq, pv->camera_fitted);
         }
 
+        size_t active = pv->voxel_grid ?
+            dc_voxel_grid_active_count(pv->voxel_grid) : 0;
         char status[192];
         if (res->is_hq) {
             snprintf(status, sizeof(status),
-                     "HQ: %d objs, %d tris in %.3fs",
-                     loaded, res->total_tris, res->elapsed);
+                     "Voxelized: %zu voxels (res=%d) in %.3fs",
+                     active, vox_res, res->elapsed);
         } else {
             snprintf(status, sizeof(status),
-                     "Preview: %d objs, %d tris in %.3fs — refining...",
-                     loaded, res->total_tris, res->elapsed);
+                     "Voxelized: %zu voxels (res=%d) — refining...",
+                     active, vox_res);
         }
         gtk_label_set_text(GTK_LABEL(pv->status_label), status);
     } else {
         gtk_label_set_text(GTK_LABEL(pv->status_label),
-                           "No geometry loaded");
+                           "No geometry voxelized");
     }
 
     /* If preview just completed, check for queued re-render or launch HQ */
@@ -603,6 +634,7 @@ dc_scad_preview_new(void)
 {
     DC_ScadPreview *pv = calloc(1, sizeof(*pv));
     if (!pv) return NULL;
+    pv->voxel_resolution = 64; /* default — the holy number */
 
     /* GL viewport */
     pv->viewport = dc_gl_viewport_new();
@@ -687,6 +719,7 @@ dc_scad_preview_free(DC_ScadPreview *pv)
     if (!pv) return;
     pv->hq_cancel = 1;  /* signal any in-flight HQ to stop */
     progress_stop(pv);
+    dc_voxel_grid_free(pv->voxel_grid);
     dc_transform_panel_free(pv->transform);
     dc_gl_viewport_free(pv->viewport);
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "scad preview freed");
@@ -745,4 +778,20 @@ dc_scad_preview_is_rendering(DC_ScadPreview *pv)
 {
     if (!pv) return 0;
     return pv->rendering || pv->hq_running;
+}
+
+void
+dc_scad_preview_set_voxel_resolution(DC_ScadPreview *pv, int resolution)
+{
+    if (!pv) return;
+    if (resolution < 8) resolution = 8;
+    if (resolution > 512) resolution = 512;
+    pv->voxel_resolution = resolution;
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "voxel resolution set to %d", resolution);
+}
+
+int
+dc_scad_preview_get_voxel_resolution(DC_ScadPreview *pv)
+{
+    return pv ? pv->voxel_resolution : 64;
 }

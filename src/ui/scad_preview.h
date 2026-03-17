@@ -50,4 +50,9 @@ const char *dc_scad_preview_get_status(DC_ScadPreview *pv);
 /* Returns 1 if a render (preview or HQ) is in progress. */
 int dc_scad_preview_is_rendering(DC_ScadPreview *pv);
 
+/* Voxel resolution: how many cells per longest axis when voxelizing STL.
+ * Default 64. Higher = smoother but slower. Maps to OpenSCAD $fn. */
+void dc_scad_preview_set_voxel_resolution(DC_ScadPreview *pv, int resolution);
+int  dc_scad_preview_get_voxel_resolution(DC_ScadPreview *pv);
+
 #endif /* DC_SCAD_PREVIEW_H */

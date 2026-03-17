@@ -83,6 +83,7 @@ add_library(dc_core STATIC
     src/cubeiform/cubeiform_eda.c
     src/voxel/voxel.c
     src/voxel/sdf.c
+    src/voxel/voxelize_stl.c
 )
 target_include_directories(dc_core PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(dc_core

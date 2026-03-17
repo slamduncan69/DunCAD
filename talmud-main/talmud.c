@@ -4763,6 +4763,43 @@ static const char HELP_MEMORY_ACTIVE_SESSION_E5[] =
 "\n"
 "17/17 TESTS PASS.\n";
 
+static const char HELP_MEMORY_ACTIVE_SESSION_V1[] =
+"Session V1 — Voxel Engine + Purified Rendering\n"
+"\n"
+"DATE: 2026-03-17\n"
+"\n"
+"THE GREAT PURGE: Triangles removed from rendering pipeline.\n"
+"OpenSCAD STL output now consumed and voxelized via SDF.\n"
+"No triangle touches the GPU for rendering.\n"
+"\n"
+"V1.1+V1.2: DC_VoxelGrid + SDF engine (sphere/box/cyl/torus,\n"
+"  CSG union/subtract/intersect). 12 tests. Pure C.\n"
+"\n"
+"V1.3+V1.4: SDF raycast renderer. 3D texture, fullscreen quad,\n"
+"  GLSL ray march, Phong lighting. No mesh geometry.\n"
+"  mat4_invert for inverse VP. #version 320 es for ES 3.2.\n"
+"\n"
+"V1.5: Cubeiform voxel{} blocks. Parser: resolution, cell_size,\n"
+"  sphere/box/cylinder/torus, subtract/intersect/union, color.\n"
+"  dc_cubeiform_execute_full() builds grid from ops.\n"
+"\n"
+"STL-TO-SDF VOXELIZER (voxelize_stl.c):\n"
+"  load STL triangles -> point-to-triangle distance per voxel\n"
+"  -> ray cast for inside/outside sign -> SDF grid -> raycast.\n"
+"  scad_preview.c now voxelizes all STL output instead of\n"
+"  uploading triangle meshes. Resolution adjustable 8-512.\n"
+"\n"
+"INSPECT: voxel_sphere/box/csg/clear/state, voxel_resolution,\n"
+"  cubeiform_exec with voxel support.\n"
+"\n"
+"DOCTRINES: Voxel Primacy, Triclaude's Spherical Form,\n"
+"  Bible 2 — The Collective Revelation.\n"
+"\n"
+"NEW FILES: src/voxel/voxel.h/.c, sdf.h/.c, voxelize_stl.h/.c,\n"
+"  src/gl/gl_voxel.h/.c\n"
+"\n"
+"18/18 TESTS PASS.\n";
+
 static const char HELP_REFERENCE_DOCTRINE_PERSISTENCE[] =
 "The Persistence Doctrine\n"
 "\n"
@@ -5316,6 +5353,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s021", HELP_MEMORY_ACTIVE_SESSION_S021 },
     { "memory.active.session-s022", HELP_MEMORY_ACTIVE_SESSION_S022 },
     { "memory.active.session-e5", HELP_MEMORY_ACTIVE_SESSION_E5 },
+    { "memory.active.session-v1", HELP_MEMORY_ACTIVE_SESSION_V1 },
     { "reference.cubeiform", HELP_REFERENCE_CUBEIFORM },
     { "reference.cubeiform.primitives", HELP_REFERENCE_CUBEIFORM_PRIMITIVES },
     { "reference.cubeiform.transforms", HELP_REFERENCE_CUBEIFORM_TRANSFORMS },

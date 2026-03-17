@@ -22,6 +22,7 @@
 #include "eda/eda_library.h"
 #include "voxel/voxel.h"
 #include "voxel/sdf.h"
+#include "voxel/voxelize_stl.h"
 #include "eda/eda_ratsnest.h"
 #include "core/string_builder.h"
 #include "core/error.h"
@@ -1761,6 +1762,28 @@ static char *cmd_voxel_clear(void) {
     return strdup("{\"ok\":true}\n");
 }
 
+/* voxel_resolution [value] — get or set voxel resolution */
+static char *cmd_voxel_resolution(const char *args) {
+    DC_ScadPreview *pv = get_preview();
+    if (!pv) return strdup("{\"error\":\"no scad preview\"}\n");
+
+    if (args && *args) {
+        int res = atoi(args);
+        if (res >= 8 && res <= 512) {
+            dc_scad_preview_set_voxel_resolution(pv, res);
+            char *resp = malloc(128);
+            snprintf(resp, 128, "{\"ok\":true,\"resolution\":%d}\n", res);
+            return resp;
+        }
+        return strdup("{\"error\":\"resolution must be 8-512\"}\n");
+    }
+
+    int res = dc_scad_preview_get_voxel_resolution(pv);
+    char *resp = malloc(128);
+    snprintf(resp, 128, "{\"resolution\":%d}\n", res);
+    return resp;
+}
+
 /* voxel_state — info about current voxel grid */
 static char *cmd_voxel_state(void) {
     if (!s_voxel_grid) return strdup("{\"loaded\":false}\n");
@@ -1912,6 +1935,7 @@ dispatch(const char *cmd)
     if (strcmp(name, "voxel_csg")          == 0) return cmd_voxel_csg(args);
     if (strcmp(name, "voxel_clear")        == 0) return cmd_voxel_clear();
     if (strcmp(name, "voxel_state")        == 0) return cmd_voxel_state();
+    if (strcmp(name, "voxel_resolution")   == 0) return cmd_voxel_resolution(args);
 
     /* Meta */
     if (strcmp(name, "help") == 0) return cmd_help();
