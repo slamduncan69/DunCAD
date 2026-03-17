@@ -696,21 +696,14 @@ static void parse_pcb_block(EParser *p, DC_Array *ops)
  * Top-level parser — find domain blocks in Cubeiform source
  * ========================================================================= */
 /* =========================================================================
- * Voxel block parser
+ * Voxel statement parser — parses a single SDF statement
  * ========================================================================= */
 static void
-parse_voxel_block(EParser *p, DC_Array *vox_ops)
+parse_voxel_block_inner(EParser *p, DC_Array *vox_ops)
 {
-    if (p->cur.type != ETOK_LBRACE) {
-        if (!p->has_error) {
-            DC_SET_ERROR(p->err, DC_ERROR_EDA_PARSE, "expected '{' after voxel");
-            p->has_error = 1;
-        }
-        return;
-    }
-    next_token(p); /* skip { */
-
-    while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error) {
+    /* Parse one SDF statement at the current position */
+    if (p->cur.type == ETOK_EOF || p->has_error) return;
+    {
         if (ident_eq(&p->cur, "resolution")) {
             next_token(p);
             DC_VoxOp op = { .type = DC_VOX_OP_SET_RESOLUTION };
@@ -795,8 +788,26 @@ parse_voxel_block(EParser *p, DC_Array *vox_ops)
             expect(p, ETOK_SEMI);
             dc_array_push(vox_ops, &op);
         } else {
-            next_token(p); /* skip unknown */
+            return; /* not an SDF statement — caller handles */
         }
+    }
+}
+
+/* Parse a voxel { ... } block — calls inner parser in a loop */
+static void
+parse_voxel_block(EParser *p, DC_Array *vox_ops)
+{
+    if (p->cur.type != ETOK_LBRACE) {
+        if (!p->has_error) {
+            DC_SET_ERROR(p->err, DC_ERROR_EDA_PARSE, "expected '{' after voxel");
+            p->has_error = 1;
+        }
+        return;
+    }
+    next_token(p); /* skip { */
+
+    while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error) {
+        parse_voxel_block_inner(p, vox_ops);
     }
 
     if (p->cur.type == ETOK_RBRACE) next_token(p);
@@ -814,6 +825,18 @@ static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_o
         } else if (ident_eq(&p->cur, "voxel")) {
             next_token(p);
             parse_voxel_block(p, vox_ops);
+        } else if (ident_eq(&p->cur, "sphere") ||
+                   ident_eq(&p->cur, "box") ||
+                   ident_eq(&p->cur, "cylinder") ||
+                   ident_eq(&p->cur, "torus") ||
+                   ident_eq(&p->cur, "subtract") ||
+                   ident_eq(&p->cur, "intersect") ||
+                   ident_eq(&p->cur, "union") ||
+                   ident_eq(&p->cur, "resolution") ||
+                   ident_eq(&p->cur, "cell_size") ||
+                   ident_eq(&p->cur, "color")) {
+            /* Top-level SDF primitives — all is rendered natively */
+            parse_voxel_block_inner(p, vox_ops);
         } else if (ident_eq(&p->cur, "assembly")) {
             /* Skip assembly blocks for now — future */
             next_token(p);

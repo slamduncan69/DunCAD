@@ -106,14 +106,14 @@ static const char *RAYMARCH_FRAG_SRC =
     "    float tNear = max(tHit.x, 0.0);  /* clamp to camera */\n"
     "    float tFar  = tHit.y;\n"
     "\n"
-    "    /* March through the volume */\n"
+    "    /* March through the volume — fixed step for reliability */\n"
     "    float t = tNear;\n"
     "    float step = uStepSize;\n"
     "    bool hit = false;\n"
     "    vec3 hitUVW;\n"
     "    vec3 hitPos;\n"
     "\n"
-    "    for (int i = 0; i < 512; i++) {\n"
+    "    for (int i = 0; i < 1024; i++) {\n"
     "        if (t > tFar) break;\n"
     "        vec3 p = ro + rd * t;\n"
     "        vec3 uvw = worldToUV(p);\n"
@@ -132,8 +132,8 @@ static const char *RAYMARCH_FRAG_SRC =
     "            break;\n"
     "        }\n"
     "\n"
-    "        /* Adaptive step: use SDF distance for sphere tracing */\n"
-    "        t += max(d * length(uBBoxMax - uBBoxMin) * 0.5, step);\n"
+    "        /* Fixed step — one voxel width. No adaptive skipping. */\n"
+    "        t += step;\n"
     "    }\n"
     "\n"
     "    if (!hit) discard;\n"
@@ -366,11 +366,9 @@ dc_gl_voxel_buf_draw(const DC_GlVoxelBuf *b,
     glUniform3fv(glGetUniformLocation(b->prog, "uBBoxMin"), 1, b->bbox_min);
     glUniform3fv(glGetUniformLocation(b->prog, "uBBoxMax"), 1, b->bbox_max);
 
-    /* Step size: ~1 voxel width in world space, divided by bbox diagonal */
-    float step = b->cell_size * 0.5f /
-        sqrtf((b->bbox_max[0]-b->bbox_min[0])*(b->bbox_max[0]-b->bbox_min[0]) +
-              (b->bbox_max[1]-b->bbox_min[1])*(b->bbox_max[1]-b->bbox_min[1]) +
-              (b->bbox_max[2]-b->bbox_min[2])*(b->bbox_max[2]-b->bbox_min[2]));
+    /* Step size: half a voxel width in world space.
+     * This ensures we never skip over a surface, even at oblique angles. */
+    float step = b->cell_size * 0.5f;
     glUniform1f(glGetUniformLocation(b->prog, "uStepSize"), step);
 
     /* Bind 3D texture */

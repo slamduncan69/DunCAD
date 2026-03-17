@@ -75,6 +75,7 @@ poll_progress(gpointer data)
 }
 
 static void
+__attribute__((unused))
 progress_start(DC_ScadPreview *pv)
 {
     pv->progress.done  = 0;
@@ -545,16 +546,12 @@ do_render(DC_ScadPreview *pv)
     }
 
     /* =====================================================================
-     * THE PURE PATH — Cubeiform voxel{} blocks render directly to SDF.
+     * ALL IS SDF. ALL IS RENDERED NATIVELY.
      * No triangles. No STL. No mesh. Just math.
      * ===================================================================== */
-
-    /* Check if the source contains a voxel{} block */
-    int has_voxel = (strstr(text, "voxel") != NULL && strstr(text, "{") != NULL);
-
-    if (has_voxel) {
-        /* DIRECT SDF RENDERING — the holy path */
-        gtk_label_set_text(GTK_LABEL(pv->status_label), "Executing voxel SDF...");
+    {
+        /* SDF RENDERING — the only path */
+        gtk_label_set_text(GTK_LABEL(pv->status_label), "Rendering SDF...");
 
         DC_Error err = {0};
         DC_VoxelGrid *grid = NULL;
@@ -571,7 +568,7 @@ do_render(DC_ScadPreview *pv)
             size_t active = dc_voxel_grid_active_count(grid);
             int res = dc_voxel_grid_size_x(grid);
 
-            /* Fit camera to voxel bounds */
+            /* Fit camera */
             if (!pv->camera_fitted) {
                 float vmin[3] = {0}, vmax[3] = {0};
                 dc_voxel_grid_bounds(grid, &vmin[0], &vmin[1], &vmin[2],
@@ -588,71 +585,17 @@ do_render(DC_ScadPreview *pv)
 
             char status[192];
             snprintf(status, sizeof(status),
-                     "Voxelized: %zu voxels (%dx%dx%d) — pure SDF, no triangles",
+                     "Rendered: %zu active (%dx%dx%d)",
                      active, res, res, res);
             gtk_label_set_text(GTK_LABEL(pv->status_label), status);
 
             dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-                   "PURE SDF RENDER: %zu active voxels, resolution %d", active, res);
+                   "SDF RENDER: %zu active, resolution %d", active, res);
         } else {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "Voxel error: %.200s",
-                     err.message[0] ? err.message : "no voxel output");
-            gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
+            gtk_label_set_text(GTK_LABEL(pv->status_label),
+                               "No renderable geometry (use sphere/box/cylinder/torus)");
         }
-        return;
     }
-
-    /* =====================================================================
-     * LEGACY PATH — OpenSCAD/Cubeiform without voxel{} blocks.
-     * Transpile to OpenSCAD and render via Trinity Site.
-     * Triangles are produced but ONLY for the STL intermediary.
-     * The result is voxelized before reaching the GPU.
-     * TODO: Auto-wrap OpenSCAD primitives into voxel{} SDF blocks
-     *       to eliminate this path entirely.
-     * ===================================================================== */
-    const char *path = dc_code_editor_get_path(pv->code_ed);
-    int is_dcad = 1;
-    if (path) {
-        const char *ext = strrchr(path, '.');
-        is_dcad = (ext && strcmp(ext, ".dcad") == 0);
-    }
-    if (is_dcad) {
-        DC_Error err = {0};
-        char *scad = dc_cubeiform_to_scad(text, &err);
-        if (!scad) {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "Cubeiform error: %.200s", err.message);
-            gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
-            free(text);
-            return;
-        }
-        free(text);
-        text = scad;
-    }
-
-    pv->hq_cancel = 1;
-    pv->render_gen++;
-    pv->rendering = 1;
-    gtk_widget_set_sensitive(pv->render_btn, FALSE);
-    gtk_label_set_text(GTK_LABEL(pv->status_label),
-                       "Legacy render (voxelizing STL)...");
-    progress_start(pv);
-
-    RenderTaskData *td = calloc(1, sizeof(*td));
-    td->source   = text;
-    td->gen      = pv->render_gen;
-    td->is_hq    = 0;
-    td->cancel   = NULL;
-    td->progress = &pv->progress;
-
-    GTask *task = g_task_new(NULL, NULL, render_done_cb, pv);
-    g_task_set_task_data(task, td, render_task_data_free);
-    g_task_run_in_thread(task, render_thread_func);
-    g_object_unref(task);
-
-    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-           "LEGACY render (STL→voxel) started (gen %u)", pv->render_gen);
 }
 
 /* -------------------------------------------------------------------------
