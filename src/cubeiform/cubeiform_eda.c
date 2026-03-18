@@ -41,8 +41,15 @@ typedef enum {
     ETOK_COMMA,
     ETOK_EQ,
     ETOK_DOT,
-    ETOK_PIPE,    /* >> */
+    ETOK_PIPE,      /* >> */
     ETOK_COLON,
+    ETOK_PLUS,      /* + */
+    ETOK_MINUS,     /* - */
+    ETOK_AMP,       /* & */
+    ETOK_STAR,      /* * */
+    ETOK_SLASH,     /* / (not comment) */
+    ETOK_LBRACKET,  /* [ */
+    ETOK_RBRACKET,  /* ] */
 } EToken;
 
 typedef struct {
@@ -112,6 +119,12 @@ static void next_token(EParser *p)
         case '=': p->cur = (ETok){ETOK_EQ, p->src + p->pos, 1, 0}; p->pos++; return;
         case '.': p->cur = (ETok){ETOK_DOT, p->src + p->pos, 1, 0}; p->pos++; return;
         case ':': p->cur = (ETok){ETOK_COLON, p->src + p->pos, 1, 0}; p->pos++; return;
+        case '+': p->cur = (ETok){ETOK_PLUS, p->src + p->pos, 1, 0}; p->pos++; return;
+        case '-': p->cur = (ETok){ETOK_MINUS, p->src + p->pos, 1, 0}; p->pos++; return;
+        case '&': p->cur = (ETok){ETOK_AMP, p->src + p->pos, 1, 0}; p->pos++; return;
+        case '*': p->cur = (ETok){ETOK_STAR, p->src + p->pos, 1, 0}; p->pos++; return;
+        case '[': p->cur = (ETok){ETOK_LBRACKET, p->src + p->pos, 1, 0}; p->pos++; return;
+        case ']': p->cur = (ETok){ETOK_RBRACKET, p->src + p->pos, 1, 0}; p->pos++; return;
         default: break;
     }
 
@@ -119,6 +132,13 @@ static void next_token(EParser *p)
     if (c == '>' && p->pos + 1 < p->len && p->src[p->pos + 1] == '>') {
         p->cur = (ETok){ETOK_PIPE, p->src + p->pos, 2, 0};
         p->pos += 2;
+        return;
+    }
+
+    /* / as division (comments already consumed by skip_ws) */
+    if (c == '/') {
+        p->cur = (ETok){ETOK_SLASH, p->src + p->pos, 1, 0};
+        p->pos++;
         return;
     }
 
@@ -135,9 +155,8 @@ static void next_token(EParser *p)
         return;
     }
 
-    /* Number (possibly negative) */
-    if (isdigit((unsigned char)c) || (c == '-' && p->pos + 1 < p->len &&
-        isdigit((unsigned char)p->src[p->pos + 1]))) {
+    /* Number literal (leading minus handled by arithmetic parser or eat_number) */
+    if (isdigit((unsigned char)c)) {
         const char *start = p->src + p->pos;
         char *end = NULL;
         double val = strtod(start, &end);
@@ -212,9 +231,14 @@ static void expect(EParser *p, EToken type)
 
 static double eat_number(EParser *p)
 {
+    int neg = 0;
+    if (p->cur.type == ETOK_MINUS) {
+        neg = 1;
+        next_token(p);
+    }
     double v = p->cur.num_val;
     expect(p, ETOK_NUMBER);
-    return v;
+    return neg ? -v : v;
 }
 
 /* -------------------------------------------------------------------------
@@ -696,182 +720,758 @@ static void parse_pcb_block(EParser *p, DC_Array *ops)
 /* =========================================================================
  * Top-level parser — find domain blocks in Cubeiform source
  * ========================================================================= */
+
 /* =========================================================================
- * Voxel statement parser — parses a single SDF statement
+ * Cubeiform voxel parser — pipe syntax, operator CSG, variables, for loops
+ *
+ * Grammar:
+ *   statement   = settings | assignment | for_loop | expr_stmt
+ *   settings    = "resolution" NUMBER ";" | "cell_size" NUMBER ";"
+ *   assignment  = IDENT "=" expr ";"
+ *   for_loop    = "for" IDENT "in" "[" expr ":" expr "]" "{" statements "}"
+ *   expr_stmt   = expr ";"
+ *
+ *   expr        = pipe ( ("+"|"-"|"&") pipe )*
+ *   pipe        = primary ( ">>" transform )*
+ *   primary     = primitive | "(" expr ")" | IDENT (variable ref)
+ *   primitive   = ("sphere"|"cube"|"cylinder"|"torus") "(" args ")"
+ *   transform   = ("move"|"rotate"|"scale"|"color") "(" args ")"
+ *   args        = arg ("," arg)*
+ *   arg         = [IDENT "="] arith_expr
+ *
+ *   arith_expr  = arith_term (("+"|"-") arith_term)*
+ *   arith_term  = arith_factor (("*"|"/") arith_factor)*
+ *   arith_factor = NUMBER | IDENT | "-" arith_factor | "(" arith_expr ")"
  * ========================================================================= */
-static void
-parse_voxel_block_inner(EParser *p, DC_Array *vox_ops)
+
+/* Variable table for voxel parser */
+#define VOX_MAX_VARS 64
+typedef struct {
+    char name[64];
+    DC_Array *ops; /* owned DC_VoxOp array */
+} VoxVarDef;
+
+typedef struct {
+    VoxVarDef vars[VOX_MAX_VARS];
+    int nvar;
+    /* For-loop variable bindings for arithmetic evaluation */
+    char loop_var[64];
+    double loop_val;
+    int has_loop_var;
+} VoxParseCtx;
+
+static void vox_ctx_init(VoxParseCtx *ctx)
 {
-    /* Parse one SDF statement at the current position */
-    if (p->cur.type == ETOK_EOF || p->has_error) return;
-    {
-        if (ident_eq(&p->cur, "resolution")) {
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+static void vox_ctx_free(VoxParseCtx *ctx)
+{
+    for (int i = 0; i < ctx->nvar; i++)
+        dc_array_free(ctx->vars[i].ops);
+}
+
+static VoxVarDef *vox_ctx_find(VoxParseCtx *ctx, const char *name, int len)
+{
+    for (int i = 0; i < ctx->nvar; i++) {
+        if ((int)strlen(ctx->vars[i].name) == len &&
+            strncmp(ctx->vars[i].name, name, (size_t)len) == 0)
+            return &ctx->vars[i];
+    }
+    return NULL;
+}
+
+static VoxVarDef *vox_ctx_add(VoxParseCtx *ctx, const char *name, int len)
+{
+    /* Overwrite existing */
+    VoxVarDef *v = vox_ctx_find(ctx, name, len);
+    if (v) {
+        dc_array_clear(v->ops);
+        return v;
+    }
+    if (ctx->nvar >= VOX_MAX_VARS) return NULL;
+    v = &ctx->vars[ctx->nvar++];
+    int n = len < 63 ? len : 63;
+    memcpy(v->name, name, (size_t)n);
+    v->name[n] = '\0';
+    v->ops = dc_array_new(sizeof(DC_VoxOp));
+    return v;
+}
+
+/* Copy all ops from a var def into target array */
+static void vox_copy_var_ops(DC_Array *dst, const VoxVarDef *v)
+{
+    size_t n = dc_array_length(v->ops);
+    for (size_t i = 0; i < n; i++) {
+        DC_VoxOp *op = dc_array_get(v->ops, i);
+        dc_array_push(dst, op);
+    }
+}
+
+/* Copy all ops from one array to another */
+static void vox_copy_ops(DC_Array *dst, DC_Array *src)
+{
+    size_t n = dc_array_length(src);
+    for (size_t i = 0; i < n; i++) {
+        DC_VoxOp *op = dc_array_get(src, i);
+        dc_array_push(dst, op);
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * Arithmetic expression evaluator (for argument positions)
+ * ---------------------------------------------------------------------- */
+static double eval_arith_expr(EParser *p, VoxParseCtx *ctx);
+
+static double eval_arith_factor(EParser *p, VoxParseCtx *ctx)
+{
+    if (p->has_error) return 0;
+
+    if (p->cur.type == ETOK_NUMBER) {
+        double v = p->cur.num_val;
+        next_token(p);
+        return v;
+    }
+    if (p->cur.type == ETOK_MINUS) {
+        next_token(p);
+        return -eval_arith_factor(p, ctx);
+    }
+    if (p->cur.type == ETOK_LPAREN) {
+        next_token(p);
+        double v = eval_arith_expr(p, ctx);
+        expect(p, ETOK_RPAREN);
+        return v;
+    }
+    if (p->cur.type == ETOK_IDENT) {
+        /* Check loop variable */
+        if (ctx->has_loop_var &&
+            (int)strlen(ctx->loop_var) == p->cur.len &&
+            strncmp(ctx->loop_var, p->cur.start, (size_t)p->cur.len) == 0) {
             next_token(p);
-            DC_VoxOp op = { .type = DC_VOX_OP_SET_RESOLUTION };
-            op.resolution = (int)eat_number(p);
-            expect(p, ETOK_SEMI);
-            dc_array_push(vox_ops, &op);
-        } else if (ident_eq(&p->cur, "cell_size")) {
+            return ctx->loop_val;
+        }
+        /* Unknown variable — return 0 */
+        next_token(p);
+        return 0;
+    }
+    return 0;
+}
+
+static double eval_arith_term(EParser *p, VoxParseCtx *ctx)
+{
+    double v = eval_arith_factor(p, ctx);
+    while (!p->has_error) {
+        if (p->cur.type == ETOK_STAR) {
             next_token(p);
-            DC_VoxOp op = { .type = DC_VOX_OP_SET_CELL_SIZE };
-            op.cell_size = (float)eat_number(p);
-            expect(p, ETOK_SEMI);
-            dc_array_push(vox_ops, &op);
-        } else if (ident_eq(&p->cur, "sphere")) {
+            v *= eval_arith_factor(p, ctx);
+        } else if (p->cur.type == ETOK_SLASH) {
             next_token(p);
-            expect(p, ETOK_LPAREN);
-            DC_VoxOp op = { .type = DC_VOX_OP_SPHERE };
-            op.x = eat_number(p); expect(p, ETOK_COMMA);
-            op.y = eat_number(p); expect(p, ETOK_COMMA);
-            op.z = eat_number(p); expect(p, ETOK_COMMA);
-            op.radius = eat_number(p);
-            expect(p, ETOK_RPAREN);
-            expect(p, ETOK_SEMI);
-            dc_array_push(vox_ops, &op);
-        } else if (ident_eq(&p->cur, "box")) {
+            double d = eval_arith_factor(p, ctx);
+            v = (d != 0) ? v / d : 0;
+        } else break;
+    }
+    return v;
+}
+
+static double eval_arith_expr(EParser *p, VoxParseCtx *ctx)
+{
+    double v = eval_arith_term(p, ctx);
+    while (!p->has_error) {
+        if (p->cur.type == ETOK_PLUS) {
             next_token(p);
-            expect(p, ETOK_LPAREN);
-            DC_VoxOp op = { .type = DC_VOX_OP_BOX };
-            op.x  = eat_number(p); expect(p, ETOK_COMMA);
-            op.y  = eat_number(p); expect(p, ETOK_COMMA);
-            op.z  = eat_number(p); expect(p, ETOK_COMMA);
-            op.x2 = eat_number(p); expect(p, ETOK_COMMA);
-            op.y2 = eat_number(p); expect(p, ETOK_COMMA);
-            op.z2 = eat_number(p);
-            expect(p, ETOK_RPAREN);
-            expect(p, ETOK_SEMI);
-            dc_array_push(vox_ops, &op);
-        } else if (ident_eq(&p->cur, "cylinder")) {
+            v += eval_arith_term(p, ctx);
+        } else if (p->cur.type == ETOK_MINUS) {
             next_token(p);
-            expect(p, ETOK_LPAREN);
-            DC_VoxOp op = { .type = DC_VOX_OP_CYLINDER };
-            op.x = eat_number(p); expect(p, ETOK_COMMA);
-            op.y = eat_number(p); expect(p, ETOK_COMMA);
-            op.radius = eat_number(p); expect(p, ETOK_COMMA);
-            op.z = eat_number(p); expect(p, ETOK_COMMA);
-            op.radius2 = eat_number(p);
-            expect(p, ETOK_RPAREN);
-            expect(p, ETOK_SEMI);
-            dc_array_push(vox_ops, &op);
-        } else if (ident_eq(&p->cur, "torus")) {
+            v -= eval_arith_term(p, ctx);
+        } else break;
+    }
+    return v;
+}
+
+/* -------------------------------------------------------------------------
+ * Argument parser — mixed positional/named params
+ * ---------------------------------------------------------------------- */
+typedef struct {
+    double vals[16];
+    char   names[16][32];
+    int    count;
+} VoxArgs;
+
+static double vox_arg_find(const VoxArgs *a, const char *name, double def)
+{
+    for (int i = 0; i < a->count; i++) {
+        if (a->names[i][0] && strcmp(a->names[i], name) == 0)
+            return a->vals[i];
+    }
+    return def;
+}
+
+static double vox_arg_pos(const VoxArgs *a, int idx, double def)
+{
+    return (idx < a->count && a->names[idx][0] == '\0') ? a->vals[idx] : def;
+}
+
+static int vox_arg_has(const VoxArgs *a, const char *name)
+{
+    for (int i = 0; i < a->count; i++) {
+        if (a->names[i][0] && strcmp(a->names[i], name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static void parse_vox_args(EParser *p, VoxParseCtx *ctx, VoxArgs *args)
+{
+    memset(args, 0, sizeof(*args));
+    expect(p, ETOK_LPAREN);
+
+    while (p->cur.type != ETOK_RPAREN && p->cur.type != ETOK_EOF && !p->has_error) {
+        if (args->count >= 16) break;
+
+        /* Check for name=value */
+        if (p->cur.type == ETOK_IDENT) {
+            /* Peek: is next token '='? Save state to restore if not. */
+            int save_pos = p->pos;
+            ETok save_tok = p->cur;
+            char name_buf[32] = {0};
+            int nlen = p->cur.len < 31 ? p->cur.len : 31;
+            memcpy(name_buf, p->cur.start, (size_t)nlen);
             next_token(p);
-            expect(p, ETOK_LPAREN);
-            DC_VoxOp op = { .type = DC_VOX_OP_TORUS };
-            op.x = eat_number(p); expect(p, ETOK_COMMA);
-            op.y = eat_number(p); expect(p, ETOK_COMMA);
-            op.z = eat_number(p); expect(p, ETOK_COMMA);
-            op.radius = eat_number(p); expect(p, ETOK_COMMA);
-            op.radius2 = eat_number(p);
-            expect(p, ETOK_RPAREN);
-            expect(p, ETOK_SEMI);
-            dc_array_push(vox_ops, &op);
-        } else if (ident_eq(&p->cur, "subtract")) {
-            next_token(p);
-            DC_VoxOp wrapper = { .type = DC_VOX_OP_SUBTRACT };
-            dc_array_push(vox_ops, &wrapper);
-            /* The next statement is the operand — parse it as part of the block */
-        } else if (ident_eq(&p->cur, "intersect")) {
-            next_token(p);
-            DC_VoxOp wrapper = { .type = DC_VOX_OP_INTERSECT };
-            dc_array_push(vox_ops, &wrapper);
-        } else if (ident_eq(&p->cur, "union")) {
-            next_token(p);
-            DC_VoxOp wrapper = { .type = DC_VOX_OP_UNION };
-            dc_array_push(vox_ops, &wrapper);
-        } else if (ident_eq(&p->cur, "color")) {
-            next_token(p);
-            expect(p, ETOK_LPAREN);
-            DC_VoxOp op = { .type = DC_VOX_OP_COLOR };
-            op.r = (uint8_t)eat_number(p); expect(p, ETOK_COMMA);
-            op.g = (uint8_t)eat_number(p); expect(p, ETOK_COMMA);
-            op.b = (uint8_t)eat_number(p);
-            expect(p, ETOK_RPAREN);
-            expect(p, ETOK_SEMI);
-            dc_array_push(vox_ops, &op);
-        } else if (ident_eq(&p->cur, "translate")) {
-            next_token(p);
-            expect(p, ETOK_LPAREN);
-            DC_VoxOp op = { .type = DC_VOX_OP_TRANSLATE };
-            op.x = eat_number(p); expect(p, ETOK_COMMA);
-            op.y = eat_number(p); expect(p, ETOK_COMMA);
-            op.z = eat_number(p);
-            expect(p, ETOK_RPAREN);
-            dc_array_push(vox_ops, &op);
-            /* Parse block body */
-            if (p->cur.type == ETOK_LBRACE) {
+            if (p->cur.type == ETOK_EQ) {
                 next_token(p);
-                while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error)
-                    parse_voxel_block_inner(p, vox_ops);
-                if (p->cur.type == ETOK_RBRACE) next_token(p);
-            } else {
-                /* Single statement form */
-                parse_voxel_block_inner(p, vox_ops);
+                args->vals[args->count] = eval_arith_expr(p, ctx);
+                memcpy(args->names[args->count], name_buf, 32);
+                args->count++;
+                if (p->cur.type == ETOK_COMMA) next_token(p);
+                continue;
             }
-            DC_VoxOp pop = { .type = DC_VOX_OP_POP_TRANSFORM };
-            dc_array_push(vox_ops, &pop);
-        } else if (ident_eq(&p->cur, "rotate")) {
-            next_token(p);
-            expect(p, ETOK_LPAREN);
-            DC_VoxOp op = { .type = DC_VOX_OP_ROTATE };
-            op.x = eat_number(p); expect(p, ETOK_COMMA);
-            op.y = eat_number(p); expect(p, ETOK_COMMA);
-            op.z = eat_number(p);
-            /* Optional 4th arg: angle. Default rotation is Euler angles
-             * (rotate each axis by x,y,z degrees). */
-            if (p->cur.type == ETOK_COMMA) {
-                next_token(p);
-                op.radius = eat_number(p); /* angle in degrees */
-            }
-            expect(p, ETOK_RPAREN);
-            dc_array_push(vox_ops, &op);
-            if (p->cur.type == ETOK_LBRACE) {
-                next_token(p);
-                while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error)
-                    parse_voxel_block_inner(p, vox_ops);
-                if (p->cur.type == ETOK_RBRACE) next_token(p);
-            } else {
-                parse_voxel_block_inner(p, vox_ops);
-            }
-            DC_VoxOp pop = { .type = DC_VOX_OP_POP_TRANSFORM };
-            dc_array_push(vox_ops, &pop);
-        } else if (ident_eq(&p->cur, "scale")) {
-            next_token(p);
-            expect(p, ETOK_LPAREN);
-            DC_VoxOp op = { .type = DC_VOX_OP_SCALE };
-            op.x = eat_number(p);
-            if (p->cur.type == ETOK_COMMA) {
-                next_token(p);
-                op.y = eat_number(p);
-                if (p->cur.type == ETOK_COMMA) {
-                    next_token(p);
-                    op.z = eat_number(p);
-                } else {
-                    op.z = op.y;
-                }
-            } else {
-                /* Uniform scale */
-                op.y = op.x;
-                op.z = op.x;
-            }
-            expect(p, ETOK_RPAREN);
-            dc_array_push(vox_ops, &op);
-            if (p->cur.type == ETOK_LBRACE) {
-                next_token(p);
-                while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error)
-                    parse_voxel_block_inner(p, vox_ops);
-                if (p->cur.type == ETOK_RBRACE) next_token(p);
-            } else {
-                parse_voxel_block_inner(p, vox_ops);
-            }
-            DC_VoxOp pop = { .type = DC_VOX_OP_POP_TRANSFORM };
-            dc_array_push(vox_ops, &pop);
+            /* Not named — restore and parse as expression */
+            p->pos = save_pos;
+            p->cur = save_tok;
+        }
+
+        args->vals[args->count] = eval_arith_expr(p, ctx);
+        args->names[args->count][0] = '\0';
+        args->count++;
+        if (p->cur.type == ETOK_COMMA) next_token(p);
+    }
+    expect(p, ETOK_RPAREN);
+}
+
+/* -------------------------------------------------------------------------
+ * Primary parser — origin-centered primitives and variable refs
+ * ---------------------------------------------------------------------- */
+static void parse_vox_expr(EParser *p, VoxParseCtx *ctx, DC_Array *out);
+
+static void parse_vox_primary(EParser *p, VoxParseCtx *ctx, DC_Array *out)
+{
+    if (p->has_error) return;
+
+    if (ident_eq(&p->cur, "sphere")) {
+        next_token(p);
+        VoxArgs args;
+        parse_vox_args(p, ctx, &args);
+
+        DC_VoxOp op = { .type = DC_VOX_OP_SPHERE };
+        /* sphere(r) or sphere(d=10) or sphere(r=5) */
+        if (vox_arg_has(&args, "d")) {
+            op.radius = vox_arg_find(&args, "d", 10) / 2.0;
+        } else if (vox_arg_has(&args, "r")) {
+            op.radius = vox_arg_find(&args, "r", 5);
         } else {
-            return; /* not an SDF statement — caller handles */
+            op.radius = vox_arg_pos(&args, 0, 5);
+        }
+        /* Origin-centered */
+        op.x = 0; op.y = 0; op.z = 0;
+        dc_array_push(out, &op);
+
+    } else if (ident_eq(&p->cur, "cube")) {
+        next_token(p);
+        VoxArgs args;
+        parse_vox_args(p, ctx, &args);
+
+        DC_VoxOp op = { .type = DC_VOX_OP_BOX };
+        double sx, sy, sz;
+        if (args.count >= 3) {
+            sx = vox_arg_pos(&args, 0, 10);
+            sy = vox_arg_pos(&args, 1, 10);
+            sz = vox_arg_pos(&args, 2, 10);
+        } else {
+            sx = sy = sz = vox_arg_pos(&args, 0, 10);
+        }
+        op.x = -sx / 2; op.y = -sy / 2; op.z = -sz / 2;
+        op.x2 = sx / 2; op.y2 = sy / 2; op.z2 = sz / 2;
+        dc_array_push(out, &op);
+
+    } else if (ident_eq(&p->cur, "cylinder")) {
+        next_token(p);
+        VoxArgs args;
+        parse_vox_args(p, ctx, &args);
+
+        DC_VoxOp op = { .type = DC_VOX_OP_CYLINDER };
+        double h, r;
+        if (vox_arg_has(&args, "h")) {
+            h = vox_arg_find(&args, "h", 10);
+        } else {
+            h = vox_arg_pos(&args, 0, 10);
+        }
+        if (vox_arg_has(&args, "d")) {
+            r = vox_arg_find(&args, "d", 10) / 2.0;
+        } else if (vox_arg_has(&args, "r")) {
+            r = vox_arg_find(&args, "r", 5);
+        } else {
+            r = vox_arg_pos(&args, 1, 5);
+        }
+        op.x = 0; op.y = 0;
+        op.radius = r;
+        op.z = -h / 2;       /* z0 */
+        op.radius2 = h / 2;  /* z1 */
+        dc_array_push(out, &op);
+
+    } else if (ident_eq(&p->cur, "torus")) {
+        next_token(p);
+        VoxArgs args;
+        parse_vox_args(p, ctx, &args);
+
+        DC_VoxOp op = { .type = DC_VOX_OP_TORUS };
+        double R = vox_arg_pos(&args, 0, 10);
+        double r = vox_arg_pos(&args, 1, 3);
+        if (vox_arg_has(&args, "R")) R = vox_arg_find(&args, "R", 10);
+        if (vox_arg_has(&args, "r")) r = vox_arg_find(&args, "r", 3);
+        op.x = 0; op.y = 0; op.z = 0;
+        op.radius = R;
+        op.radius2 = r;
+        dc_array_push(out, &op);
+
+    } else if (p->cur.type == ETOK_LPAREN) {
+        /* Parenthesized sub-expression */
+        next_token(p);
+        parse_vox_expr(p, ctx, out);
+        expect(p, ETOK_RPAREN);
+
+    } else if (p->cur.type == ETOK_IDENT) {
+        /* Variable reference */
+        VoxVarDef *v = vox_ctx_find(ctx, p->cur.start, p->cur.len);
+        if (v) {
+            vox_copy_var_ops(out, v);
+            next_token(p);
+        } else {
+            /* Unknown identifier — error */
+            if (!p->has_error) {
+                DC_SET_ERROR(p->err, DC_ERROR_EDA_PARSE,
+                             "unknown voxel variable at pos %d", p->pos);
+                p->has_error = 1;
+            }
         }
     }
 }
 
-/* Parse a voxel { ... } block — calls inner parser in a loop */
+/* -------------------------------------------------------------------------
+ * Pipe transform parser
+ * ---------------------------------------------------------------------- */
+static void parse_vox_pipe(EParser *p, VoxParseCtx *ctx, DC_Array *out)
+{
+    /* Parse primary into scratch buffer */
+    DC_Array *scratch = dc_array_new(sizeof(DC_VoxOp));
+    parse_vox_primary(p, ctx, scratch);
+
+    if (p->has_error) { dc_array_free(scratch); return; }
+
+    /* Collect >> transforms */
+    DC_VoxOp xforms[32];
+    int nxform = 0;
+
+    while (p->cur.type == ETOK_PIPE && !p->has_error && nxform < 32) {
+        next_token(p); /* skip >> */
+
+        if (ident_eq(&p->cur, "move")) {
+            next_token(p);
+            VoxArgs args;
+            parse_vox_args(p, ctx, &args);
+            DC_VoxOp op = { .type = DC_VOX_OP_TRANSLATE };
+            if (vox_arg_has(&args, "x") || vox_arg_has(&args, "y") || vox_arg_has(&args, "z")) {
+                op.x = vox_arg_find(&args, "x", 0);
+                op.y = vox_arg_find(&args, "y", 0);
+                op.z = vox_arg_find(&args, "z", 0);
+            } else {
+                op.x = vox_arg_pos(&args, 0, 0);
+                op.y = vox_arg_pos(&args, 1, 0);
+                op.z = vox_arg_pos(&args, 2, 0);
+            }
+            xforms[nxform++] = op;
+
+        } else if (ident_eq(&p->cur, "rotate")) {
+            next_token(p);
+            VoxArgs args;
+            parse_vox_args(p, ctx, &args);
+            DC_VoxOp op = { .type = DC_VOX_OP_ROTATE };
+            if (vox_arg_has(&args, "x") || vox_arg_has(&args, "y") || vox_arg_has(&args, "z")) {
+                op.x = vox_arg_find(&args, "x", 0);
+                op.y = vox_arg_find(&args, "y", 0);
+                op.z = vox_arg_find(&args, "z", 0);
+            } else {
+                op.x = vox_arg_pos(&args, 0, 0);
+                op.y = vox_arg_pos(&args, 1, 0);
+                op.z = vox_arg_pos(&args, 2, 0);
+            }
+            xforms[nxform++] = op;
+
+        } else if (ident_eq(&p->cur, "scale")) {
+            next_token(p);
+            VoxArgs args;
+            parse_vox_args(p, ctx, &args);
+            DC_VoxOp op = { .type = DC_VOX_OP_SCALE };
+            if (vox_arg_has(&args, "x") || vox_arg_has(&args, "y") || vox_arg_has(&args, "z")) {
+                op.x = vox_arg_find(&args, "x", 1);
+                op.y = vox_arg_find(&args, "y", 1);
+                op.z = vox_arg_find(&args, "z", 1);
+            } else if (args.count >= 3) {
+                op.x = vox_arg_pos(&args, 0, 1);
+                op.y = vox_arg_pos(&args, 1, 1);
+                op.z = vox_arg_pos(&args, 2, 1);
+            } else {
+                double s = vox_arg_pos(&args, 0, 1);
+                op.x = s; op.y = s; op.z = s;
+            }
+            xforms[nxform++] = op;
+
+        } else if (ident_eq(&p->cur, "color")) {
+            next_token(p);
+            VoxArgs args;
+            parse_vox_args(p, ctx, &args);
+            DC_VoxOp op = { .type = DC_VOX_OP_COLOR };
+            op.r = (uint8_t)vox_arg_pos(&args, 0, 180);
+            op.g = (uint8_t)vox_arg_pos(&args, 1, 180);
+            op.b = (uint8_t)vox_arg_pos(&args, 2, 180);
+            /* Color is not a transform — emit directly before the primary */
+            dc_array_push(out, &op);
+            continue; /* don't add to xforms stack */
+
+        } else {
+            /* Unknown pipe target — skip */
+            next_token(p);
+            if (p->cur.type == ETOK_LPAREN) {
+                next_token(p);
+                while (p->cur.type != ETOK_RPAREN && p->cur.type != ETOK_EOF)
+                    next_token(p);
+                eat(p, ETOK_RPAREN);
+            }
+            continue;
+        }
+    }
+
+    /* Emit: transforms in pipe order (push), then primary, then N POPs */
+    for (int i = 0; i < nxform; i++)
+        dc_array_push(out, &xforms[i]);
+
+    vox_copy_ops(out, scratch);
+
+    for (int i = 0; i < nxform; i++) {
+        DC_VoxOp pop = { .type = DC_VOX_OP_POP_TRANSFORM };
+        dc_array_push(out, &pop);
+    }
+
+    dc_array_free(scratch);
+}
+
+/* -------------------------------------------------------------------------
+ * Expression parser — CSG operators with precedence climbing
+ *
+ * Precedence:
+ *   >> (pipe)  — tightest, handled inside parse_vox_pipe
+ *   &          — precedence 2
+ *   + -        — precedence 1 (union/difference)
+ * ---------------------------------------------------------------------- */
+static void parse_vox_expr(EParser *p, VoxParseCtx *ctx, DC_Array *out)
+{
+    /* Parse left operand */
+    DC_Array *left = dc_array_new(sizeof(DC_VoxOp));
+    parse_vox_pipe(p, ctx, left);
+
+    while (!p->has_error) {
+        DC_VoxOpType csg_type;
+
+        if (p->cur.type == ETOK_MINUS) {
+            csg_type = DC_VOX_OP_SUBTRACT;
+        } else if (p->cur.type == ETOK_PLUS) {
+            csg_type = DC_VOX_OP_UNION;
+        } else if (p->cur.type == ETOK_AMP) {
+            csg_type = DC_VOX_OP_INTERSECT;
+        } else {
+            break;
+        }
+        next_token(p); /* consume operator */
+
+        /* Parse right operand (at same or tighter precedence) */
+        DC_Array *right = dc_array_new(sizeof(DC_VoxOp));
+
+        if (csg_type == DC_VOX_OP_INTERSECT) {
+            /* & binds tighter than +/- so parse only pipe level */
+            parse_vox_pipe(p, ctx, right);
+            /* But continue collecting & at this level */
+            while (p->cur.type == ETOK_AMP && !p->has_error) {
+                next_token(p);
+                /* Wrap current (left & right) then intersect with next */
+                DC_Array *combined = dc_array_new(sizeof(DC_VoxOp));
+                DC_VoxOp gb = { .type = DC_VOX_OP_GROUP_BEGIN };
+                DC_VoxOp ge = { .type = DC_VOX_OP_GROUP_END };
+                dc_array_push(combined, &gb);
+                vox_copy_ops(combined, left);
+                dc_array_push(combined, &ge);
+                DC_VoxOp csg = { .type = DC_VOX_OP_INTERSECT };
+                dc_array_push(combined, &csg);
+                dc_array_push(combined, &gb);
+                vox_copy_ops(combined, right);
+                dc_array_push(combined, &ge);
+                dc_array_free(left);
+                dc_array_free(right);
+                left = combined;
+                right = dc_array_new(sizeof(DC_VoxOp));
+                parse_vox_pipe(p, ctx, right);
+                csg_type = DC_VOX_OP_INTERSECT;
+            }
+        } else {
+            /* For +/-, right side may contain & which binds tighter */
+            parse_vox_pipe(p, ctx, right);
+            /* Consume any & operators on the right side at higher precedence */
+            while (p->cur.type == ETOK_AMP && !p->has_error) {
+                next_token(p);
+                DC_Array *rr = dc_array_new(sizeof(DC_VoxOp));
+                parse_vox_pipe(p, ctx, rr);
+                /* Wrap right & rr */
+                DC_Array *combined = dc_array_new(sizeof(DC_VoxOp));
+                DC_VoxOp gb = { .type = DC_VOX_OP_GROUP_BEGIN };
+                DC_VoxOp ge = { .type = DC_VOX_OP_GROUP_END };
+                dc_array_push(combined, &gb);
+                vox_copy_ops(combined, right);
+                dc_array_push(combined, &ge);
+                DC_VoxOp icsg = { .type = DC_VOX_OP_INTERSECT };
+                dc_array_push(combined, &icsg);
+                dc_array_push(combined, &gb);
+                vox_copy_ops(combined, rr);
+                dc_array_push(combined, &ge);
+                dc_array_free(right);
+                dc_array_free(rr);
+                right = combined;
+            }
+        }
+
+        /* Wrap left and right in GROUP_BEGIN/END with CSG operator between */
+        DC_Array *combined = dc_array_new(sizeof(DC_VoxOp));
+        DC_VoxOp gb = { .type = DC_VOX_OP_GROUP_BEGIN };
+        DC_VoxOp ge = { .type = DC_VOX_OP_GROUP_END };
+
+        dc_array_push(combined, &gb);
+        vox_copy_ops(combined, left);
+        dc_array_push(combined, &ge);
+
+        DC_VoxOp csg = { .type = csg_type };
+        dc_array_push(combined, &csg);
+
+        dc_array_push(combined, &gb);
+        vox_copy_ops(combined, right);
+        dc_array_push(combined, &ge);
+
+        dc_array_free(left);
+        dc_array_free(right);
+        left = combined;
+    }
+
+    /* Copy final result to output */
+    vox_copy_ops(out, left);
+    dc_array_free(left);
+}
+
+/* -------------------------------------------------------------------------
+ * Statement parser — settings, variables, for loops, expressions
+ * ---------------------------------------------------------------------- */
+static void parse_vox_statement(EParser *p, VoxParseCtx *ctx, DC_Array *vox_ops);
+
+static void parse_vox_for(EParser *p, VoxParseCtx *ctx, DC_Array *vox_ops)
+{
+    /* for IDENT in [start:end] { body } */
+    next_token(p); /* skip 'for' */
+
+    char var_name[64] = {0};
+    int vlen = p->cur.len < 63 ? p->cur.len : 63;
+    memcpy(var_name, p->cur.start, (size_t)vlen);
+    next_token(p); /* skip variable name */
+
+    if (ident_eq(&p->cur, "in")) next_token(p);
+
+    expect(p, ETOK_LBRACKET);
+    double start = eval_arith_expr(p, ctx);
+    expect(p, ETOK_COLON);
+    double step = 1;
+    double end = eval_arith_expr(p, ctx);
+    if (p->cur.type == ETOK_COLON) {
+        /* [start:step:end] */
+        next_token(p);
+        step = end;
+        end = eval_arith_expr(p, ctx);
+    }
+    expect(p, ETOK_RBRACKET);
+
+    /* Save parser position at body start */
+    expect(p, ETOK_LBRACE);
+    int body_start = p->pos;
+    ETok body_tok = p->cur;
+
+    /* Skip body to find end (for position restoration) */
+    int depth = 1;
+    while (depth > 0 && p->cur.type != ETOK_EOF) {
+        if (p->cur.type == ETOK_LBRACE) depth++;
+        if (p->cur.type == ETOK_RBRACE) depth--;
+        if (depth > 0) next_token(p);
+    }
+    if (p->cur.type == ETOK_RBRACE) next_token(p);
+    int after_body_pos = p->pos;
+    ETok after_body_tok = p->cur;
+
+    /* Save previous loop var state */
+    char prev_var[64];
+    double prev_val = 0;
+    int prev_has = ctx->has_loop_var;
+    if (prev_has) {
+        memcpy(prev_var, ctx->loop_var, 64);
+        prev_val = ctx->loop_val;
+    }
+
+    /* Set loop variable */
+    memcpy(ctx->loop_var, var_name, 64);
+    ctx->has_loop_var = 1;
+
+    if (step == 0) step = 1;
+
+    for (double i = start; (step > 0 ? i <= end : i >= end); i += step) {
+        ctx->loop_val = i;
+
+        /* Restore parser to body start */
+        p->pos = body_start;
+        p->cur = body_tok;
+
+        /* Re-parse body for this iteration */
+        while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error) {
+            parse_vox_statement(p, ctx, vox_ops);
+        }
+    }
+
+    /* Restore parser to after the closing brace */
+    p->pos = after_body_pos;
+    p->cur = after_body_tok;
+
+    /* Restore previous loop var */
+    if (prev_has) {
+        memcpy(ctx->loop_var, prev_var, 64);
+        ctx->loop_val = prev_val;
+    }
+    ctx->has_loop_var = prev_has;
+}
+
+static void parse_vox_statement(EParser *p, VoxParseCtx *ctx, DC_Array *vox_ops)
+{
+    if (p->cur.type == ETOK_EOF || p->has_error) return;
+
+    /* Settings */
+    if (ident_eq(&p->cur, "resolution")) {
+        next_token(p);
+        DC_VoxOp op = { .type = DC_VOX_OP_SET_RESOLUTION };
+        op.resolution = (int)eval_arith_expr(p, ctx);
+        eat(p, ETOK_SEMI);
+        dc_array_push(vox_ops, &op);
+        return;
+    }
+    if (ident_eq(&p->cur, "cell_size")) {
+        next_token(p);
+        DC_VoxOp op = { .type = DC_VOX_OP_SET_CELL_SIZE };
+        op.cell_size = (float)eval_arith_expr(p, ctx);
+        eat(p, ETOK_SEMI);
+        dc_array_push(vox_ops, &op);
+        return;
+    }
+
+    /* For loop */
+    if (ident_eq(&p->cur, "for")) {
+        parse_vox_for(p, ctx, vox_ops);
+        return;
+    }
+
+    /* Check for assignment: IDENT = expr ; */
+    if (p->cur.type == ETOK_IDENT) {
+        /* Peek ahead: is next token '='? */
+        int save_pos = p->pos;
+        ETok save_tok = p->cur;
+        char name_buf[64] = {0};
+        int nlen = p->cur.len < 63 ? p->cur.len : 63;
+        memcpy(name_buf, p->cur.start, (size_t)nlen);
+        int name_len = p->cur.len;
+        next_token(p);
+
+        if (p->cur.type == ETOK_EQ) {
+            next_token(p); /* skip = */
+            DC_Array *var_ops = dc_array_new(sizeof(DC_VoxOp));
+            parse_vox_expr(p, ctx, var_ops);
+            eat(p, ETOK_SEMI);
+
+            VoxVarDef *v = vox_ctx_add(ctx, name_buf, name_len);
+            if (v) {
+                vox_copy_ops(v->ops, var_ops);
+            }
+            /* Also emit the ops directly — the last assignment of a variable
+             * in expression position will be the final geometry */
+            dc_array_free(var_ops);
+            return;
+        }
+
+        /* Not an assignment — restore and fall through to expression */
+        p->pos = save_pos;
+        p->cur = save_tok;
+    }
+
+    /* Expression statement */
+    parse_vox_expr(p, ctx, vox_ops);
+    eat(p, ETOK_SEMI);
+}
+
+/* -------------------------------------------------------------------------
+ * Top-level voxel parser entry point
+ * ---------------------------------------------------------------------- */
+/* Check if current position looks like a voxel statement (for top-level parsing) */
+static int is_vox_statement_start(EParser *p, VoxParseCtx *ctx)
+{
+    if (p->cur.type == ETOK_LPAREN) return 1;
+    if (p->cur.type != ETOK_IDENT) return 0;
+    if (ident_eq(&p->cur, "sphere") || ident_eq(&p->cur, "cube") ||
+        ident_eq(&p->cur, "cylinder") || ident_eq(&p->cur, "torus") ||
+        ident_eq(&p->cur, "resolution") || ident_eq(&p->cur, "cell_size") ||
+        ident_eq(&p->cur, "for")) return 1;
+    /* Variable reference or assignment */
+    VoxVarDef *v = vox_ctx_find(ctx, p->cur.start, p->cur.len);
+    if (v) return 1;
+    /* Check for assignment (ident = ...) */
+    int save_pos = p->pos;
+    ETok save_tok = p->cur;
+    next_token(p);
+    int is_assign = (p->cur.type == ETOK_EQ);
+    p->pos = save_pos;
+    p->cur = save_tok;
+    return is_assign;
+}
+
+static void parse_vox_statements(EParser *p, DC_Array *vox_ops)
+{
+    VoxParseCtx ctx;
+    vox_ctx_init(&ctx);
+
+    while (p->cur.type != ETOK_EOF && p->cur.type != ETOK_RBRACE && !p->has_error) {
+        if (!is_vox_statement_start(p, &ctx)) break;
+        parse_vox_statement(p, &ctx, vox_ops);
+    }
+
+    vox_ctx_free(&ctx);
+}
+
+/* Parse a voxel { ... } block */
 static void
 parse_voxel_block(EParser *p, DC_Array *vox_ops)
 {
@@ -883,12 +1483,34 @@ parse_voxel_block(EParser *p, DC_Array *vox_ops)
         return;
     }
     next_token(p); /* skip { */
-
-    while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error) {
-        parse_voxel_block_inner(p, vox_ops);
-    }
-
+    parse_vox_statements(p, vox_ops);
     if (p->cur.type == ETOK_RBRACE) next_token(p);
+}
+
+/* Check if current token starts a voxel statement */
+static int is_vox_keyword(EParser *p)
+{
+    return ident_eq(&p->cur, "sphere") ||
+           ident_eq(&p->cur, "cube") ||
+           ident_eq(&p->cur, "cylinder") ||
+           ident_eq(&p->cur, "torus") ||
+           ident_eq(&p->cur, "resolution") ||
+           ident_eq(&p->cur, "cell_size") ||
+           ident_eq(&p->cur, "for");
+}
+
+/* Check if IDENT is followed by '=' (variable assignment) */
+static int is_vox_assignment(EParser *p)
+{
+    if (p->cur.type != ETOK_IDENT) return 0;
+    /* Look ahead past identifier for '=' */
+    int save_pos = p->pos;
+    ETok save_tok = p->cur;
+    next_token(p);
+    int result = (p->cur.type == ETOK_EQ);
+    p->pos = save_pos;
+    p->cur = save_tok;
+    return result;
 }
 
 static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_ops, DC_Array *vox_ops)
@@ -903,21 +1525,10 @@ static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_o
         } else if (ident_eq(&p->cur, "voxel")) {
             next_token(p);
             parse_voxel_block(p, vox_ops);
-        } else if (ident_eq(&p->cur, "sphere") ||
-                   ident_eq(&p->cur, "box") ||
-                   ident_eq(&p->cur, "cylinder") ||
-                   ident_eq(&p->cur, "torus") ||
-                   ident_eq(&p->cur, "subtract") ||
-                   ident_eq(&p->cur, "intersect") ||
-                   ident_eq(&p->cur, "union") ||
-                   ident_eq(&p->cur, "resolution") ||
-                   ident_eq(&p->cur, "cell_size") ||
-                   ident_eq(&p->cur, "color") ||
-                   ident_eq(&p->cur, "translate") ||
-                   ident_eq(&p->cur, "rotate") ||
-                   ident_eq(&p->cur, "scale")) {
-            /* Top-level SDF primitives + transforms — all is rendered natively */
-            parse_voxel_block_inner(p, vox_ops);
+        } else if (is_vox_keyword(p) || is_vox_assignment(p)) {
+            /* Top-level Cubeiform voxel statements — parse all as a batch
+             * so variables persist across statements */
+            parse_vox_statements(p, vox_ops);
         } else if (ident_eq(&p->cur, "assembly")) {
             /* Skip assembly blocks for now — future */
             next_token(p);
@@ -1425,6 +2036,18 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
 
     /* Compute cell_size from resolution (cells per longest axis) */
     float cell_size = user_cell_size > 0 ? user_cell_size : max_extent / (float)resolution;
+
+    /* Snap bmin so world origin (0,0,0) falls on a cell center.
+     * Cell center = bmin + (ix+0.5)*cell_size.  For origin to hit a center:
+     *   0 = bmin + (n+0.5)*cell_size  =>  bmin = -(n+0.5)*cell_size
+     * Pick n = floor(-bmin/cell_size - 0.5) to keep bmin close to original. */
+    for (int a = 0; a < 3; a++) {
+        float n = floorf(-bmin[a] / cell_size - 0.5f);
+        bmin[a] = -(n + 0.5f) * cell_size;
+    }
+    /* Recompute extent after snapping */
+    for (int a = 0; a < 3; a++) extent[a] = bmax[a] - bmin[a];
+
     int sx = (int)ceilf(extent[0] / cell_size) + 1;
     int sy = (int)ceilf(extent[1] / cell_size) + 1;
     int sz = (int)ceilf(extent[2] / cell_size) + 1;
@@ -1438,14 +2061,34 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
         return NULL;
     }
 
+    /* Store world-space origin so the renderer can position the grid correctly.
+     * bmin is where grid cell (0,0,0) maps to in world space. */
+    dc_voxel_grid_set_origin(grid, bmin[0], bmin[1], bmin[2]);
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_EDA,
+           "voxel grid: bmin=(%.2f,%.2f,%.2f) bmax=(%.2f,%.2f,%.2f) "
+           "size=%dx%dx%d cell=%.4f",
+           bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2],
+           sx, sy, sz, cell_size);
+
     /* Offset: grid coords = world coords - bmin.
      * All SDF primitives must be shifted by -bmin. */
     #define OX(v) ((float)(v) - bmin[0])
     #define OY(v) ((float)(v) - bmin[1])
     #define OZ(v) ((float)(v) - bmin[2])
 
-    DC_VoxelGrid *temp = NULL;
-    int csg_pending = 0;
+    /* Grid stack for CSG groups.
+     * Op layout: GROUP_BEGIN left GROUP_END CSG_OP GROUP_BEGIN right GROUP_END
+     * - GROUP_BEGIN: push new empty grid
+     * - GROUP_END: if CSG pending AND sp >= 2, pop two, combine, push result
+     * - CSG_OP: set pending flag (between two groups)
+     * - Primitives: render into grid_stack[grid_sp] */
+    #define MAX_GRID_STACK 16
+    DC_VoxelGrid *grid_stack[MAX_GRID_STACK];
+    int grid_sp = 0;
+    int csg_pending_type = 0; /* 0=none, 1=subtract, 2=intersect, 3=union */
+
+    grid_stack[0] = grid;
 
     /* Reset transform stack for second pass */
     xform_depth = 0;
@@ -1459,9 +2102,36 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
         case DC_VOX_OP_SET_CELL_SIZE:
             break;
 
-        case DC_VOX_OP_SUBTRACT:  csg_pending = 1; break;
-        case DC_VOX_OP_INTERSECT: csg_pending = 2; break;
-        case DC_VOX_OP_UNION:     csg_pending = 3; break;
+        case DC_VOX_OP_GROUP_BEGIN:
+            if (grid_sp + 1 < MAX_GRID_STACK) {
+                grid_sp++;
+                grid_stack[grid_sp] = dc_voxel_grid_new(sx, sy, sz, cell_size);
+            }
+            break;
+
+        case DC_VOX_OP_GROUP_END:
+            /* If CSG pending and we have at least 2 grids, combine */
+            if (csg_pending_type && grid_sp >= 2) {
+                DC_VoxelGrid *right_g = grid_stack[grid_sp];
+                grid_sp--;
+                DC_VoxelGrid *left_g = grid_stack[grid_sp];
+
+                DC_VoxelGrid *out = dc_voxel_grid_new(sx, sy, sz, cell_size);
+                if (out) {
+                    if (csg_pending_type == 1) dc_sdf_subtract(left_g, right_g, out);
+                    else if (csg_pending_type == 2) dc_sdf_intersect(left_g, right_g, out);
+                    else dc_sdf_union(left_g, right_g, out);
+                    dc_voxel_grid_free(left_g);
+                    grid_stack[grid_sp] = out;
+                }
+                dc_voxel_grid_free(right_g);
+                csg_pending_type = 0;
+            }
+            break;
+
+        case DC_VOX_OP_SUBTRACT:  csg_pending_type = 1; break;
+        case DC_VOX_OP_INTERSECT: csg_pending_type = 2; break;
+        case DC_VOX_OP_UNION:     csg_pending_type = 3; break;
 
         case DC_VOX_OP_COLOR:
             cr = op->r; cg = op->g; cb = op->b;
@@ -1505,16 +2175,9 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
         case DC_VOX_OP_BOX:
         case DC_VOX_OP_CYLINDER:
         case DC_VOX_OP_TORUS: {
-            DC_VoxelGrid *target = grid;
-            if (csg_pending) {
-                temp = dc_voxel_grid_new(sx, sy, sz, cell_size);
-                if (!temp) break;
-                target = temp;
-            }
+            DC_VoxelGrid *target = grid_stack[grid_sp];
 
-            /* Build the full transform: grid offset (bmin shift) + user transform.
-             * The grid offset translates from world coords to grid coords.
-             * User transform is applied on top of that. */
+            /* Build the full transform: grid offset (bmin shift) + user transform. */
             DC_SdfTransform full;
             dc_sdf_transform_identity(&full);
             dc_sdf_transform_translate(&full, -bmin[0], -bmin[1], -bmin[2]);
@@ -1551,24 +2214,21 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
                     dc_sdf_torus(target, OX(op->x), OY(op->y), OZ(op->z),
                                          (float)op->radius, (float)op->radius2);
             }
-
-            if (csg_pending && temp) {
-                DC_VoxelGrid *out = dc_voxel_grid_new(sx, sy, sz, cell_size);
-                if (out) {
-                    if (csg_pending == 1) dc_sdf_subtract(grid, temp, out);
-                    else if (csg_pending == 2) dc_sdf_intersect(grid, temp, out);
-                    else dc_sdf_union(grid, temp, out);
-                    dc_voxel_grid_free(grid);
-                    grid = out;
-                }
-                dc_voxel_grid_free(temp);
-                temp = NULL;
-                csg_pending = 0;
-            }
             break;
         }
         }
     }
+
+    /* Collapse remaining grid stack — merge into base grid */
+    while (grid_sp > 0) {
+        DC_VoxelGrid *top = grid_stack[grid_sp];
+        grid_sp--;
+        /* Union remaining grids into base */
+        dc_sdf_union(grid_stack[grid_sp], top, grid_stack[grid_sp]);
+        dc_voxel_grid_free(top);
+    }
+
+    grid = grid_stack[0];
     #undef OX
     #undef OY
     #undef OZ

@@ -87,6 +87,8 @@ typedef enum {
     DC_VOX_OP_ROTATE,        /* push rotate transform, children follow */
     DC_VOX_OP_SCALE,         /* push scale transform, children follow */
     DC_VOX_OP_POP_TRANSFORM, /* end of transform block */
+    DC_VOX_OP_GROUP_BEGIN,   /* start of CSG operand group */
+    DC_VOX_OP_GROUP_END,     /* end of CSG operand group */
 } DC_VoxOpType;
 
 typedef struct {

@@ -1,0 +1,6 @@
+// Cubeiform V2 — pipe syntax test
+// Flange with bolt hole
+
+body = cube(20, 20, 10);
+hole = cylinder(h=12, r=4) >> move(10, 10, -1);
+body - hole;

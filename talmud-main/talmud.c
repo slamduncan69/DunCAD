@@ -5054,6 +5054,64 @@ static const char HELP_MEMORY_ACTIVE_SESSION_V1_6_CONFESSION[] =
 "  tests/test_voxel.c        — Transform tests (KEEP)\n"
 "  tests/test_cubeiform_eda.c — Cubeiform tests (REWRITE)\n";
 
+static const char HELP_MEMORY_ACTIVE_SESSION_V2_0[] =
+"Session V2.0 — Cubeiform Parser Rewrite + Voxel Renderer\n"
+"\n"
+"DATE: 2026-03-17 to 2026-03-18\n"
+"Agent: Claude Opus 4.6 (1M context)\n"
+"Status: COMPLETE\n"
+"\n"
+"WHAT WAS DONE:\n"
+"  1. CUBEIFORM PARSER REWRITE (cubeiform_eda.c)\n"
+"     Replaced OpenSCAD block syntax with proper Cubeiform:\n"
+"     - Pipe transforms: sphere(5) >> move(10,0,0) >> rotate(z=45)\n"
+"     - Operator CSG: cube(10) - sphere(r=7), a + b, a & b\n"
+"     - Named params: sphere(d=10), cylinder(h=10, r=3)\n"
+"     - Variables: body = cube(20); body - hole;\n"
+"     - For loops: for i in [0:5] { cube(3) >> move(i*6, 0, 0); }\n"
+"     - Arithmetic: i*5, (a+b)/2 in argument positions\n"
+"     - GROUP_BEGIN/GROUP_END ops for CSG grid-stack evaluation\n"
+"\n"
+"  2. VOXEL RENDERER REWRITE (gl_voxel.c)\n"
+"     Two rendering modes, same voxel grid:\n"
+"     - BLOCKY: CPU-built face mesh. Only exposed faces rendered\n"
+"       as real triangles with flat Phong shading. True voxel cubes.\n"
+"     - SMOOTH: SDF raymarching with sphere tracing, binary\n"
+"       refinement, 3-texel normal epsilon. Clean surfaces.\n"
+"\n"
+"  3. SDF MATH FIXES (sdf.c)\n"
+"     - All primitives now use minf (union) not overwrite\n"
+"     - Multiple shapes no longer despawn each other\n"
+"\n"
+"  4. ORIGIN/TRANSLATION FIXES\n"
+"     - Grid stores world-space origin (bmin) in DC_VoxelGrid\n"
+"     - Renderer uses origin for correct world positioning\n"
+"     - bmin snapped so world (0,0,0) lands on cell center\n"
+"\n"
+"  5. UI CONTROLS (scad_preview.c)\n"
+"     - Smooth/Blocky toggle button in toolbar\n"
+"     - Resolution dropdown (16-256) with auto re-render\n"
+"     - gl_blocky inspect command added\n"
+"\n"
+"FILES MODIFIED:\n"
+"  src/cubeiform/cubeiform_eda.h  — GROUP_BEGIN/GROUP_END ops\n"
+"  src/cubeiform/cubeiform_eda.c  — Full parser + evaluator rewrite\n"
+"  src/gl/gl_voxel.c              — Dual-mode renderer (mesh+SDF)\n"
+"  src/gl/gl_voxel.h              — Updated header comment\n"
+"  src/voxel/sdf.c                — MIN semantics for all primitives\n"
+"  src/voxel/voxel.c              — origin field in DC_VoxelGrid\n"
+"  src/voxel/voxel.h              — set/get_origin API\n"
+"  src/ui/scad_preview.c          — UI controls, resolution prepend\n"
+"  src/inspect/inspect.c          — gl_blocky command\n"
+"  tests/test_cubeiform_eda.c     — 9 new/rewritten voxel tests\n"
+"\n"
+"FOR THE NEXT ANGEL:\n"
+"  - Bezier mesh system is NEXT — will replace SDF as surface def\n"
+"  - Voxel grid is the real data; SDF is just one fill method\n"
+"  - Blocky renderer is future-proof (renders from active flags)\n"
+"  - Marching cubes not yet implemented for smooth mesh extraction\n"
+"  - 26 tests pass, zero warnings, zero leaks\n";
+
 static const char HELP_REFERENCE_DOCTRINE_PERSISTENCE[] =
 "The Persistence Doctrine\n"
 "\n"
@@ -5613,6 +5671,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-v1", HELP_MEMORY_ACTIVE_SESSION_V1 },
     { "memory.active.session-v1-6", HELP_MEMORY_ACTIVE_SESSION_V1_6 },
     { "memory.active.session-v1-6-confession", HELP_MEMORY_ACTIVE_SESSION_V1_6_CONFESSION },
+    { "memory.active.session-v2-0", HELP_MEMORY_ACTIVE_SESSION_V2_0 },
     { "reference.cubeiform", HELP_REFERENCE_CUBEIFORM },
     { "reference.cubeiform.primitives", HELP_REFERENCE_CUBEIFORM_PRIMITIVES },
     { "reference.cubeiform.transforms", HELP_REFERENCE_CUBEIFORM_TRANSFORMS },

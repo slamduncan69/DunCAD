@@ -14,6 +14,7 @@
 struct DC_VoxelGrid {
     int       sx, sy, sz;   /* grid dimensions in cells */
     float     cell_size;    /* world units per cell */
+    float     origin[3];    /* world-space position of cell (0,0,0) */
     DC_Voxel *cells;        /* flat array: cells[ix + iy*sx + iz*sx*sy] */
 };
 
@@ -76,18 +77,32 @@ int   dc_voxel_grid_size_y(const DC_VoxelGrid *g) { return g ? g->sy : 0; }
 int   dc_voxel_grid_size_z(const DC_VoxelGrid *g) { return g ? g->sz : 0; }
 float dc_voxel_grid_cell_size(const DC_VoxelGrid *g) { return g ? g->cell_size : 0; }
 
+void dc_voxel_grid_set_origin(DC_VoxelGrid *g, float ox, float oy, float oz)
+{
+    if (!g) return;
+    g->origin[0] = ox; g->origin[1] = oy; g->origin[2] = oz;
+}
+
+void dc_voxel_grid_get_origin(const DC_VoxelGrid *g, float *ox, float *oy, float *oz)
+{
+    if (!g) return;
+    if (ox) *ox = g->origin[0];
+    if (oy) *oy = g->origin[1];
+    if (oz) *oz = g->origin[2];
+}
+
 void
 dc_voxel_grid_bounds(const DC_VoxelGrid *g,
                        float *min_x, float *min_y, float *min_z,
                        float *max_x, float *max_y, float *max_z)
 {
     if (!g) return;
-    if (min_x) *min_x = 0.0f;
-    if (min_y) *min_y = 0.0f;
-    if (min_z) *min_z = 0.0f;
-    if (max_x) *max_x = g->sx * g->cell_size;
-    if (max_y) *max_y = g->sy * g->cell_size;
-    if (max_z) *max_z = g->sz * g->cell_size;
+    if (min_x) *min_x = g->origin[0];
+    if (min_y) *min_y = g->origin[1];
+    if (min_z) *min_z = g->origin[2];
+    if (max_x) *max_x = g->origin[0] + g->sx * g->cell_size;
+    if (max_y) *max_y = g->origin[1] + g->sy * g->cell_size;
+    if (max_z) *max_z = g->origin[2] + g->sz * g->cell_size;
 }
 
 /* =========================================================================

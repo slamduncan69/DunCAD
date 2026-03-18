@@ -370,13 +370,13 @@ TEST(test_export_pcb)
 }
 
 /* =========================================================================
- * Tests — Voxel transforms (V1.6)
+ * Tests — Cubeiform voxel pipe syntax (V2.0)
  * ========================================================================= */
 
 TEST(test_voxel_translate_sphere)
 {
     DC_Error err = {0};
-    const char *src = "translate(10, 10, 10) { sphere(0, 0, 0, 5); }";
+    const char *src = "sphere(5) >> move(10, 10, 10);";
     DC_VoxelGrid *grid = NULL;
     int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
     ASSERT(rc == 0);
@@ -397,7 +397,7 @@ TEST(test_voxel_translate_sphere)
 TEST(test_voxel_translate_parse_ops)
 {
     DC_Error err = {0};
-    const char *src = "translate(5, 5, 5) { sphere(0, 0, 0, 3); }";
+    const char *src = "sphere(3) >> move(5, 5, 5);";
     DC_CubeiformEda *eda = dc_cubeiform_parse_eda(src, &err);
     ASSERT(eda != NULL);
     ASSERT(dc_cubeiform_eda_vox_op_count(eda) == 3);
@@ -405,9 +405,12 @@ TEST(test_voxel_translate_parse_ops)
     const DC_VoxOp *op0 = dc_cubeiform_eda_get_vox_op(eda, 0);
     ASSERT(op0->type == DC_VOX_OP_TRANSLATE);
     ASSERT(op0->x == 5.0);
+    ASSERT(op0->y == 5.0);
+    ASSERT(op0->z == 5.0);
 
     const DC_VoxOp *op1 = dc_cubeiform_eda_get_vox_op(eda, 1);
     ASSERT(op1->type == DC_VOX_OP_SPHERE);
+    ASSERT(op1->radius == 3.0);
 
     const DC_VoxOp *op2 = dc_cubeiform_eda_get_vox_op(eda, 2);
     ASSERT(op2->type == DC_VOX_OP_POP_TRANSFORM);
@@ -418,12 +421,7 @@ TEST(test_voxel_translate_parse_ops)
 TEST(test_voxel_nested_transforms)
 {
     DC_Error err = {0};
-    const char *src =
-        "translate(10, 0, 0) {\n"
-        "    scale(2, 2, 2) {\n"
-        "        sphere(0, 0, 0, 3);\n"
-        "    }\n"
-        "}\n";
+    const char *src = "sphere(3) >> scale(2, 2, 2) >> move(10, 0, 0);";
     DC_VoxelGrid *grid = NULL;
     int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
     ASSERT(rc == 0);
@@ -443,17 +441,134 @@ TEST(test_voxel_nested_transforms)
 TEST(test_voxel_rotate_box)
 {
     DC_Error err = {0};
-    const char *src = "rotate(0, 0, 1, 45) { box(-5, -2, -2, 5, 2, 2); }";
+    const char *src = "cube(10, 4, 4) >> rotate(z=45);";
     DC_CubeiformEda *eda = dc_cubeiform_parse_eda(src, &err);
     ASSERT(eda != NULL);
+
+    /* Should be: ROTATE, BOX, POP_TRANSFORM */
     ASSERT(dc_cubeiform_eda_vox_op_count(eda) == 3);
 
     const DC_VoxOp *op0 = dc_cubeiform_eda_get_vox_op(eda, 0);
     ASSERT(op0->type == DC_VOX_OP_ROTATE);
-    ASSERT(op0->z == 1.0);
-    ASSERT(op0->radius == 45.0);
+    ASSERT(op0->z == 45.0);  /* z=45 named arg */
+
+    const DC_VoxOp *op1 = dc_cubeiform_eda_get_vox_op(eda, 1);
+    ASSERT(op1->type == DC_VOX_OP_BOX);
 
     dc_cubeiform_eda_free(eda);
+}
+
+/* =========================================================================
+ * Tests — CSG operators
+ * ========================================================================= */
+
+TEST(test_voxel_csg_difference)
+{
+    DC_Error err = {0};
+    const char *src = "cube(10) - sphere(r=7);";
+    DC_VoxelGrid *grid = NULL;
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    ASSERT(rc == 0);
+    ASSERT(grid != NULL);
+
+    /* The sphere r=7 is larger than the cube (half-extents 5), so difference
+     * should carve a significant hole but still leave cube corners */
+    size_t active = dc_voxel_grid_active_count(grid);
+    ASSERT(active > 0);
+
+    /* Parse check — should have GROUP_BEGIN/END + SUBTRACT */
+    DC_CubeiformEda *eda = dc_cubeiform_parse_eda(src, &err);
+    ASSERT(eda != NULL);
+    size_t nops = dc_cubeiform_eda_vox_op_count(eda);
+    ASSERT(nops >= 5); /* GROUP_BEGIN, BOX, GROUP_END, SUBTRACT, GROUP_BEGIN, SPHERE, GROUP_END */
+
+    /* Find SUBTRACT op */
+    int found_sub = 0;
+    for (size_t i = 0; i < nops; i++) {
+        if (dc_cubeiform_eda_get_vox_op(eda, i)->type == DC_VOX_OP_SUBTRACT)
+            found_sub = 1;
+    }
+    ASSERT(found_sub);
+
+    dc_cubeiform_eda_free(eda);
+    dc_voxel_grid_free(grid);
+}
+
+TEST(test_voxel_csg_with_pipe)
+{
+    DC_Error err = {0};
+    const char *src = "cube(10) - cylinder(h=12, r=3) >> move(5, 5, -1);";
+    DC_VoxelGrid *grid = NULL;
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    ASSERT(rc == 0);
+    ASSERT(grid != NULL);
+
+    size_t active = dc_voxel_grid_active_count(grid);
+    ASSERT(active > 0);
+
+    dc_voxel_grid_free(grid);
+}
+
+TEST(test_voxel_variable)
+{
+    DC_Error err = {0};
+    const char *src =
+        "body = cube(10);\n"
+        "hole = sphere(7);\n"
+        "body - hole;\n";
+    DC_VoxelGrid *grid = NULL;
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    ASSERT(rc == 0);
+    ASSERT(grid != NULL);
+
+    size_t active = dc_voxel_grid_active_count(grid);
+    ASSERT(active > 0);
+
+    dc_voxel_grid_free(grid);
+}
+
+TEST(test_voxel_named_params)
+{
+    DC_Error err = {0};
+
+    /* sphere(d=10) → radius 5 */
+    const char *src1 = "sphere(d=10);";
+    DC_CubeiformEda *eda = dc_cubeiform_parse_eda(src1, &err);
+    ASSERT(eda != NULL);
+    ASSERT(dc_cubeiform_eda_vox_op_count(eda) == 1);
+    const DC_VoxOp *op0 = dc_cubeiform_eda_get_vox_op(eda, 0);
+    ASSERT(op0->type == DC_VOX_OP_SPHERE);
+    ASSERT(op0->radius == 5.0);
+    dc_cubeiform_eda_free(eda);
+
+    /* cylinder(h=10, r=3) */
+    const char *src2 = "cylinder(h=10, r=3);";
+    eda = dc_cubeiform_parse_eda(src2, &err);
+    ASSERT(eda != NULL);
+    ASSERT(dc_cubeiform_eda_vox_op_count(eda) == 1);
+    const DC_VoxOp *op1 = dc_cubeiform_eda_get_vox_op(eda, 0);
+    ASSERT(op1->type == DC_VOX_OP_CYLINDER);
+    ASSERT(op1->radius == 3.0);
+    /* z range: -5 to 5 (centered) */
+    ASSERT(op1->z == -5.0);
+    ASSERT(op1->radius2 == 5.0);
+    dc_cubeiform_eda_free(eda);
+}
+
+TEST(test_voxel_for_loop)
+{
+    DC_Error err = {0};
+    const char *src = "for i in [0:3] { cube(3) >> move(i*5, 0, 0); }";
+    DC_VoxelGrid *grid = NULL;
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    ASSERT(rc == 0);
+    ASSERT(grid != NULL);
+
+    size_t active = dc_voxel_grid_active_count(grid);
+    /* 4 cubes (i=0,1,2,3) → should have significant voxels */
+    ASSERT(active > 100);
+
+    dc_voxel_grid_free(grid);
 }
 
 /* =========================================================================
@@ -514,11 +629,16 @@ int main(void)
     RUN(test_export_schematic);
     RUN(test_export_pcb);
 
-    /* Voxel transforms (V1.6) */
+    /* Cubeiform voxel pipe syntax (V2.0) */
     RUN(test_voxel_translate_sphere);
     RUN(test_voxel_translate_parse_ops);
     RUN(test_voxel_nested_transforms);
     RUN(test_voxel_rotate_box);
+    RUN(test_voxel_csg_difference);
+    RUN(test_voxel_csg_with_pipe);
+    RUN(test_voxel_variable);
+    RUN(test_voxel_named_params);
+    RUN(test_voxel_for_loop);
 
     /* Mixed */
     RUN(test_mixed_3d_eda);

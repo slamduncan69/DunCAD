@@ -2160,7 +2160,7 @@ dc_gl_viewport_set_voxel_blocky(DC_GlViewport *vp, int blocky)
     if (!vp) return;
     if (vp->voxel_buf)
         dc_gl_voxel_buf_set_blocky(vp->voxel_buf, blocky);
-    gtk_widget_queue_draw(vp->gl_area);
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
 }
 
 int

@@ -244,7 +244,7 @@ dc_sdf_sphere(DC_VoxelGrid *grid,
         float dist = sqrtf(dx*dx + dy*dy + dz*dz) - radius;
 
         DC_Voxel *v = dc_voxel_grid_get(grid, ix, iy, iz);
-        if (v) v->distance = dist;
+        if (v) v->distance = minf(v->distance, dist);
     }
 }
 
@@ -278,7 +278,7 @@ dc_sdf_box(DC_VoxelGrid *grid,
         float dist = outside + inside;
 
         DC_Voxel *v = dc_voxel_grid_get(grid, ix, iy, iz);
-        if (v) v->distance = dist;
+        if (v) v->distance = minf(v->distance, dist);
     }
 }
 
@@ -311,7 +311,7 @@ dc_sdf_cylinder(DC_VoxelGrid *grid,
         float dist = maxf(d_radial, d_axial);
 
         DC_Voxel *v = dc_voxel_grid_get(grid, ix, iy, iz);
-        if (v) v->distance = dist;
+        if (v) v->distance = minf(v->distance, dist);
     }
 }
 
@@ -337,7 +337,7 @@ dc_sdf_torus(DC_VoxelGrid *grid,
         float dist = sqrtf(q*q + dz*dz) - minor_r;
 
         DC_Voxel *v = dc_voxel_grid_get(grid, ix, iy, iz);
-        if (v) v->distance = dist;
+        if (v) v->distance = minf(v->distance, dist);
     }
 }
 

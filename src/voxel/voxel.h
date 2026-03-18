@@ -52,6 +52,10 @@ int   dc_voxel_grid_size_y(const DC_VoxelGrid *grid);
 int   dc_voxel_grid_size_z(const DC_VoxelGrid *grid);
 float dc_voxel_grid_cell_size(const DC_VoxelGrid *grid);
 
+/* World-space origin — position of cell (0,0,0) corner. */
+void dc_voxel_grid_set_origin(DC_VoxelGrid *grid, float ox, float oy, float oz);
+void dc_voxel_grid_get_origin(const DC_VoxelGrid *grid, float *ox, float *oy, float *oz);
+
 /* World-space bounding box: min corner and max corner. */
 void dc_voxel_grid_bounds(const DC_VoxelGrid *grid,
                             float *min_x, float *min_y, float *min_z,

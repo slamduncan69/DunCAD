@@ -33,6 +33,8 @@ struct DC_ScadPreview {
     GtkWidget      *ortho_btn;
     GtkWidget      *grid_btn;
     GtkWidget      *axes_btn;
+    GtkWidget      *blocky_btn;
+    GtkWidget      *res_dropdown;
     DC_CodeEditor  *code_ed;        /* borrowed */
     int             rendering;
     guint           progress_id;    /* timer source for progress polling */
@@ -553,10 +555,22 @@ do_render(DC_ScadPreview *pv)
         /* SDF RENDERING — the only path */
         gtk_label_set_text(GTK_LABEL(pv->status_label), "Rendering SDF...");
 
+        /* Prepend resolution from UI dropdown */
+        int ui_res = pv->voxel_resolution > 0 ? pv->voxel_resolution : 64;
+        size_t tlen = strlen(text);
+        char *full_src = malloc(tlen + 32);
+        if (full_src) {
+            int hlen = snprintf(full_src, 32, "resolution %d;\n", ui_res);
+            memcpy(full_src + hlen, text, tlen + 1);
+            free(text);
+        } else {
+            full_src = text;
+        }
+
         DC_Error err = {0};
         DC_VoxelGrid *grid = NULL;
-        dc_cubeiform_execute_full(text, NULL, NULL, &grid, NULL, &err);
-        free(text);
+        dc_cubeiform_execute_full(full_src, NULL, NULL, &grid, NULL, &err);
+        free(full_src);
 
         if (grid) {
             dc_gl_viewport_clear_objects(pv->viewport);
@@ -626,6 +640,30 @@ static void on_grid_clicked(GtkButton *b, gpointer d)
 static void on_axes_clicked(GtkButton *b, gpointer d)
 { (void)b; dc_gl_viewport_toggle_axes(((DC_ScadPreview*)d)->viewport); }
 
+static void on_blocky_clicked(GtkButton *b, gpointer d)
+{
+    (void)b;
+    DC_ScadPreview *pv = d;
+    int cur = dc_gl_viewport_get_voxel_blocky(pv->viewport);
+    int next = !cur;
+    dc_gl_viewport_set_voxel_blocky(pv->viewport, next);
+    gtk_button_set_label(GTK_BUTTON(pv->blocky_btn), next ? "Blocky" : "Smooth");
+}
+
+static void on_res_changed(GtkDropDown *dd, GParamSpec *spec, gpointer d)
+{
+    (void)spec;
+    DC_ScadPreview *pv = d;
+    guint idx = gtk_drop_down_get_selected(dd);
+    static const int res_values[] = {16, 32, 48, 64, 96, 128, 192, 256};
+    if (idx < G_N_ELEMENTS(res_values)) {
+        dc_scad_preview_set_voxel_resolution(pv, res_values[idx]);
+        /* Auto re-render if we have a grid */
+        if (pv->voxel_grid || pv->code_ed)
+            dc_scad_preview_render(pv);
+    }
+}
+
 /* -------------------------------------------------------------------------
  * Public API
  * ---------------------------------------------------------------------- */
@@ -678,6 +716,27 @@ dc_scad_preview_new(void)
 
     GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
     gtk_box_append(GTK_BOX(toolbar), sep);
+
+    /* Blocky/Smooth toggle */
+    pv->blocky_btn = gtk_button_new_with_label("Smooth");
+    gtk_widget_set_focusable(pv->blocky_btn, FALSE);
+    g_signal_connect(pv->blocky_btn, "clicked", G_CALLBACK(on_blocky_clicked), pv);
+    gtk_box_append(GTK_BOX(toolbar), pv->blocky_btn);
+
+    /* Resolution dropdown */
+    static const char * const res_labels[] = {
+        "16", "32", "48", "64", "96", "128", "192", "256", NULL
+    };
+    pv->res_dropdown = gtk_drop_down_new_from_strings(res_labels);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(pv->res_dropdown), 3); /* default 64 */
+    gtk_widget_set_focusable(pv->res_dropdown, FALSE);
+    gtk_widget_set_size_request(pv->res_dropdown, 70, -1);
+    gtk_widget_set_tooltip_text(pv->res_dropdown, "Voxel Resolution");
+    g_signal_connect(pv->res_dropdown, "notify::selected", G_CALLBACK(on_res_changed), pv);
+    gtk_box_append(GTK_BOX(toolbar), pv->res_dropdown);
+
+    GtkWidget *sep2 = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+    gtk_box_append(GTK_BOX(toolbar), sep2);
 
     pv->status_label = gtk_label_new("Ready — click Render");
     gtk_label_set_xalign(GTK_LABEL(pv->status_label), 0.0f);
