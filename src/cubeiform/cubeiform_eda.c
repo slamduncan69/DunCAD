@@ -788,6 +788,83 @@ parse_voxel_block_inner(EParser *p, DC_Array *vox_ops)
             expect(p, ETOK_RPAREN);
             expect(p, ETOK_SEMI);
             dc_array_push(vox_ops, &op);
+        } else if (ident_eq(&p->cur, "translate")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_VoxOp op = { .type = DC_VOX_OP_TRANSLATE };
+            op.x = eat_number(p); expect(p, ETOK_COMMA);
+            op.y = eat_number(p); expect(p, ETOK_COMMA);
+            op.z = eat_number(p);
+            expect(p, ETOK_RPAREN);
+            dc_array_push(vox_ops, &op);
+            /* Parse block body */
+            if (p->cur.type == ETOK_LBRACE) {
+                next_token(p);
+                while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error)
+                    parse_voxel_block_inner(p, vox_ops);
+                if (p->cur.type == ETOK_RBRACE) next_token(p);
+            } else {
+                /* Single statement form */
+                parse_voxel_block_inner(p, vox_ops);
+            }
+            DC_VoxOp pop = { .type = DC_VOX_OP_POP_TRANSFORM };
+            dc_array_push(vox_ops, &pop);
+        } else if (ident_eq(&p->cur, "rotate")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_VoxOp op = { .type = DC_VOX_OP_ROTATE };
+            op.x = eat_number(p); expect(p, ETOK_COMMA);
+            op.y = eat_number(p); expect(p, ETOK_COMMA);
+            op.z = eat_number(p);
+            /* Optional 4th arg: angle. Default rotation is Euler angles
+             * (rotate each axis by x,y,z degrees). */
+            if (p->cur.type == ETOK_COMMA) {
+                next_token(p);
+                op.radius = eat_number(p); /* angle in degrees */
+            }
+            expect(p, ETOK_RPAREN);
+            dc_array_push(vox_ops, &op);
+            if (p->cur.type == ETOK_LBRACE) {
+                next_token(p);
+                while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error)
+                    parse_voxel_block_inner(p, vox_ops);
+                if (p->cur.type == ETOK_RBRACE) next_token(p);
+            } else {
+                parse_voxel_block_inner(p, vox_ops);
+            }
+            DC_VoxOp pop = { .type = DC_VOX_OP_POP_TRANSFORM };
+            dc_array_push(vox_ops, &pop);
+        } else if (ident_eq(&p->cur, "scale")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_VoxOp op = { .type = DC_VOX_OP_SCALE };
+            op.x = eat_number(p);
+            if (p->cur.type == ETOK_COMMA) {
+                next_token(p);
+                op.y = eat_number(p);
+                if (p->cur.type == ETOK_COMMA) {
+                    next_token(p);
+                    op.z = eat_number(p);
+                } else {
+                    op.z = op.y;
+                }
+            } else {
+                /* Uniform scale */
+                op.y = op.x;
+                op.z = op.x;
+            }
+            expect(p, ETOK_RPAREN);
+            dc_array_push(vox_ops, &op);
+            if (p->cur.type == ETOK_LBRACE) {
+                next_token(p);
+                while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error)
+                    parse_voxel_block_inner(p, vox_ops);
+                if (p->cur.type == ETOK_RBRACE) next_token(p);
+            } else {
+                parse_voxel_block_inner(p, vox_ops);
+            }
+            DC_VoxOp pop = { .type = DC_VOX_OP_POP_TRANSFORM };
+            dc_array_push(vox_ops, &pop);
         } else {
             return; /* not an SDF statement — caller handles */
         }
@@ -835,8 +912,11 @@ static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_o
                    ident_eq(&p->cur, "union") ||
                    ident_eq(&p->cur, "resolution") ||
                    ident_eq(&p->cur, "cell_size") ||
-                   ident_eq(&p->cur, "color")) {
-            /* Top-level SDF primitives — all is rendered natively */
+                   ident_eq(&p->cur, "color") ||
+                   ident_eq(&p->cur, "translate") ||
+                   ident_eq(&p->cur, "rotate") ||
+                   ident_eq(&p->cur, "scale")) {
+            /* Top-level SDF primitives + transforms — all is rendered natively */
             parse_voxel_block_inner(p, vox_ops);
         } else if (ident_eq(&p->cur, "assembly")) {
             /* Skip assembly blocks for now — future */
@@ -1227,57 +1307,104 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
     float user_cell_size = 0; /* 0 = auto-compute */
     uint8_t cr = 180, cg = 180, cb = 180;
 
-    /* First pass: find resolution, cell_size, and compute bounding box */
+    /* First pass: find resolution, cell_size, and compute bounding box.
+     * We track a transform stack to correctly bound transformed primitives. */
     size_t nops = dc_array_length(eda->vox_ops);
     float bmin[3] = {1e18f, 1e18f, 1e18f};
     float bmax[3] = {-1e18f, -1e18f, -1e18f};
+
+    /* Transform stack for bounding box pass */
+    #define MAX_XFORM_DEPTH 32
+    DC_SdfTransform xform_stack[MAX_XFORM_DEPTH];
+    int xform_depth = 0;
+    dc_sdf_transform_identity(&xform_stack[0]);
+
+    /* Helper: transform 8 corners of a local AABB through forward transform,
+     * expand world AABB. Defined as a local macro for code reuse. */
+    #define EXPAND_BBOX_TRANSFORMED(lmin0, lmin1, lmin2, lmax0, lmax1, lmax2) \
+    do { \
+        float corners[8][3] = { \
+            {(lmin0),(lmin1),(lmin2)}, {(lmax0),(lmin1),(lmin2)}, \
+            {(lmin0),(lmax1),(lmin2)}, {(lmax0),(lmax1),(lmin2)}, \
+            {(lmin0),(lmin1),(lmax2)}, {(lmax0),(lmin1),(lmax2)}, \
+            {(lmin0),(lmax1),(lmax2)}, {(lmax0),(lmax1),(lmax2)}, \
+        }; \
+        const DC_SdfTransform *_xf = &xform_stack[xform_depth]; \
+        for (int _ci = 0; _ci < 8; _ci++) { \
+            float _wx = _xf->mat[0]*corners[_ci][0] + _xf->mat[4]*corners[_ci][1] + _xf->mat[8]*corners[_ci][2] + _xf->mat[12]; \
+            float _wy = _xf->mat[1]*corners[_ci][0] + _xf->mat[5]*corners[_ci][1] + _xf->mat[9]*corners[_ci][2] + _xf->mat[13]; \
+            float _wz = _xf->mat[2]*corners[_ci][0] + _xf->mat[6]*corners[_ci][1] + _xf->mat[10]*corners[_ci][2] + _xf->mat[14]; \
+            if (_wx < bmin[0]) { bmin[0] = _wx; } if (_wx > bmax[0]) { bmax[0] = _wx; } \
+            if (_wy < bmin[1]) { bmin[1] = _wy; } if (_wy > bmax[1]) { bmax[1] = _wy; } \
+            if (_wz < bmin[2]) { bmin[2] = _wz; } if (_wz > bmax[2]) { bmax[2] = _wz; } \
+        } \
+    } while (0)
 
     for (size_t i = 0; i < nops; i++) {
         DC_VoxOp *op = dc_array_get(eda->vox_ops, i);
         if (op->type == DC_VOX_OP_SET_RESOLUTION) resolution = op->resolution;
         if (op->type == DC_VOX_OP_SET_CELL_SIZE) user_cell_size = op->cell_size;
 
-        /* Accumulate bounding box from primitives */
+        /* Transform stack management */
+        if (op->type == DC_VOX_OP_TRANSLATE && xform_depth + 1 < MAX_XFORM_DEPTH) {
+            xform_depth++;
+            xform_stack[xform_depth] = xform_stack[xform_depth - 1];
+            dc_sdf_transform_translate(&xform_stack[xform_depth],
+                                       (float)op->x, (float)op->y, (float)op->z);
+            continue;
+        }
+        if (op->type == DC_VOX_OP_ROTATE && xform_depth + 1 < MAX_XFORM_DEPTH) {
+            xform_depth++;
+            xform_stack[xform_depth] = xform_stack[xform_depth - 1];
+            if (op->radius != 0) {
+                dc_sdf_transform_rotate(&xform_stack[xform_depth],
+                                        (float)op->x, (float)op->y, (float)op->z, (float)op->radius);
+            } else {
+                /* Euler angles: rotate Z, then Y, then X */
+                if ((float)op->z != 0) dc_sdf_transform_rotate(&xform_stack[xform_depth], 0, 0, 1, (float)op->z);
+                if ((float)op->y != 0) dc_sdf_transform_rotate(&xform_stack[xform_depth], 0, 1, 0, (float)op->y);
+                if ((float)op->x != 0) dc_sdf_transform_rotate(&xform_stack[xform_depth], 1, 0, 0, (float)op->x);
+            }
+            continue;
+        }
+        if (op->type == DC_VOX_OP_SCALE && xform_depth + 1 < MAX_XFORM_DEPTH) {
+            xform_depth++;
+            xform_stack[xform_depth] = xform_stack[xform_depth - 1];
+            dc_sdf_transform_scale(&xform_stack[xform_depth],
+                                   (float)op->x, (float)op->y, (float)op->z);
+            continue;
+        }
+        if (op->type == DC_VOX_OP_POP_TRANSFORM) {
+            if (xform_depth > 0) xform_depth--;
+            continue;
+        }
+
+        /* Accumulate bounding box from primitives (transformed) */
         float r;
         switch (op->type) {
         case DC_VOX_OP_SPHERE:
             r = (float)op->radius;
-            if ((float)op->x - r < bmin[0]) bmin[0] = (float)op->x - r;
-            if ((float)op->y - r < bmin[1]) bmin[1] = (float)op->y - r;
-            if ((float)op->z - r < bmin[2]) bmin[2] = (float)op->z - r;
-            if ((float)op->x + r > bmax[0]) bmax[0] = (float)op->x + r;
-            if ((float)op->y + r > bmax[1]) bmax[1] = (float)op->y + r;
-            if ((float)op->z + r > bmax[2]) bmax[2] = (float)op->z + r;
+            EXPAND_BBOX_TRANSFORMED((float)op->x - r, (float)op->y - r, (float)op->z - r,
+                                    (float)op->x + r, (float)op->y + r, (float)op->z + r);
             break;
         case DC_VOX_OP_BOX:
-            if ((float)op->x  < bmin[0]) bmin[0] = (float)op->x;
-            if ((float)op->y  < bmin[1]) bmin[1] = (float)op->y;
-            if ((float)op->z  < bmin[2]) bmin[2] = (float)op->z;
-            if ((float)op->x2 > bmax[0]) bmax[0] = (float)op->x2;
-            if ((float)op->y2 > bmax[1]) bmax[1] = (float)op->y2;
-            if ((float)op->z2 > bmax[2]) bmax[2] = (float)op->z2;
+            EXPAND_BBOX_TRANSFORMED((float)op->x, (float)op->y, (float)op->z,
+                                    (float)op->x2, (float)op->y2, (float)op->z2);
             break;
         case DC_VOX_OP_CYLINDER:
             r = (float)op->radius;
-            if ((float)op->x - r < bmin[0]) bmin[0] = (float)op->x - r;
-            if ((float)op->y - r < bmin[1]) bmin[1] = (float)op->y - r;
-            if ((float)op->z     < bmin[2]) bmin[2] = (float)op->z;
-            if ((float)op->x + r > bmax[0]) bmax[0] = (float)op->x + r;
-            if ((float)op->y + r > bmax[1]) bmax[1] = (float)op->y + r;
-            if ((float)op->radius2 > bmax[2]) bmax[2] = (float)op->radius2;
+            EXPAND_BBOX_TRANSFORMED((float)op->x - r, (float)op->y - r, (float)op->z,
+                                    (float)op->x + r, (float)op->y + r, (float)op->radius2);
             break;
         case DC_VOX_OP_TORUS:
             r = (float)(op->radius + op->radius2);
-            if ((float)op->x - r < bmin[0]) bmin[0] = (float)op->x - r;
-            if ((float)op->y - r < bmin[1]) bmin[1] = (float)op->y - r;
-            if ((float)op->z - (float)op->radius2 < bmin[2]) bmin[2] = (float)op->z - (float)op->radius2;
-            if ((float)op->x + r > bmax[0]) bmax[0] = (float)op->x + r;
-            if ((float)op->y + r > bmax[1]) bmax[1] = (float)op->y + r;
-            if ((float)op->z + (float)op->radius2 > bmax[2]) bmax[2] = (float)op->z + (float)op->radius2;
+            EXPAND_BBOX_TRANSFORMED((float)op->x - r, (float)op->y - r, (float)op->z - (float)op->radius2,
+                                    (float)op->x + r, (float)op->y + r, (float)op->z + (float)op->radius2);
             break;
         default: break;
         }
     }
+    #undef EXPAND_BBOX_TRANSFORMED
 
     if (resolution < 8) resolution = 8;
     if (resolution > 512) resolution = 512;
@@ -1320,6 +1447,10 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
     DC_VoxelGrid *temp = NULL;
     int csg_pending = 0;
 
+    /* Reset transform stack for second pass */
+    xform_depth = 0;
+    dc_sdf_transform_identity(&xform_stack[0]);
+
     for (size_t i = 0; i < nops; i++) {
         DC_VoxOp *op = dc_array_get(eda->vox_ops, i);
 
@@ -1336,6 +1467,40 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
             cr = op->r; cg = op->g; cb = op->b;
             break;
 
+        case DC_VOX_OP_TRANSLATE:
+            if (xform_depth + 1 < MAX_XFORM_DEPTH) {
+                xform_depth++;
+                xform_stack[xform_depth] = xform_stack[xform_depth - 1];
+                dc_sdf_transform_translate(&xform_stack[xform_depth],
+                                           (float)op->x, (float)op->y, (float)op->z);
+            }
+            break;
+        case DC_VOX_OP_ROTATE:
+            if (xform_depth + 1 < MAX_XFORM_DEPTH) {
+                xform_depth++;
+                xform_stack[xform_depth] = xform_stack[xform_depth - 1];
+                if (op->radius != 0) {
+                    dc_sdf_transform_rotate(&xform_stack[xform_depth],
+                                            (float)op->x, (float)op->y, (float)op->z, (float)op->radius);
+                } else {
+                    if ((float)op->z != 0) dc_sdf_transform_rotate(&xform_stack[xform_depth], 0, 0, 1, (float)op->z);
+                    if ((float)op->y != 0) dc_sdf_transform_rotate(&xform_stack[xform_depth], 0, 1, 0, (float)op->y);
+                    if ((float)op->x != 0) dc_sdf_transform_rotate(&xform_stack[xform_depth], 1, 0, 0, (float)op->x);
+                }
+            }
+            break;
+        case DC_VOX_OP_SCALE:
+            if (xform_depth + 1 < MAX_XFORM_DEPTH) {
+                xform_depth++;
+                xform_stack[xform_depth] = xform_stack[xform_depth - 1];
+                dc_sdf_transform_scale(&xform_stack[xform_depth],
+                                       (float)op->x, (float)op->y, (float)op->z);
+            }
+            break;
+        case DC_VOX_OP_POP_TRANSFORM:
+            if (xform_depth > 0) xform_depth--;
+            break;
+
         case DC_VOX_OP_SPHERE:
         case DC_VOX_OP_BOX:
         case DC_VOX_OP_CYLINDER:
@@ -1347,17 +1512,45 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
                 target = temp;
             }
 
-            if (op->type == DC_VOX_OP_SPHERE)
-                dc_sdf_sphere(target, OX(op->x), OY(op->y), OZ(op->z), (float)op->radius);
-            else if (op->type == DC_VOX_OP_BOX)
-                dc_sdf_box(target, OX(op->x), OY(op->y), OZ(op->z),
-                                   OX(op->x2), OY(op->y2), OZ(op->z2));
-            else if (op->type == DC_VOX_OP_CYLINDER)
-                dc_sdf_cylinder(target, OX(op->x), OY(op->y), (float)op->radius,
-                                        OZ(op->z), OZ(op->radius2));
-            else if (op->type == DC_VOX_OP_TORUS)
-                dc_sdf_torus(target, OX(op->x), OY(op->y), OZ(op->z),
-                                     (float)op->radius, (float)op->radius2);
+            /* Build the full transform: grid offset (bmin shift) + user transform.
+             * The grid offset translates from world coords to grid coords.
+             * User transform is applied on top of that. */
+            DC_SdfTransform full;
+            dc_sdf_transform_identity(&full);
+            dc_sdf_transform_translate(&full, -bmin[0], -bmin[1], -bmin[2]);
+            DC_SdfTransform composed;
+            dc_sdf_transform_compose(&full, &xform_stack[xform_depth], &composed);
+
+            int has_xform = xform_depth > 0;
+
+            if (op->type == DC_VOX_OP_SPHERE) {
+                if (has_xform)
+                    dc_sdf_sphere_t(target, (float)op->x, (float)op->y, (float)op->z,
+                                    (float)op->radius, &composed);
+                else
+                    dc_sdf_sphere(target, OX(op->x), OY(op->y), OZ(op->z), (float)op->radius);
+            } else if (op->type == DC_VOX_OP_BOX) {
+                if (has_xform)
+                    dc_sdf_box_t(target, (float)op->x, (float)op->y, (float)op->z,
+                                 (float)op->x2, (float)op->y2, (float)op->z2, &composed);
+                else
+                    dc_sdf_box(target, OX(op->x), OY(op->y), OZ(op->z),
+                                       OX(op->x2), OY(op->y2), OZ(op->z2));
+            } else if (op->type == DC_VOX_OP_CYLINDER) {
+                if (has_xform)
+                    dc_sdf_cylinder_t(target, (float)op->x, (float)op->y, (float)op->radius,
+                                      (float)op->z, (float)op->radius2, &composed);
+                else
+                    dc_sdf_cylinder(target, OX(op->x), OY(op->y), (float)op->radius,
+                                            OZ(op->z), OZ(op->radius2));
+            } else if (op->type == DC_VOX_OP_TORUS) {
+                if (has_xform)
+                    dc_sdf_torus_t(target, (float)op->x, (float)op->y, (float)op->z,
+                                   (float)op->radius, (float)op->radius2, &composed);
+                else
+                    dc_sdf_torus(target, OX(op->x), OY(op->y), OZ(op->z),
+                                         (float)op->radius, (float)op->radius2);
+            }
 
             if (csg_pending && temp) {
                 DC_VoxelGrid *out = dc_voxel_grid_new(sx, sy, sz, cell_size);
@@ -1379,6 +1572,7 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
     #undef OX
     #undef OY
     #undef OZ
+    #undef MAX_XFORM_DEPTH
 
     /* Activate voxels and fill ALL cells with the solid color.
      * The SDF texture determines the surface boundary — color must

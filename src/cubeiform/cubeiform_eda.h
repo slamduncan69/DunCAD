@@ -83,6 +83,10 @@ typedef enum {
     DC_VOX_OP_INTERSECT,
     DC_VOX_OP_UNION,
     DC_VOX_OP_COLOR,
+    DC_VOX_OP_TRANSLATE,     /* push translate transform, children follow */
+    DC_VOX_OP_ROTATE,        /* push rotate transform, children follow */
+    DC_VOX_OP_SCALE,         /* push scale transform, children follow */
+    DC_VOX_OP_POP_TRANSFORM, /* end of transform block */
 } DC_VoxOpType;
 
 typedef struct {

@@ -370,6 +370,93 @@ TEST(test_export_pcb)
 }
 
 /* =========================================================================
+ * Tests — Voxel transforms (V1.6)
+ * ========================================================================= */
+
+TEST(test_voxel_translate_sphere)
+{
+    DC_Error err = {0};
+    const char *src = "translate(10, 10, 10) { sphere(0, 0, 0, 5); }";
+    DC_VoxelGrid *grid = NULL;
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    ASSERT(rc == 0);
+    ASSERT(grid != NULL);
+
+    size_t active = dc_voxel_grid_active_count(grid);
+    /* Sphere r=5 — count depends on auto-sized grid resolution */
+    ASSERT(active > 200);
+    /* Should not fill the entire grid */
+    int gsx = dc_voxel_grid_size_x(grid);
+    int gsy = dc_voxel_grid_size_y(grid);
+    int gsz = dc_voxel_grid_size_z(grid);
+    ASSERT(active < (size_t)(gsx * gsy * gsz));
+
+    dc_voxel_grid_free(grid);
+}
+
+TEST(test_voxel_translate_parse_ops)
+{
+    DC_Error err = {0};
+    const char *src = "translate(5, 5, 5) { sphere(0, 0, 0, 3); }";
+    DC_CubeiformEda *eda = dc_cubeiform_parse_eda(src, &err);
+    ASSERT(eda != NULL);
+    ASSERT(dc_cubeiform_eda_vox_op_count(eda) == 3);
+
+    const DC_VoxOp *op0 = dc_cubeiform_eda_get_vox_op(eda, 0);
+    ASSERT(op0->type == DC_VOX_OP_TRANSLATE);
+    ASSERT(op0->x == 5.0);
+
+    const DC_VoxOp *op1 = dc_cubeiform_eda_get_vox_op(eda, 1);
+    ASSERT(op1->type == DC_VOX_OP_SPHERE);
+
+    const DC_VoxOp *op2 = dc_cubeiform_eda_get_vox_op(eda, 2);
+    ASSERT(op2->type == DC_VOX_OP_POP_TRANSFORM);
+
+    dc_cubeiform_eda_free(eda);
+}
+
+TEST(test_voxel_nested_transforms)
+{
+    DC_Error err = {0};
+    const char *src =
+        "translate(10, 0, 0) {\n"
+        "    scale(2, 2, 2) {\n"
+        "        sphere(0, 0, 0, 3);\n"
+        "    }\n"
+        "}\n";
+    DC_VoxelGrid *grid = NULL;
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    ASSERT(rc == 0);
+    ASSERT(grid != NULL);
+
+    size_t active = dc_voxel_grid_active_count(grid);
+    /* Scaled by 2: effective r=6 — count depends on auto-sized grid */
+    ASSERT(active > 300);
+    int nx = dc_voxel_grid_size_x(grid);
+    int ny = dc_voxel_grid_size_y(grid);
+    int nz = dc_voxel_grid_size_z(grid);
+    ASSERT(active < (size_t)(nx * ny * nz));
+
+    dc_voxel_grid_free(grid);
+}
+
+TEST(test_voxel_rotate_box)
+{
+    DC_Error err = {0};
+    const char *src = "rotate(0, 0, 1, 45) { box(-5, -2, -2, 5, 2, 2); }";
+    DC_CubeiformEda *eda = dc_cubeiform_parse_eda(src, &err);
+    ASSERT(eda != NULL);
+    ASSERT(dc_cubeiform_eda_vox_op_count(eda) == 3);
+
+    const DC_VoxOp *op0 = dc_cubeiform_eda_get_vox_op(eda, 0);
+    ASSERT(op0->type == DC_VOX_OP_ROTATE);
+    ASSERT(op0->z == 1.0);
+    ASSERT(op0->radius == 45.0);
+
+    dc_cubeiform_eda_free(eda);
+}
+
+/* =========================================================================
  * Tests — Mixed 3D + EDA (EDA blocks coexist with shape blocks)
  * ========================================================================= */
 
@@ -426,6 +513,12 @@ int main(void)
     /* Export */
     RUN(test_export_schematic);
     RUN(test_export_pcb);
+
+    /* Voxel transforms (V1.6) */
+    RUN(test_voxel_translate_sphere);
+    RUN(test_voxel_translate_parse_ops);
+    RUN(test_voxel_nested_transforms);
+    RUN(test_voxel_rotate_box);
 
     /* Mixed */
     RUN(test_mixed_3d_eda);

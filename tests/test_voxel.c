@@ -302,6 +302,246 @@ test_sdf_color_by_normal(void)
     return 0;
 }
 
+/* ---- Transform tests ---- */
+
+static int
+test_transform_identity(void)
+{
+    /* sphere_t with NULL transform should behave like union at origin */
+    DC_VoxelGrid *g = dc_voxel_grid_new(32, 32, 32, 1.0f);
+    dc_sdf_sphere_t(g, 16.0f, 16.0f, 16.0f, 8.0f, NULL);
+    dc_sdf_activate(g);
+
+    size_t active = dc_voxel_grid_active_count(g);
+    ASSERT(active > 1500);
+    ASSERT(active < 3000);
+
+    const DC_Voxel *center = dc_voxel_grid_get_const(g, 16, 16, 16);
+    ASSERT(center && center->active == 1);
+
+    dc_voxel_grid_free(g);
+    return 0;
+}
+
+static int
+test_transform_translate_sphere(void)
+{
+    /* Sphere at origin, translated to (16,16,16) in a 32^3 grid with cell_size=1.
+     * Center of grid cell (16,16,16) = world (16.5, 16.5, 16.5).
+     * After translate(16,16,16), sphere center is at world (16,16,16).
+     * Cell (16,16,16) center is (16.5, 16.5, 16.5) — 0.87 from sphere center.
+     * With r=6, distance at that cell = 0.87 - 6 = -5.13. Definitely inside. */
+    DC_VoxelGrid *g = dc_voxel_grid_new(32, 32, 32, 1.0f);
+
+    DC_SdfTransform t;
+    dc_sdf_transform_identity(&t);
+    dc_sdf_transform_translate(&t, 16.0f, 16.0f, 16.0f);
+
+    dc_sdf_sphere_t(g, 0.0f, 0.0f, 0.0f, 6.0f, &t);
+    dc_sdf_activate(g);
+
+    /* Sphere should be centered near cell (16, 16, 16) */
+    const DC_Voxel *at_center = dc_voxel_grid_get_const(g, 16, 16, 16);
+    ASSERT(at_center && at_center->active == 1);
+    ASSERT(at_center->distance < -4.0f);
+
+    /* Origin should be empty (far from translated sphere) */
+    const DC_Voxel *at_origin = dc_voxel_grid_get_const(g, 0, 0, 0);
+    ASSERT(at_origin && at_origin->active == 0);
+
+    /* Translated sphere voxel count should be reasonable */
+    size_t active = dc_voxel_grid_active_count(g);
+    /* 4/3 * pi * 6^3 ≈ 905 */
+    ASSERT(active > 600);
+    ASSERT(active < 1400);
+
+    dc_voxel_grid_free(g);
+    return 0;
+}
+
+static int
+test_transform_translate_box(void)
+{
+    /* Box from (-3,-3,-3) to (3,3,3), translated to (16,16,16). */
+    DC_VoxelGrid *g = dc_voxel_grid_new(32, 32, 32, 1.0f);
+
+    DC_SdfTransform t;
+    dc_sdf_transform_identity(&t);
+    dc_sdf_transform_translate(&t, 16.0f, 16.0f, 16.0f);
+
+    dc_sdf_box_t(g, -3.0f, -3.0f, -3.0f, 3.0f, 3.0f, 3.0f, &t);
+    dc_sdf_activate(g);
+
+    /* Cell (16, 16, 16) center = (16.5, 16.5, 16.5), local = (0.5, 0.5, 0.5) — inside box */
+    const DC_Voxel *center = dc_voxel_grid_get_const(g, 16, 16, 16);
+    ASSERT(center && center->active == 1);
+
+    /* Cell (0, 0, 0) should be empty */
+    const DC_Voxel *origin = dc_voxel_grid_get_const(g, 0, 0, 0);
+    ASSERT(origin && origin->active == 0);
+
+    /* ~6^3 = 216 voxels expected */
+    size_t active = dc_voxel_grid_active_count(g);
+    ASSERT(active > 150);
+    ASSERT(active < 300);
+
+    dc_voxel_grid_free(g);
+    return 0;
+}
+
+static int
+test_transform_scale_sphere(void)
+{
+    /* Sphere at origin with r=4, scaled by 2x -> effective r=8.
+     * Translate to center of grid so it fits. */
+    DC_VoxelGrid *g = dc_voxel_grid_new(48, 48, 48, 1.0f);
+
+    DC_SdfTransform t;
+    dc_sdf_transform_identity(&t);
+    dc_sdf_transform_translate(&t, 24.0f, 24.0f, 24.0f);
+    dc_sdf_transform_scale(&t, 2.0f, 2.0f, 2.0f);
+
+    dc_sdf_sphere_t(g, 0.0f, 0.0f, 0.0f, 4.0f, &t);
+    dc_sdf_activate(g);
+
+    size_t active = dc_voxel_grid_active_count(g);
+    /* Effective radius 8: 4/3 * pi * 8^3 ≈ 2145 */
+    ASSERT(active > 1500);
+    ASSERT(active < 3000);
+
+    /* Point at distance 7 from center (inside scaled sphere) */
+    const DC_Voxel *near_edge = dc_voxel_grid_get_const(g, 31, 24, 24);
+    ASSERT(near_edge && near_edge->active == 1);
+
+    /* Point at distance 9 from center (outside scaled sphere) */
+    const DC_Voxel *outside = dc_voxel_grid_get_const(g, 33, 24, 24);
+    ASSERT(outside && outside->active == 0);
+
+    dc_voxel_grid_free(g);
+    return 0;
+}
+
+static int
+test_transform_rotate_box(void)
+{
+    /* Box from (-5,-2,-2) to (5,2,2) = 10x4x4.
+     * Rotated 90 degrees around Z axis → becomes 4x10x4.
+     * Translated to (16,16,16). */
+    DC_VoxelGrid *g = dc_voxel_grid_new(32, 32, 32, 1.0f);
+
+    DC_SdfTransform t;
+    dc_sdf_transform_identity(&t);
+    dc_sdf_transform_translate(&t, 16.0f, 16.0f, 16.0f);
+    dc_sdf_transform_rotate(&t, 0.0f, 0.0f, 1.0f, 90.0f);
+
+    dc_sdf_box_t(g, -5.0f, -2.0f, -2.0f, 5.0f, 2.0f, 2.0f, &t);
+    dc_sdf_activate(g);
+
+    /* After 90° Z rotation: X-long box becomes Y-long.
+     * At world (16, 20, 16) -> local should be inside the box.
+     * Cell (16, 20, 16) center = (16.5, 20.5, 16.5).
+     * Local = inv(T*R) * world. T=(16,16,16), R=90°Z.
+     * Inv = Rinv * Tinv. Tinv shifts by (-16,-16,-16) -> (0.5, 4.5, 0.5).
+     * Rinv (90° Z) = -90° Z rotation: (x,y) -> (y, -x) = (4.5, -0.5).
+     * Local = (4.5, -0.5, 0.5). Box is [-5,5]x[-2,2]x[-2,2]. Inside! */
+    const DC_Voxel *rotated = dc_voxel_grid_get_const(g, 16, 20, 16);
+    ASSERT(rotated && rotated->active == 1);
+
+    /* At world (16, 16, 21) -> local after same inv:
+     * Tinv -> (0.5, 0.5, 5.5). Rinv -> (0.5, -0.5, 5.5).
+     * Box z is [-2,2], 5.5 > 2 -> outside. */
+    const DC_Voxel *outside_z = dc_voxel_grid_get_const(g, 16, 16, 21);
+    ASSERT(outside_z && outside_z->active == 0);
+
+    dc_voxel_grid_free(g);
+    return 0;
+}
+
+static int
+test_transform_compose(void)
+{
+    /* Two spheres: one translated left, one translated right.
+     * Both should appear in the grid via _t's min-union behavior. */
+    DC_VoxelGrid *g = dc_voxel_grid_new(48, 16, 16, 1.0f);
+
+    DC_SdfTransform t1;
+    dc_sdf_transform_identity(&t1);
+    dc_sdf_transform_translate(&t1, 8.0f, 8.0f, 8.0f);
+
+    DC_SdfTransform t2;
+    dc_sdf_transform_identity(&t2);
+    dc_sdf_transform_translate(&t2, 40.0f, 8.0f, 8.0f);
+
+    dc_sdf_sphere_t(g, 0.0f, 0.0f, 0.0f, 5.0f, &t1);
+    dc_sdf_sphere_t(g, 0.0f, 0.0f, 0.0f, 5.0f, &t2);
+    dc_sdf_activate(g);
+
+    /* Both spheres should be active */
+    const DC_Voxel *left = dc_voxel_grid_get_const(g, 8, 8, 8);
+    ASSERT(left && left->active == 1);
+
+    const DC_Voxel *right = dc_voxel_grid_get_const(g, 40, 8, 8);
+    ASSERT(right && right->active == 1);
+
+    /* Gap between them should be empty */
+    const DC_Voxel *gap = dc_voxel_grid_get_const(g, 24, 8, 8);
+    ASSERT(gap && gap->active == 0);
+
+    dc_voxel_grid_free(g);
+    return 0;
+}
+
+static int
+test_transform_cylinder_t(void)
+{
+    /* Cylinder at origin, translated to (16,16,16) */
+    DC_VoxelGrid *g = dc_voxel_grid_new(32, 32, 32, 1.0f);
+
+    DC_SdfTransform t;
+    dc_sdf_transform_identity(&t);
+    dc_sdf_transform_translate(&t, 16.0f, 16.0f, 8.0f);
+
+    dc_sdf_cylinder_t(g, 0.0f, 0.0f, 5.0f, 0.0f, 16.0f, &t);
+    dc_sdf_activate(g);
+
+    const DC_Voxel *center = dc_voxel_grid_get_const(g, 16, 16, 16);
+    ASSERT(center && center->active == 1);
+
+    size_t active = dc_voxel_grid_active_count(g);
+    ASSERT(active > 800);
+
+    dc_voxel_grid_free(g);
+    return 0;
+}
+
+static int
+test_transform_torus_t(void)
+{
+    /* Torus at origin, translated to (16,16,16) */
+    DC_VoxelGrid *g = dc_voxel_grid_new(32, 32, 32, 1.0f);
+
+    DC_SdfTransform t;
+    dc_sdf_transform_identity(&t);
+    dc_sdf_transform_translate(&t, 16.0f, 16.0f, 16.0f);
+
+    dc_sdf_torus_t(g, 0.0f, 0.0f, 0.0f, 8.0f, 3.0f, &t);
+    dc_sdf_activate(g);
+
+    size_t active = dc_voxel_grid_active_count(g);
+    ASSERT(active > 800);
+
+    /* Center of torus (the hole) should be empty */
+    const DC_Voxel *hole = dc_voxel_grid_get_const(g, 16, 16, 16);
+    ASSERT(hole && hole->active == 0);
+
+    /* On the ring should be active */
+    const DC_Voxel *ring = dc_voxel_grid_get_const(g, 24, 16, 16);
+    ASSERT(ring && ring->active == 1);
+
+    dc_voxel_grid_free(g);
+    return 0;
+}
+
 /* ---- main ---- */
 int
 main(void)
@@ -320,6 +560,16 @@ main(void)
     RUN_TEST(test_sdf_cylinder);
     RUN_TEST(test_sdf_torus);
     RUN_TEST(test_sdf_color_by_normal);
+
+    /* V1.6: Transform tests */
+    RUN_TEST(test_transform_identity);
+    RUN_TEST(test_transform_translate_sphere);
+    RUN_TEST(test_transform_translate_box);
+    RUN_TEST(test_transform_scale_sphere);
+    RUN_TEST(test_transform_rotate_box);
+    RUN_TEST(test_transform_compose);
+    RUN_TEST(test_transform_cylinder_t);
+    RUN_TEST(test_transform_torus_t);
 
     fprintf(stderr, "=== %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;
