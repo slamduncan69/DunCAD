@@ -2175,6 +2175,20 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
     if (!eda || !eda->vox_ops || dc_array_length(eda->vox_ops) == 0)
         return NULL;
 
+    /* Check if there are any actual primitives (not just settings).
+     * Without primitives, there's nothing to voxelize — bail early. */
+    {
+        size_t n = dc_array_length(eda->vox_ops);
+        int has_prim = 0;
+        for (size_t i = 0; i < n && !has_prim; i++) {
+            DC_VoxOp *op = dc_array_get(eda->vox_ops, i);
+            if (op->type == DC_VOX_OP_SPHERE || op->type == DC_VOX_OP_BOX ||
+                op->type == DC_VOX_OP_CYLINDER || op->type == DC_VOX_OP_TORUS)
+                has_prim = 1;
+        }
+        if (!has_prim) return NULL;
+    }
+
     int resolution = 64;
     float user_cell_size = 0; /* 0 = auto-compute */
     uint8_t cr = 180, cg = 180, cb = 180;
@@ -2280,6 +2294,12 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
 
     if (resolution < 8) resolution = 8;
     if (resolution > 4096) resolution = 4096;
+
+    /* If no primitives contributed to the bounding box, bail out.
+     * This happens when vox_ops only contain settings ($vd, $vn, etc.)
+     * with no actual geometry (sphere, cube, etc.). */
+    if (bmin[0] > bmax[0] || bmin[1] > bmax[1] || bmin[2] > bmax[2])
+        return NULL;
 
     /* Add padding around bounding box */
     float extent[3] = { bmax[0]-bmin[0], bmax[1]-bmin[1], bmax[2]-bmin[2] };
