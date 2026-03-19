@@ -171,9 +171,11 @@ int  dc_gl_viewport_get_voxel_blocky(DC_GlViewport *vp);
 /* ---- Selection modes ---- */
 
 typedef enum {
-    DC_SEL_OBJECT = 0,  /* Select whole objects (default) */
-    DC_SEL_FACE   = 1,  /* Select face groups (coplanar triangles) */
-    DC_SEL_EDGE   = 2,  /* Select edges (face boundaries) */
+    DC_SEL_OBJECT     = 0,  /* Select whole objects (default) */
+    DC_SEL_FACE       = 1,  /* Select face groups (coplanar triangles) */
+    DC_SEL_EDGE       = 2,  /* Select edges (face boundaries) */
+    DC_SEL_BEZ_CURVE  = 3,  /* Select bezier patch boundary curves */
+    DC_SEL_BEZ_CP     = 4,  /* Select bezier control points */
 } DC_SelectMode;
 
 /* Get/set selection mode. */
@@ -192,6 +194,16 @@ int dc_gl_viewport_get_selected_edge(DC_GlViewport *vp);
  * Returns 0 if obj_idx is out of range or has no mesh. */
 int dc_gl_viewport_get_face_count(DC_GlViewport *vp, int obj_idx);
 int dc_gl_viewport_get_edge_count(DC_GlViewport *vp, int obj_idx);
+
+/* Get selected bezier curve/CP index (-1 if none).
+ * Curve: encoded as (patch_row * cols + patch_col) * curve_count + curve_idx.
+ * CP: encoded as cp_row * cp_cols + cp_col. */
+int dc_gl_viewport_get_selected_bez_curve(DC_GlViewport *vp);
+int dc_gl_viewport_get_selected_bez_cp(DC_GlViewport *vp);
+
+/* Get CP position for selected bezier CP. Returns 0 on success. */
+int dc_gl_viewport_get_bez_cp_pos(DC_GlViewport *vp,
+                                    float *x, float *y, float *z);
 
 /* Toggle wireframe overlay. */
 void dc_gl_viewport_toggle_wireframe(DC_GlViewport *vp);

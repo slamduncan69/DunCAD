@@ -694,11 +694,15 @@ cmd_gl_select_mode(const char *args)
             dc_gl_viewport_set_select_mode(vp, DC_SEL_FACE);
         else if (strcmp(mode, "edge") == 0)
             dc_gl_viewport_set_select_mode(vp, DC_SEL_EDGE);
+        else if (strcmp(mode, "bezcurve") == 0 || strcmp(mode, "bez_curve") == 0)
+            dc_gl_viewport_set_select_mode(vp, DC_SEL_BEZ_CURVE);
+        else if (strcmp(mode, "bezcp") == 0 || strcmp(mode, "bez_cp") == 0)
+            dc_gl_viewport_set_select_mode(vp, DC_SEL_BEZ_CP);
         else
-            return strdup("{\"error\":\"usage: gl_select_mode [object|face|edge]\"}\n");
+            return strdup("{\"error\":\"usage: gl_select_mode [object|face|edge|bezcurve|bezcp]\"}\n");
     }
 
-    static const char *names[] = {"object", "face", "edge"};
+    static const char *names[] = {"object", "face", "edge", "bezcurve", "bezcp"};
     DC_SelectMode m = dc_gl_viewport_get_select_mode(vp);
     char *buf = malloc(128);
     snprintf(buf, 128, "{\"ok\":true,\"mode\":\"%s\"}\n", names[m]);
@@ -2905,6 +2909,38 @@ dispatch(const char *cmd)
     if (strcmp(name, "bezier_mesh_edit_loop")   == 0) return cmd_bezier_mesh_edit_loop();
     if (strcmp(name, "bezier_mesh_apply_loop")  == 0) return cmd_bezier_mesh_apply_loop();
     if (strcmp(name, "bezier_mesh_cancel_loop") == 0) return cmd_bezier_mesh_cancel_loop();
+
+    /* Bezier mesh selection queries */
+    if (strcmp(name, "bezier_mesh_selected") == 0) {
+        DC_GlViewport *vp = get_viewport();
+        if (!vp) return strdup("{\"error\":\"no viewport\"}\n");
+        int curve = dc_gl_viewport_get_selected_bez_curve(vp);
+        int cp = dc_gl_viewport_get_selected_bez_cp(vp);
+        DC_SelectMode mode = dc_gl_viewport_get_select_mode(vp);
+        float cx=0,cy=0,cz=0;
+        int has_pos = dc_gl_viewport_get_bez_cp_pos(vp, &cx, &cy, &cz);
+        char *resp = malloc(256);
+        snprintf(resp, 256,
+            "{\"sel_mode\":%d,\"bez_curve\":%d,\"bez_cp\":%d,"
+            "\"cp_pos\":%s}\n",
+            (int)mode, curve, cp,
+            has_pos == 0 ? "[" : "null");
+        if (has_pos == 0) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "%.4f,%.4f,%.4f]", cx, cy, cz);
+            /* Append to resp before the closing \n */
+            size_t len = strlen(resp);
+            char *r2 = malloc(len + 96);
+            /* Replace "null}\n" with the array */
+            snprintf(r2, len + 96,
+                "{\"sel_mode\":%d,\"bez_curve\":%d,\"bez_cp\":%d,"
+                "\"cp_pos\":[%.4f,%.4f,%.4f]}\n",
+                (int)mode, curve, cp, cx, cy, cz);
+            free(resp);
+            resp = r2;
+        }
+        return resp;
+    }
 
     /* Voxel */
     if (strcmp(name, "voxel_sphere")       == 0) return cmd_voxel_sphere(args);

@@ -325,6 +325,8 @@ struct DC_GlViewport {
     int              bezier_loop_vert_count;
     int              bezier_loop_type;   /* 0=row, 1=col, -1=none */
     int              bezier_loop_index;
+    int              selected_bez_curve; /* selected curve index, -1=none */
+    int              selected_bez_cp;    /* selected CP index (cp_row*cp_cols+cp_col), -1=none */
 };
 
 /* Forward declarations for lazy topology builders */
@@ -877,6 +879,50 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
             glLineWidth(1.0f);
             glDepthFunc(GL_LESS);
             glBindVertexArray(0);
+        }
+
+        /* Draw selected CP marker (yellow cross) */
+        if (vp->selected_bez_cp >= 0 && vp->bezier_mesh) {
+            int cr = vp->selected_bez_cp / vp->bezier_mesh->cp_cols;
+            int cc = vp->selected_bez_cp % vp->bezier_mesh->cp_cols;
+            if (cr < vp->bezier_mesh->cp_rows && cc < vp->bezier_mesh->cp_cols) {
+                ts_vec3 cp = ts_bezier_mesh_get_cp(vp->bezier_mesh, cr, cc);
+                float cx = (float)cp.v[0], cy = (float)cp.v[1], cz = (float)cp.v[2];
+                float sz = vp->cam_dist * 0.015f;
+
+                /* Draw a 3D cross (3 lines, 6 verts) in yellow */
+                float cross_data[6 * 6] = {
+                    cx-sz, cy, cz,  1,1,0,  cx+sz, cy, cz,  1,1,0,
+                    cx, cy-sz, cz,  1,1,0,  cx, cy+sz, cz,  1,1,0,
+                    cx, cy, cz-sz,  1,1,0,  cx, cy, cz+sz,  1,1,0,
+                };
+
+                GLuint cvao, cvbo;
+                glGenVertexArrays(1, &cvao);
+                glGenBuffers(1, &cvbo);
+                glBindVertexArray(cvao);
+                glBindBuffer(GL_ARRAY_BUFFER, cvbo);
+                glBufferData(GL_ARRAY_BUFFER, sizeof(cross_data),
+                             cross_data, GL_STREAM_DRAW);
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                                      6*sizeof(float), (void*)0);
+                glEnableVertexAttribArray(0);
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE,
+                                      6*sizeof(float), (void*)(3*sizeof(float)));
+                glEnableVertexAttribArray(1);
+
+                glUseProgram(vp->line_prog);
+                glUniformMatrix4fv(glGetUniformLocation(vp->line_prog, "uMVP"),
+                                   1, GL_FALSE, vp_mat);
+                glDepthFunc(GL_LEQUAL);
+                glLineWidth(3.0f);
+                glDrawArrays(GL_LINES, 0, 6);
+                glLineWidth(1.0f);
+                glDepthFunc(GL_LESS);
+
+                glDeleteBuffers(1, &cvbo);
+                glDeleteVertexArrays(1, &cvao);
+            }
         }
 
         glUseProgram(0);
@@ -1523,6 +1569,363 @@ do_pick_edge(DC_GlViewport *vp, int px, int py)
     return obj_idx;
 }
 
+/* Bezier curve pick: render each patch boundary/iso-curve as thick colored
+ * lines in the pick FBO. pick_setup requires obj_count>0 so we use a
+ * modified version that works for bezier meshes. */
+static int
+do_pick_bez_curve(DC_GlViewport *vp, int px, int py)
+{
+    if (!vp->gl_ready || !vp->bezier_mesh || !vp->pick_prog)
+        return -1;
+
+    int w = gtk_widget_get_width(GTK_WIDGET(vp->gl_area));
+    int h = gtk_widget_get_height(GTK_WIDGET(vp->gl_area));
+    int scale = gtk_widget_get_scale_factor(GTK_WIDGET(vp->gl_area));
+    int fw = w * scale, fh = h * scale;
+
+    gtk_gl_area_make_current(GTK_GL_AREA(vp->gl_area));
+    ensure_pick_fbo(vp, fw, fh);
+
+    float eye[3];
+    camera_eye(vp, eye);
+    float up[3] = {0, 1, 0};
+    float view[16], proj[16], vp_mat[16];
+    mat4_lookat(view, eye, vp->cam_center, up);
+    float aspect = (float)w / (float)h;
+    if (vp->ortho) {
+        float half = vp->cam_dist * 0.5f;
+        mat4_ortho(proj, -half*aspect, half*aspect, -half, half,
+                   0.1f, vp->cam_dist * 10.0f);
+    } else {
+        mat4_perspective(proj, 45.0f, aspect, 0.1f, vp->cam_dist * 10.0f);
+    }
+    mat4_mul(vp_mat, proj, view);
+
+    int fpx = px * scale;
+    int fpy = fh - (py * scale) - 1;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, vp->pick_fbo);
+    glViewport(0, 0, fw, fh);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    /* Build tessellated curves with unique pick colors.
+     * Each curve gets an ID: patch boundaries + iso-curves + CP lattice lines.
+     * For simplicity, we tessellate each "curve" (row/col boundary) separately.
+     *
+     * Encoding: curve_id encodes the type:
+     *   Row boundaries:  id = r (0..rows)
+     *   Col boundaries:  id = (rows+1) + c (0..cols)
+     *   This maps to loop selection directly.
+     */
+    ts_bezier_mesh *m = vp->bezier_mesh;
+    int tess = 16;
+
+    /* Use the pick shader with a temporary VBO */
+    glUseProgram(vp->pick_prog);
+    GLint mvp_loc = glGetUniformLocation(vp->pick_prog, "uMVP");
+    GLint col_loc = glGetUniformLocation(vp->pick_prog, "uPickColor");
+    glUniformMatrix4fv(mvp_loc, 1, GL_FALSE, vp_mat);
+
+    glLineWidth(7.0f);  /* thick for easy picking */
+    glDepthFunc(GL_LEQUAL);
+
+    GLuint tmp_vao, tmp_vbo;
+    glGenVertexArrays(1, &tmp_vao);
+    glGenBuffers(1, &tmp_vbo);
+    glBindVertexArray(tmp_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, tmp_vbo);
+
+    /* Helper: tessellate a curve and draw with pick color */
+    int curve_id = 0;
+
+    /* Row boundaries (u-direction curves at v = 0 for each row, + v=1 for last) */
+    for (int r = 0; r <= m->rows; r++) {
+        int pr = (r < m->rows) ? r : m->rows - 1;
+        double v = (r < m->rows) ? 0.0 : 1.0;
+
+        int nverts = m->cols * tess * 2;
+        float *data = (float *)malloc((size_t)nverts * 6 * sizeof(float));
+        float *p = data;
+
+        for (int pc = 0; pc < m->cols; pc++) {
+            ts_bezier_patch patch = ts_bezier_mesh_get_patch(m, pr, pc);
+            for (int s = 0; s < tess; s++) {
+                double u0 = (double)s / (double)tess;
+                double u1 = (double)(s + 1) / (double)tess;
+                ts_vec3 a = ts_bezier_patch_eval(&patch, u0, v);
+                ts_vec3 b_pt = ts_bezier_patch_eval(&patch, u1, v);
+                /* aNormal=0, aPos=position (pick shader layout) */
+                p[0]=0; p[1]=0; p[2]=0;
+                p[3]=(float)a.v[0]; p[4]=(float)a.v[1]; p[5]=(float)a.v[2];
+                p += 6;
+                p[0]=0; p[1]=0; p[2]=0;
+                p[3]=(float)b_pt.v[0]; p[4]=(float)b_pt.v[1]; p[5]=(float)b_pt.v[2];
+                p += 6;
+            }
+        }
+
+        glBufferData(GL_ARRAY_BUFFER,
+                     (GLsizeiptr)((size_t)nverts * 6 * sizeof(float)),
+                     data, GL_STREAM_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float),
+                              (void*)(3*sizeof(float)));
+        glEnableVertexAttribArray(1);
+
+        float rgb[3];
+        int id = curve_id + 1;
+        rgb[0] = (float)(id & 0xFF) / 255.0f;
+        rgb[1] = (float)((id >> 8) & 0xFF) / 255.0f;
+        rgb[2] = (float)((id >> 16) & 0xFF) / 255.0f;
+        glUniform3fv(col_loc, 1, rgb);
+
+        glDrawArrays(GL_LINES, 0, nverts);
+        free(data);
+        curve_id++;
+    }
+
+    /* Col boundaries (v-direction curves at u = 0 for each col, + u=1 for last) */
+    for (int c = 0; c <= m->cols; c++) {
+        int pc = (c < m->cols) ? c : m->cols - 1;
+        double u = (c < m->cols) ? 0.0 : 1.0;
+
+        int nverts = m->rows * tess * 2;
+        float *data = (float *)malloc((size_t)nverts * 6 * sizeof(float));
+        float *p = data;
+
+        for (int pr = 0; pr < m->rows; pr++) {
+            ts_bezier_patch patch = ts_bezier_mesh_get_patch(m, pr, pc);
+            for (int s = 0; s < tess; s++) {
+                double v0 = (double)s / (double)tess;
+                double v1 = (double)(s + 1) / (double)tess;
+                ts_vec3 a = ts_bezier_patch_eval(&patch, u, v0);
+                ts_vec3 b_pt = ts_bezier_patch_eval(&patch, u, v1);
+                p[0]=0; p[1]=0; p[2]=0;
+                p[3]=(float)a.v[0]; p[4]=(float)a.v[1]; p[5]=(float)a.v[2];
+                p += 6;
+                p[0]=0; p[1]=0; p[2]=0;
+                p[3]=(float)b_pt.v[0]; p[4]=(float)b_pt.v[1]; p[5]=(float)b_pt.v[2];
+                p += 6;
+            }
+        }
+
+        glBufferData(GL_ARRAY_BUFFER,
+                     (GLsizeiptr)((size_t)nverts * 6 * sizeof(float)),
+                     data, GL_STREAM_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float),
+                              (void*)(3*sizeof(float)));
+        glEnableVertexAttribArray(1);
+
+        float rgb[3];
+        int id = curve_id + 1;
+        rgb[0] = (float)(id & 0xFF) / 255.0f;
+        rgb[1] = (float)((id >> 8) & 0xFF) / 255.0f;
+        rgb[2] = (float)((id >> 16) & 0xFF) / 255.0f;
+        glUniform3fv(col_loc, 1, rgb);
+
+        glDrawArrays(GL_LINES, 0, nverts);
+        free(data);
+        curve_id++;
+    }
+
+    glDeleteBuffers(1, &tmp_vbo);
+    glDeleteVertexArrays(1, &tmp_vao);
+    glLineWidth(1.0f);
+    glDepthFunc(GL_LESS);
+
+    unsigned char pixel[4] = {0};
+    pick_read_pixel(fpx, fpy, pixel);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    int picked_id = (int)pixel[0] | ((int)pixel[1] << 8) | ((int)pixel[2] << 16);
+    picked_id--; /* 0 = background */
+
+    if (picked_id < 0 || picked_id >= curve_id) {
+        vp->selected_bez_curve = -1;
+        return -1;
+    }
+
+    vp->selected_bez_curve = picked_id;
+
+    /* Auto-select the corresponding loop for highlight */
+    int total_row_curves = m->rows + 1;
+    if (picked_id < total_row_curves) {
+        /* Row boundary */
+        vp->bezier_loop_type = 0;
+        vp->bezier_loop_index = picked_id;
+        dc_gl_bezier_wire_build_loop(&vp->bezier_loop_vao,
+                                      &vp->bezier_loop_vbo,
+                                      &vp->bezier_loop_vert_count,
+                                      vp->bezier_mesh, 0, picked_id, 16);
+    } else {
+        /* Col boundary */
+        int col_idx = picked_id - total_row_curves;
+        vp->bezier_loop_type = 1;
+        vp->bezier_loop_index = col_idx;
+        dc_gl_bezier_wire_build_loop(&vp->bezier_loop_vao,
+                                      &vp->bezier_loop_vbo,
+                                      &vp->bezier_loop_vert_count,
+                                      vp->bezier_mesh, 1, col_idx, 16);
+    }
+
+    return 0; /* not an STL object, return 0 to avoid -1 callback path */
+}
+
+/* Bezier CP pick: render each control point as a GL_POINT with unique color. */
+static int
+do_pick_bez_cp(DC_GlViewport *vp, int px, int py)
+{
+    if (!vp->gl_ready || !vp->bezier_mesh || !vp->pick_prog)
+        return -1;
+
+    int w = gtk_widget_get_width(GTK_WIDGET(vp->gl_area));
+    int h = gtk_widget_get_height(GTK_WIDGET(vp->gl_area));
+    int scale = gtk_widget_get_scale_factor(GTK_WIDGET(vp->gl_area));
+    int fw = w * scale, fh = h * scale;
+
+    gtk_gl_area_make_current(GTK_GL_AREA(vp->gl_area));
+    ensure_pick_fbo(vp, fw, fh);
+
+    float eye[3];
+    camera_eye(vp, eye);
+    float up[3] = {0, 1, 0};
+    float view[16], proj[16], vp_mat[16];
+    mat4_lookat(view, eye, vp->cam_center, up);
+    float aspect = (float)w / (float)h;
+    if (vp->ortho) {
+        float half = vp->cam_dist * 0.5f;
+        mat4_ortho(proj, -half*aspect, half*aspect, -half, half,
+                   0.1f, vp->cam_dist * 10.0f);
+    } else {
+        mat4_perspective(proj, 45.0f, aspect, 0.1f, vp->cam_dist * 10.0f);
+    }
+    mat4_mul(vp_mat, proj, view);
+
+    int fpx = px * scale;
+    int fpy = fh - (py * scale) - 1;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, vp->pick_fbo);
+    glViewport(0, 0, fw, fh);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    ts_bezier_mesh *m = vp->bezier_mesh;
+
+    /* Render each CP as a small quad (billboard) for easier picking.
+     * We draw 2 triangles (6 verts) per CP, forming a screen-space square. */
+    glUseProgram(vp->pick_prog);
+    GLint mvp_loc = glGetUniformLocation(vp->pick_prog, "uMVP");
+    GLint col_loc = glGetUniformLocation(vp->pick_prog, "uPickColor");
+    glUniformMatrix4fv(mvp_loc, 1, GL_FALSE, vp_mat);
+
+    /* Compute a world-space CP marker size based on camera distance */
+    float marker_size = vp->cam_dist * 0.015f;
+
+    /* Camera right and up vectors for billboarding */
+    float right[3], cam_up[3];
+    float theta_r = vp->cam_theta * (float)M_PI / 180.0f;
+    float phi_r = vp->cam_phi * (float)M_PI / 180.0f;
+    right[0] = -sinf(theta_r);
+    right[1] = 0;
+    right[2] = cosf(theta_r);
+    cam_up[0] = -cosf(theta_r) * sinf(phi_r);
+    cam_up[1] = cosf(phi_r);
+    cam_up[2] = -sinf(theta_r) * sinf(phi_r);
+
+    GLuint tmp_vao, tmp_vbo;
+    glGenVertexArrays(1, &tmp_vao);
+    glGenBuffers(1, &tmp_vbo);
+    glBindVertexArray(tmp_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, tmp_vbo);
+
+    int total_cps = m->cp_rows * m->cp_cols;
+    /* 6 verts per CP (2 triangles), 6 floats per vert */
+    float *data = (float *)malloc((size_t)total_cps * 6 * 6 * sizeof(float));
+    if (!data) {
+        glDeleteBuffers(1, &tmp_vbo);
+        glDeleteVertexArrays(1, &tmp_vao);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return -1;
+    }
+
+    float *p = data;
+    for (int cp_idx = 0; cp_idx < total_cps; cp_idx++) {
+        int cr = cp_idx / m->cp_cols;
+        int cc = cp_idx % m->cp_cols;
+        ts_vec3 cp = ts_bezier_mesh_get_cp(m, cr, cc);
+        float cx = (float)cp.v[0], cy = (float)cp.v[1], cz = (float)cp.v[2];
+
+        /* Billboard quad corners */
+        float dx_r = right[0] * marker_size;
+        float dy_r = right[1] * marker_size;
+        float dz_r = right[2] * marker_size;
+        float dx_u = cam_up[0] * marker_size;
+        float dy_u = cam_up[1] * marker_size;
+        float dz_u = cam_up[2] * marker_size;
+
+        /* 4 corners: BL, BR, TR, TL */
+        float bl[3] = { cx - dx_r - dx_u, cy - dy_r - dy_u, cz - dz_r - dz_u };
+        float br[3] = { cx + dx_r - dx_u, cy + dy_r - dy_u, cz + dz_r - dz_u };
+        float tr[3] = { cx + dx_r + dx_u, cy + dy_r + dy_u, cz + dz_r + dz_u };
+        float tl[3] = { cx - dx_r + dx_u, cy - dy_r + dy_u, cz - dz_r + dz_u };
+
+        /* Triangle 1: BL, BR, TR */
+        /* Triangle 2: BL, TR, TL */
+        /* Each vert: [0,0,0, x,y,z] (pick shader: aNormal=0, aPos=xyz) */
+#define EMIT_VERT(vv) do { \
+    *p++ = 0; *p++ = 0; *p++ = 0; \
+    *p++ = (vv)[0]; *p++ = (vv)[1]; *p++ = (vv)[2]; \
+} while(0)
+        EMIT_VERT(bl); EMIT_VERT(br); EMIT_VERT(tr);
+        EMIT_VERT(bl); EMIT_VERT(tr); EMIT_VERT(tl);
+#undef EMIT_VERT
+    }
+
+    int total_verts = total_cps * 6;
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)((size_t)total_verts * 6 * sizeof(float)),
+                 data, GL_STREAM_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float),
+                          (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    /* Draw each CP's quad with its unique pick color */
+    for (int cp_idx = 0; cp_idx < total_cps; cp_idx++) {
+        int id = cp_idx + 1;
+        float rgb[3];
+        rgb[0] = (float)(id & 0xFF) / 255.0f;
+        rgb[1] = (float)((id >> 8) & 0xFF) / 255.0f;
+        rgb[2] = (float)((id >> 16) & 0xFF) / 255.0f;
+        glUniform3fv(col_loc, 1, rgb);
+        glDrawArrays(GL_TRIANGLES, cp_idx * 6, 6);
+    }
+
+    free(data);
+    glDeleteBuffers(1, &tmp_vbo);
+    glDeleteVertexArrays(1, &tmp_vao);
+
+    unsigned char pixel[4] = {0};
+    pick_read_pixel(fpx, fpy, pixel);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    int picked_id = (int)pixel[0] | ((int)pixel[1] << 8) | ((int)pixel[2] << 16);
+    picked_id--;
+
+    if (picked_id < 0 || picked_id >= total_cps) {
+        vp->selected_bez_cp = -1;
+        return -1;
+    }
+
+    vp->selected_bez_cp = picked_id;
+    return 0;
+}
+
 /* Unified pick dispatch — calls appropriate mode-specific picker. */
 static int
 do_pick(DC_GlViewport *vp, int px, int py)
@@ -1532,6 +1935,10 @@ do_pick(DC_GlViewport *vp, int px, int py)
         return do_pick_face(vp, px, py);
     case DC_SEL_EDGE:
         return do_pick_edge(vp, px, py);
+    case DC_SEL_BEZ_CURVE:
+        return do_pick_bez_curve(vp, px, py);
+    case DC_SEL_BEZ_CP:
+        return do_pick_bez_cp(vp, px, py);
     case DC_SEL_OBJECT:
     default:
         return do_pick_object(vp, px, py);
@@ -1600,6 +2007,15 @@ on_click_pressed(GtkGestureClick *gesture, int n_press,
         }
         return;
     }
+
+    /* Bezier selection modes don't require STL objects */
+    if (vp->sel_mode == DC_SEL_BEZ_CURVE || vp->sel_mode == DC_SEL_BEZ_CP) {
+        if (!vp->bezier_mesh) return;
+        do_pick(vp, (int)x, (int)y);
+        gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+        return;
+    }
+
     if (vp->obj_count == 0) return;
 
     int old_sel = vp->selected_obj;
@@ -1649,6 +2065,8 @@ dc_gl_viewport_new(void)
     vp->selected_face = -1;
     vp->selected_edge = -1;
     vp->bezier_loop_type = -1;  /* no loop selected */
+    vp->selected_bez_curve = -1;
+    vp->selected_bez_cp = -1;
     dc_gl_bezier_wire_init(&vp->bezier_wire);
 
     /* Create GtkGLArea */
@@ -2372,10 +2790,12 @@ void
 dc_gl_viewport_set_select_mode(DC_GlViewport *vp, DC_SelectMode mode)
 {
     if (!vp) return;
-    if (mode < DC_SEL_OBJECT || mode > DC_SEL_EDGE) return;
+    if (mode < DC_SEL_OBJECT || mode > DC_SEL_BEZ_CP) return;
     vp->sel_mode = mode;
     vp->selected_face = -1;
     vp->selected_edge = -1;
+    vp->selected_bez_curve = -1;
+    vp->selected_bez_cp = -1;
 
     /* Build topology + GL resources for all objects if entering face/edge mode */
     if (mode != DC_SEL_OBJECT) {
@@ -2392,7 +2812,7 @@ dc_gl_viewport_set_select_mode(DC_GlViewport *vp, DC_SelectMode mode)
 
     /* Update mode label */
     if (vp->mode_label) {
-        static const char *labels[] = {"Object", "Face", "Edge"};
+        static const char *labels[] = {"Object", "Face", "Edge", "BezCurve", "BezCP"};
         gtk_label_set_text(GTK_LABEL(vp->mode_label), labels[mode]);
     }
 
@@ -2403,7 +2823,10 @@ void
 dc_gl_viewport_cycle_select_mode(DC_GlViewport *vp)
 {
     if (!vp) return;
-    DC_SelectMode next = (DC_SelectMode)((vp->sel_mode + 1) % 3);
+    /* Cycle: Object → Face → Edge → BezCurve → BezCP → Object
+     * But only include bezier modes if a bezier mesh is loaded */
+    int max_mode = vp->bezier_mesh ? 5 : 3;
+    DC_SelectMode next = (DC_SelectMode)((vp->sel_mode + 1) % max_mode);
     dc_gl_viewport_set_select_mode(vp, next);
 }
 
@@ -2781,6 +3204,31 @@ dc_gl_viewport_update_bezier_cp(DC_GlViewport *vp,
                            ts_vec3_make((double)x, (double)y, (double)z));
     vp->bezier_wire_dirty = 1;
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+int
+dc_gl_viewport_get_selected_bez_curve(DC_GlViewport *vp)
+{
+    return vp ? vp->selected_bez_curve : -1;
+}
+
+int
+dc_gl_viewport_get_selected_bez_cp(DC_GlViewport *vp)
+{
+    return vp ? vp->selected_bez_cp : -1;
+}
+
+int
+dc_gl_viewport_get_bez_cp_pos(DC_GlViewport *vp,
+                                float *x, float *y, float *z)
+{
+    if (!vp || !vp->bezier_mesh || vp->selected_bez_cp < 0) return -1;
+    int cr = vp->selected_bez_cp / vp->bezier_mesh->cp_cols;
+    int cc = vp->selected_bez_cp % vp->bezier_mesh->cp_cols;
+    if (cr >= vp->bezier_mesh->cp_rows) return -1;
+    ts_vec3 cp = ts_bezier_mesh_get_cp(vp->bezier_mesh, cr, cc);
+    *x = (float)cp.v[0]; *y = (float)cp.v[1]; *z = (float)cp.v[2];
+    return 0;
 }
 
 void
