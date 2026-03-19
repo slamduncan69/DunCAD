@@ -232,6 +232,8 @@ static const struct target {
     { "sofer",         "narthex/sofer/sofer.c",                    "narthex/sofer/sofer",                 1, NULL },
     { "trinity_site",  "sacred/trinity_site/trinity_site.c",       "sacred/trinity_site/trinity_site",    0, "-lm -I/opt/cuda/include -lOpenCL" },
     { "ts_interp",     "sacred/trinity_site/ts_interp.c",          "sacred/trinity_site/ts_interp",       0, "-lm" },
+    { "ts_bezier_demo","sacred/trinity_site/ts_bezier_demo.c",    "sacred/trinity_site/ts_bezier_demo",  0, "-lm" },
+    { "ts_bezier_quick","sacred/trinity_site/ts_bezier_quick.c",  "sacred/trinity_site/ts_bezier_quick", 0, "-lm" },
 };
 #define N_TARGETS (int)(sizeof(targets) / sizeof(targets[0]))
 

@@ -102,6 +102,26 @@ typedef struct {
     uint8_t r, g, b;        /* color */
 } DC_VoxOp;
 
+/* Bezier mesh operations */
+typedef enum {
+    DC_BMESH_OP_SPHERE,        /* sphere(radius) */
+    DC_BMESH_OP_TORUS,         /* torus(R, r) */
+    DC_BMESH_OP_GRID,          /* grid(rows, cols) */
+    DC_BMESH_OP_SET_CP,        /* cp[r][c] = [x, y, z] */
+    DC_BMESH_OP_RESOLUTION,    /* resolution = N */
+    DC_BMESH_OP_VIEW,          /* view = wireframe|voxel|both|none */
+} DC_BMeshOpType;
+
+typedef struct {
+    DC_BMeshOpType type;
+    double x, y, z;       /* CP position or radius */
+    double radius;         /* sphere radius or torus major */
+    double radius2;        /* torus minor radius */
+    int    rows, cols;     /* grid dimensions or CP indices */
+    int    resolution;     /* voxel resolution */
+    int    view_mode;      /* 0=none,1=wireframe,2=voxel,3=both */
+} DC_BMeshOp;
+
 /* -------------------------------------------------------------------------
  * DC_CubeiformEda — parsed EDA operations from Cubeiform source
  * ---------------------------------------------------------------------- */
@@ -176,5 +196,9 @@ size_t dc_cubeiform_eda_vox_op_count(const DC_CubeiformEda *eda);
 const DC_SchOp *dc_cubeiform_eda_get_sch_op(const DC_CubeiformEda *eda, size_t i);
 const DC_PcbOp *dc_cubeiform_eda_get_pcb_op(const DC_CubeiformEda *eda, size_t i);
 const DC_VoxOp *dc_cubeiform_eda_get_vox_op(const DC_CubeiformEda *eda, size_t i);
+
+/* Bezier mesh operations */
+size_t dc_cubeiform_eda_bmesh_op_count(const DC_CubeiformEda *eda);
+const DC_BMeshOp *dc_cubeiform_eda_get_bmesh_op(const DC_CubeiformEda *eda, size_t i);
 
 #endif /* DC_CUBEIFORM_EDA_H */

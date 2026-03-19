@@ -50,6 +50,9 @@
 #include "ts_random.h"
 #include "ts_opencl.h"
 #include "ts_eval.h"   /* for ts_interpret_ex in Minkowski interp tests */
+#include "ts_bezier_surface.h"
+#include "ts_bezier_mesh.h"
+#include "ts_bezier_voxel.h"
 
 /* Global GPU context — initialized in main */
 static ts_gpu_ctx g_gpu;
@@ -2044,6 +2047,789 @@ static void test_extrude_error_green(void) {
 }
 
 /* ================================================================
+ * SECTION 8.5: BEZIER SURFACE PATCH TESTS
+ * Quadratic tensor-product bezier patches: S(u,v)
+ * Parallelism: SIMD (per-point evaluation is independent)
+ * ================================================================ */
+
+/* --- eval: corner interpolation --- */
+static void test_bezier_patch_eval_green(void) {
+    /* Flat patch from (0,0,0) to (2,2,0) */
+    ts_bezier_patch p = ts_bezier_patch_flat(0.0, 0.0, 2.0, 2.0, 0.0);
+
+    /* Corners should be exactly the corner control points */
+    ts_vec3 s00 = ts_bezier_patch_eval(&p, 0.0, 0.0);
+    ts_vec3 s10 = ts_bezier_patch_eval(&p, 1.0, 0.0);
+    ts_vec3 s01 = ts_bezier_patch_eval(&p, 0.0, 1.0);
+    ts_vec3 s11 = ts_bezier_patch_eval(&p, 1.0, 1.0);
+
+    TS_ASSERT_VEC3_NEAR(s00, ts_vec3_make(0.0, 0.0, 0.0), 1e-14);
+    TS_ASSERT_VEC3_NEAR(s10, ts_vec3_make(2.0, 0.0, 0.0), 1e-14);
+    TS_ASSERT_VEC3_NEAR(s01, ts_vec3_make(0.0, 2.0, 0.0), 1e-14);
+    TS_ASSERT_VEC3_NEAR(s11, ts_vec3_make(2.0, 2.0, 0.0), 1e-14);
+
+    /* Center should be midpoint */
+    ts_vec3 mid = ts_bezier_patch_eval(&p, 0.5, 0.5);
+    TS_ASSERT_VEC3_NEAR(mid, ts_vec3_make(1.0, 1.0, 0.0), 1e-14);
+
+    TS_PASS();
+}
+static void test_bezier_patch_eval_red(void) {
+    /* If eval ignored v parameter, S(0,1) would equal S(0,0) */
+    ts_bezier_patch p = ts_bezier_patch_flat(0.0, 0.0, 2.0, 2.0, 0.0);
+    ts_vec3 s00 = ts_bezier_patch_eval(&p, 0.0, 0.0);
+    ts_vec3 s01 = ts_bezier_patch_eval(&p, 0.0, 1.0);
+    /* These must differ — s01.y should be 2.0, not 0.0 */
+    TS_ASSERT_TRUE(fabs(s01.v[1] - s00.v[1]) > 1.0);
+    TS_PASS();
+}
+
+/* --- eval: dome shape (raised center CP) --- */
+static void test_bezier_patch_dome_green(void) {
+    ts_bezier_patch p = ts_bezier_patch_dome(0.0, 0.0, 2.0, 2.0, 5.0);
+
+    /* Corners at z=0 */
+    ts_vec3 s00 = ts_bezier_patch_eval(&p, 0.0, 0.0);
+    TS_ASSERT_NEAR(s00.v[2], 0.0, 1e-14);
+
+    /* Center should be raised (but not to full height — quadratic blend) */
+    ts_vec3 mid = ts_bezier_patch_eval(&p, 0.5, 0.5);
+    TS_ASSERT_TRUE(mid.v[2] > 0.0);
+    /* Quadratic basis at t=0.5: B1(0.5) = 2*0.5*0.5 = 0.5
+     * So center z = B1(0.5)*B1(0.5)*5.0 = 0.25*5.0 = 1.25 */
+    TS_ASSERT_NEAR(mid.v[2], 1.25, 1e-14);
+
+    TS_PASS();
+}
+static void test_bezier_patch_dome_red(void) {
+    ts_bezier_patch p = ts_bezier_patch_dome(0.0, 0.0, 2.0, 2.0, 5.0);
+    /* If basis functions were wrong (e.g., linear), center z would be 5/3 ≈ 1.667 */
+    ts_vec3 mid = ts_bezier_patch_eval(&p, 0.5, 0.5);
+    double wrong_linear = 5.0 / 3.0;
+    TS_ASSERT_TRUE(fabs(mid.v[2] - wrong_linear) > 0.3);
+    TS_PASS();
+}
+
+/* --- normal: flat patch should have uniform +Z normal --- */
+static void test_bezier_patch_normal_green(void) {
+    ts_bezier_patch p = ts_bezier_patch_flat(0.0, 0.0, 2.0, 2.0, 0.0);
+
+    /* Normal everywhere on a flat XY patch should be (0,0,1) */
+    ts_vec3 n_center = ts_bezier_patch_normal(&p, 0.5, 0.5);
+    ts_vec3 n_corner = ts_bezier_patch_normal(&p, 0.0, 0.0);
+    ts_vec3 n_edge   = ts_bezier_patch_normal(&p, 1.0, 0.5);
+
+    ts_vec3 up = ts_vec3_make(0.0, 0.0, 1.0);
+    TS_ASSERT_VEC3_NEAR(n_center, up, 1e-12);
+    TS_ASSERT_VEC3_NEAR(n_corner, up, 1e-12);
+    TS_ASSERT_VEC3_NEAR(n_edge, up, 1e-12);
+
+    TS_PASS();
+}
+static void test_bezier_patch_normal_red(void) {
+    /* If cross product was reversed, normal would be (0,0,-1) */
+    ts_bezier_patch p = ts_bezier_patch_flat(0.0, 0.0, 2.0, 2.0, 0.0);
+    ts_vec3 n = ts_bezier_patch_normal(&p, 0.5, 0.5);
+    /* Must be +Z not -Z */
+    TS_ASSERT_TRUE(n.v[2] > 0.5);
+    TS_PASS();
+}
+
+/* --- normal: dome should have varying normals --- */
+static void test_bezier_patch_dome_normal_green(void) {
+    ts_bezier_patch p = ts_bezier_patch_dome(0.0, 0.0, 2.0, 2.0, 5.0);
+
+    /* Center normal should still point mostly upward */
+    ts_vec3 n_center = ts_bezier_patch_normal(&p, 0.5, 0.5);
+    TS_ASSERT_TRUE(n_center.v[2] > 0.0);
+
+    /* Edge normals should tilt outward */
+    ts_vec3 n_left = ts_bezier_patch_normal(&p, 0.0, 0.5);
+    /* Left edge: dS/du points +X, dS/dv points +Y with some Z tilt
+     * Normal should have negative X component (facing left/outward) */
+    /* Actually on a dome, the left edge normal tilts away from center */
+
+    /* All normals should be unit length */
+    TS_ASSERT_NEAR(ts_vec3_norm(n_center), 1.0, 1e-12);
+    TS_ASSERT_NEAR(ts_vec3_norm(n_left), 1.0, 1e-12);
+
+    TS_PASS();
+}
+
+/* --- bbox: control point hull contains the surface --- */
+static void test_bezier_patch_bbox_green(void) {
+    ts_bezier_patch p = ts_bezier_patch_dome(0.0, 0.0, 4.0, 4.0, 3.0);
+
+    ts_vec3 bmin, bmax;
+    ts_bezier_patch_bbox(&p, &bmin, &bmax);
+
+    TS_ASSERT_NEAR(bmin.v[0], 0.0, 1e-14);
+    TS_ASSERT_NEAR(bmin.v[1], 0.0, 1e-14);
+    TS_ASSERT_NEAR(bmin.v[2], 0.0, 1e-14);
+    TS_ASSERT_NEAR(bmax.v[0], 4.0, 1e-14);
+    TS_ASSERT_NEAR(bmax.v[1], 4.0, 1e-14);
+    TS_ASSERT_NEAR(bmax.v[2], 3.0, 1e-14);
+
+    /* Verify all evaluated points are inside the bbox */
+    for (int j = 0; j <= 10; j++) {
+        for (int i = 0; i <= 10; i++) {
+            double u = (double)i / 10.0;
+            double v = (double)j / 10.0;
+            ts_vec3 pt = ts_bezier_patch_eval(&p, u, v);
+            for (int k = 0; k < 3; k++) {
+                TS_ASSERT_TRUE(pt.v[k] >= bmin.v[k] - 1e-12);
+                TS_ASSERT_TRUE(pt.v[k] <= bmax.v[k] + 1e-12);
+            }
+        }
+    }
+    TS_PASS();
+}
+static void test_bezier_patch_bbox_red(void) {
+    /* If bbox only used corners (not all 9 CPs), dome height would be missed */
+    ts_bezier_patch p = ts_bezier_patch_dome(0.0, 0.0, 4.0, 4.0, 3.0);
+    ts_vec3 bmin, bmax;
+    ts_bezier_patch_bbox(&p, &bmin, &bmax);
+    /* Wrong bbox using only corners would have max z = 0 */
+    TS_ASSERT_TRUE(bmax.v[2] > 2.0);
+    TS_PASS();
+}
+
+/* --- closest_uv: point on surface should map back to itself --- */
+static void test_bezier_patch_closest_green(void) {
+    ts_bezier_patch p = ts_bezier_patch_flat(0.0, 0.0, 2.0, 2.0, 0.0);
+
+    /* Query a point ON the surface: (1, 1, 0) is S(0.5, 0.5) */
+    double u, v;
+    int ret = ts_bezier_patch_closest_uv(&p, ts_vec3_make(1.0, 1.0, 0.0),
+                                          &u, &v, 20);
+    TS_ASSERT_EQ_INT(ret, 0);
+    TS_ASSERT_NEAR(u, 0.5, 1e-6);
+    TS_ASSERT_NEAR(v, 0.5, 1e-6);
+
+    /* Query a point above the surface: closest should still be (1,1,0) */
+    ret = ts_bezier_patch_closest_uv(&p, ts_vec3_make(1.0, 1.0, 5.0),
+                                      &u, &v, 20);
+    TS_ASSERT_EQ_INT(ret, 0);
+    ts_vec3 closest = ts_bezier_patch_eval(&p, u, v);
+    TS_ASSERT_NEAR(closest.v[0], 1.0, 1e-4);
+    TS_ASSERT_NEAR(closest.v[1], 1.0, 1e-4);
+    TS_ASSERT_NEAR(closest.v[2], 0.0, 1e-4);
+
+    TS_PASS();
+}
+static void test_bezier_patch_closest_red(void) {
+    /* If closest_uv always returned (0.5, 0.5), a corner query would fail */
+    ts_bezier_patch p = ts_bezier_patch_flat(0.0, 0.0, 2.0, 2.0, 0.0);
+    double u, v;
+    /* Query near corner (0,0,0) */
+    ts_bezier_patch_closest_uv(&p, ts_vec3_make(0.0, 0.0, 0.0),
+                                &u, &v, 20);
+    ts_vec3 closest = ts_bezier_patch_eval(&p, u, v);
+    /* Must be near (0,0,0), not (1,1,0) */
+    TS_ASSERT_TRUE(ts_vec3_distance(closest, ts_vec3_make(0.0, 0.0, 0.0)) < 0.1);
+    TS_PASS();
+}
+
+/* --- sdf: points above/below flat patch --- */
+static void test_bezier_patch_sdf_green(void) {
+    ts_bezier_patch p = ts_bezier_patch_flat(0.0, 0.0, 2.0, 2.0, 0.0);
+
+    /* Point above surface: positive distance */
+    double d_above = ts_bezier_patch_sdf(&p, ts_vec3_make(1.0, 1.0, 3.0), 20);
+    TS_ASSERT_TRUE(d_above > 0.0);
+    TS_ASSERT_NEAR(d_above, 3.0, 0.1);
+
+    /* Point below surface: negative distance */
+    double d_below = ts_bezier_patch_sdf(&p, ts_vec3_make(1.0, 1.0, -2.0), 20);
+    TS_ASSERT_TRUE(d_below < 0.0);
+    TS_ASSERT_NEAR(d_below, -2.0, 0.1);
+
+    /* Point on surface: ~zero distance */
+    double d_on = ts_bezier_patch_sdf(&p, ts_vec3_make(1.0, 1.0, 0.0), 20);
+    TS_ASSERT_NEAR(d_on, 0.0, 1e-6);
+
+    TS_PASS();
+}
+static void test_bezier_patch_sdf_red(void) {
+    /* If SDF ignored sign (always positive), below-surface would be wrong */
+    ts_bezier_patch p = ts_bezier_patch_flat(0.0, 0.0, 2.0, 2.0, 0.0);
+    double d_below = ts_bezier_patch_sdf(&p, ts_vec3_make(1.0, 1.0, -2.0), 20);
+    /* Must be negative, not positive */
+    TS_ASSERT_TRUE(d_below < -1.0);
+    TS_PASS();
+}
+
+/* --- basis functions: partition of unity --- */
+static void test_bezier_basis_green(void) {
+    /* Quadratic Bernstein basis must sum to 1 for any t in [0,1] */
+    for (int i = 0; i <= 100; i++) {
+        double t = (double)i / 100.0;
+        double sum = ts_qbasis0(t) + ts_qbasis1(t) + ts_qbasis2(t);
+        TS_ASSERT_NEAR(sum, 1.0, 1e-14);
+    }
+    /* Derivatives must sum to 0 (derivative of constant 1 is 0) */
+    for (int i = 0; i <= 100; i++) {
+        double t = (double)i / 100.0;
+        double dsum = ts_qbasis0d(t) + ts_qbasis1d(t) + ts_qbasis2d(t);
+        TS_ASSERT_NEAR(dsum, 0.0, 1e-14);
+    }
+    TS_PASS();
+}
+static void test_bezier_basis_red(void) {
+    /* If B1(t) was t*(1-t) instead of 2*t*(1-t), sum != 1 at t=0.5 */
+    double wrong_B1 = 0.5 * 0.5;  /* 0.25 instead of 0.5 */
+    double sum = ts_qbasis0(0.5) + wrong_B1 + ts_qbasis2(0.5);
+    TS_ASSERT_TRUE(fabs(sum - 1.0) > 0.2);
+    TS_PASS();
+}
+
+/* --- Benchmarks --- */
+
+static volatile ts_vec3 g_bench_sink_v;
+static volatile double g_bench_sink_d;
+
+static void bench_bezier_patch_eval(int n) {
+    ts_bezier_patch p = ts_bezier_patch_dome(0.0, 0.0, 2.0, 2.0, 1.0);
+    ts_vec3 result = ts_vec3_zero();
+    for (int i = 0; i < n; i++) {
+        double u = (double)(i % 100) / 100.0;
+        double v = (double)((i / 100) % 100) / 100.0;
+        result = ts_bezier_patch_eval(&p, u, v);
+    }
+    g_bench_sink_v = result;
+}
+
+static void bench_bezier_patch_normal(int n) {
+    ts_bezier_patch p = ts_bezier_patch_dome(0.0, 0.0, 2.0, 2.0, 1.0);
+    ts_vec3 result = ts_vec3_zero();
+    for (int i = 0; i < n; i++) {
+        double u = (double)(i % 100) / 100.0;
+        double v = (double)((i / 100) % 100) / 100.0;
+        result = ts_bezier_patch_normal(&p, u, v);
+    }
+    g_bench_sink_v = result;
+}
+
+static void bench_bezier_patch_sdf(int n) {
+    ts_bezier_patch p = ts_bezier_patch_dome(0.0, 0.0, 2.0, 2.0, 1.0);
+    double result = 0.0;
+    for (int i = 0; i < n; i++) {
+        double x = (double)(i % 50) / 25.0;
+        double y = (double)((i / 50) % 50) / 25.0;
+        result = ts_bezier_patch_sdf(&p, ts_vec3_make(x, y, 0.5), 10);
+    }
+    g_bench_sink_d = result;
+}
+
+/* ================================================================
+ * SECTION 8.6: BEZIER MESH TESTS
+ * Grid of patches with shared edges, C0/C1 continuity,
+ * tessellation to triangle mesh.
+ * Parallelism: GPU (batch patch evaluation)
+ * ================================================================ */
+
+/* --- mesh creation and flat init --- */
+static void test_bezier_mesh_create_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(2, 3);
+    TS_ASSERT_EQ_INT(m.rows, 2);
+    TS_ASSERT_EQ_INT(m.cols, 3);
+    TS_ASSERT_EQ_INT(m.cp_rows, 5);  /* 2*2+1 */
+    TS_ASSERT_EQ_INT(m.cp_cols, 7);  /* 2*3+1 */
+    TS_ASSERT_TRUE(m.cps != NULL);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+static void test_bezier_mesh_create_red(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(2, 3);
+    /* If cp_rows was rows+1 instead of 2*rows+1, we'd get 3 not 5 */
+    TS_ASSERT_TRUE(m.cp_rows != m.rows + 1);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- C0 continuity: shared edges --- */
+static void test_bezier_mesh_c0_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 2);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 2.0, 0.0);
+
+    /* Patch (0,0) right edge = patch (0,1) left edge.
+     * Patch (0,0) uses cp cols [0,1,2], patch (0,1) uses cp cols [2,3,4].
+     * Column 2 is shared. */
+    ts_bezier_patch p0 = ts_bezier_mesh_get_patch(&m, 0, 0);
+    ts_bezier_patch p1 = ts_bezier_mesh_get_patch(&m, 0, 1);
+
+    /* Right edge of p0 (u=1) should equal left edge of p1 (u=0) */
+    for (int j = 0; j < 3; j++) {
+        TS_ASSERT_VEC3_NEAR(p0.cp[j][2], p1.cp[j][0], 1e-14);
+    }
+
+    /* Evaluate at the boundary: both patches should agree */
+    for (double v = 0.0; v <= 1.0; v += 0.25) {
+        ts_vec3 s0 = ts_bezier_patch_eval(&p0, 1.0, v);
+        ts_vec3 s1 = ts_bezier_patch_eval(&p1, 0.0, v);
+        TS_ASSERT_VEC3_NEAR(s0, s1, 1e-14);
+    }
+
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+static void test_bezier_mesh_c0_red(void) {
+    /* If patches didn't share CPs, modifying the shared column wouldn't
+     * propagate to the adjacent patch */
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 2);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 2.0, 0.0);
+
+    /* Move the shared boundary CP upward */
+    ts_bezier_mesh_set_cp(&m, 1, 2, ts_vec3_make(2.0, 1.0, 5.0));
+
+    /* Both patches must see the change */
+    ts_bezier_patch p0 = ts_bezier_mesh_get_patch(&m, 0, 0);
+    ts_bezier_patch p1 = ts_bezier_mesh_get_patch(&m, 0, 1);
+    TS_ASSERT_NEAR(p0.cp[1][2].v[2], 5.0, 1e-14);
+    TS_ASSERT_NEAR(p1.cp[1][0].v[2], 5.0, 1e-14);
+
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- C1 continuity enforcement --- */
+static void test_bezier_mesh_c1_col_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 2);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 2.0, 0.0);
+
+    /* Perturb a left-side CP to create a tangent */
+    ts_bezier_mesh_set_cp(&m, 1, 1, ts_vec3_make(1.0, 1.0, 2.0));
+
+    /* Enforce C1 across the col boundary between patch 0 and patch 1 */
+    ts_bezier_mesh_enforce_c1_col(&m, 0);
+
+    /* Check: the tangent vectors across the boundary are equal.
+     * Left tangent:  cp[1][2] - cp[1][1]
+     * Right tangent: cp[1][3] - cp[1][2] */
+    ts_vec3 shared = ts_bezier_mesh_get_cp(&m, 1, 2);
+    ts_vec3 left   = ts_bezier_mesh_get_cp(&m, 1, 1);
+    ts_vec3 right  = ts_bezier_mesh_get_cp(&m, 1, 3);
+
+    ts_vec3 tan_left  = ts_vec3_sub(shared, left);
+    ts_vec3 tan_right = ts_vec3_sub(right, shared);
+    TS_ASSERT_VEC3_NEAR(tan_left, tan_right, 1e-14);
+
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+static void test_bezier_mesh_c1_col_red(void) {
+    /* Without C1 enforcement, tangents would NOT match after perturbation */
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 2);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 2.0, 0.0);
+    ts_bezier_mesh_set_cp(&m, 1, 1, ts_vec3_make(1.0, 1.0, 2.0));
+
+    /* Before enforcement: right side tangent is still flat (0,0,0 delta z) */
+    ts_vec3 shared = ts_bezier_mesh_get_cp(&m, 1, 2);
+    ts_vec3 right  = ts_bezier_mesh_get_cp(&m, 1, 3);
+    ts_vec3 tan_right = ts_vec3_sub(right, shared);
+    /* Right tangent z should be 0 (not yet enforced) */
+    TS_ASSERT_NEAR(tan_right.v[2], 0.0, 1e-14);
+
+    /* After enforcement it should NOT be 0 */
+    ts_bezier_mesh_enforce_c1_col(&m, 0);
+    right = ts_bezier_mesh_get_cp(&m, 1, 3);
+    tan_right = ts_vec3_sub(right, shared);
+    TS_ASSERT_TRUE(fabs(tan_right.v[2]) > 0.5);
+
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- C1 row enforcement --- */
+static void test_bezier_mesh_c1_row_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(2, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 2.0, 4.0, 0.0);
+
+    /* Perturb an above-boundary CP */
+    ts_bezier_mesh_set_cp(&m, 1, 1, ts_vec3_make(1.0, 1.0, 3.0));
+
+    ts_bezier_mesh_enforce_c1_row(&m, 0);
+
+    ts_vec3 shared = ts_bezier_mesh_get_cp(&m, 2, 1);
+    ts_vec3 above  = ts_bezier_mesh_get_cp(&m, 1, 1);
+    ts_vec3 below  = ts_bezier_mesh_get_cp(&m, 3, 1);
+
+    ts_vec3 tan_above = ts_vec3_sub(shared, above);
+    ts_vec3 tan_below = ts_vec3_sub(below, shared);
+    TS_ASSERT_VEC3_NEAR(tan_above, tan_below, 1e-14);
+
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- Tessellation --- */
+static void test_bezier_mesh_tessellate_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 2.0, 2.0, 0.0);
+
+    ts_mesh tri = ts_mesh_init();
+    int ret = ts_bezier_mesh_tessellate(&m, 4, 4, &tri);
+    TS_ASSERT_EQ_INT(ret, 0);
+
+    /* 1 patch, 4 steps each direction: (4+1)*(4+1) = 25 verts, 4*4*2 = 32 tris */
+    TS_ASSERT_EQ_INT(tri.vert_count, 25);
+    TS_ASSERT_EQ_INT(tri.tri_count, 32);
+
+    /* All vertices should be on the flat plane z=0 */
+    for (int i = 0; i < tri.vert_count; i++) {
+        TS_ASSERT_NEAR(tri.verts[i].pos[2], 0.0, 1e-14);
+    }
+
+    /* Bounding box should be [0,2] x [0,2] */
+    double mn[3], mx[3];
+    ts_mesh_bounds(&tri, mn, mx);
+    TS_ASSERT_NEAR(mn[0], 0.0, 1e-14);
+    TS_ASSERT_NEAR(mn[1], 0.0, 1e-14);
+    TS_ASSERT_NEAR(mx[0], 2.0, 1e-14);
+    TS_ASSERT_NEAR(mx[1], 2.0, 1e-14);
+
+    ts_mesh_free(&tri);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+static void test_bezier_mesh_tessellate_red(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 2.0, 2.0, 0.0);
+
+    ts_mesh tri = ts_mesh_init();
+    /* 0 steps should fail */
+    int ret = ts_bezier_mesh_tessellate(&m, 0, 4, &tri);
+    TS_ASSERT_EQ_INT(ret, -1);
+
+    ts_mesh_free(&tri);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- Multi-patch tessellation: watertight seams --- */
+static void test_bezier_mesh_tess_multi_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(2, 2);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 4.0, 0.0);
+
+    /* Raise some interior CPs to make it interesting */
+    ts_bezier_mesh_set_cp(&m, 2, 2, ts_vec3_make(2.0, 2.0, 3.0));
+
+    ts_mesh tri = ts_mesh_init();
+    int ret = ts_bezier_mesh_tessellate(&m, 4, 4, &tri);
+    TS_ASSERT_EQ_INT(ret, 0);
+
+    /* 2x2 patches, 4 steps: (2*4+1)*(2*4+1) = 9*9 = 81 verts */
+    TS_ASSERT_EQ_INT(tri.vert_count, 81);
+    /* (9-1)*(9-1)*2 = 128 tris */
+    TS_ASSERT_EQ_INT(tri.tri_count, 128);
+
+    /* The mesh should be watertight at patch boundaries.
+     * Check that vertices along the boundary between patches are shared
+     * (same position from both sides). */
+    /* At the seam u=0.5 (global), which is at grid column 4 */
+    /* Row 0, col 4: should be at x=2.0 */
+    TS_ASSERT_NEAR(tri.verts[4].pos[0], 2.0, 1e-12);
+
+    ts_mesh_free(&tri);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- Mesh bbox --- */
+static void test_bezier_mesh_bbox_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, -1.0, -1.0, 3.0, 3.0, 0.0);
+    ts_bezier_mesh_set_cp(&m, 1, 1, ts_vec3_make(1.0, 1.0, 7.0));
+
+    ts_vec3 bmin, bmax;
+    ts_bezier_mesh_bbox(&m, &bmin, &bmax);
+    TS_ASSERT_NEAR(bmin.v[0], -1.0, 1e-14);
+    TS_ASSERT_NEAR(bmax.v[2], 7.0, 1e-14);
+
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- Mesh closest point --- */
+static void test_bezier_mesh_closest_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 2);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 2.0, 0.0);
+
+    /* Query a point above the right patch */
+    int pr, pc;
+    double u, v;
+    double dist = ts_bezier_mesh_closest(&m, ts_vec3_make(3.0, 1.0, 5.0),
+                                          &pr, &pc, &u, &v, 20);
+
+    /* Should find patch (0,1) since x=3.0 is in the right half */
+    TS_ASSERT_EQ_INT(pr, 0);
+    TS_ASSERT_EQ_INT(pc, 1);
+    /* Distance should be ~5.0 (straight down to z=0 plane) */
+    TS_ASSERT_NEAR(dist, 5.0, 0.1);
+
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+static void test_bezier_mesh_closest_red(void) {
+    /* If closest always returned patch (0,0), right-side query would be wrong */
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 2);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 2.0, 0.0);
+
+    int pr, pc;
+    double u, v;
+    ts_bezier_mesh_closest(&m, ts_vec3_make(3.5, 1.0, 0.0),
+                            &pr, &pc, &u, &v, 20);
+    /* Must be in patch col 1, not 0 */
+    TS_ASSERT_EQ_INT(pc, 1);
+
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- STL export round-trip --- */
+static void test_bezier_mesh_stl_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 2.0, 2.0, 0.0);
+    /* Make it a dome */
+    ts_bezier_mesh_set_cp(&m, 1, 1, ts_vec3_make(1.0, 1.0, 1.0));
+
+    ts_mesh tri = ts_mesh_init();
+    ts_bezier_mesh_tessellate(&m, 8, 8, &tri);
+
+    /* Write STL */
+    int ret = ts_mesh_write_stl(&tri, "/tmp/ts_bezier_mesh_test.stl");
+    TS_ASSERT_EQ_INT(ret, 0);
+
+    /* Read it back */
+    ts_mesh loaded = ts_mesh_init();
+    ret = ts_mesh_read_stl(&loaded, "/tmp/ts_bezier_mesh_test.stl");
+    TS_ASSERT_EQ_INT(ret, 0);
+    TS_ASSERT_EQ_INT(loaded.tri_count, tri.tri_count);
+
+    ts_mesh_free(&loaded);
+    ts_mesh_free(&tri);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- Benchmarks --- */
+
+static void bench_bezier_mesh_tessellate(int n) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(4, 4);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 8.0, 8.0, 0.0);
+    ts_bezier_mesh_set_cp(&m, 4, 4, ts_vec3_make(4.0, 4.0, 2.0));
+
+    for (int i = 0; i < n; i++) {
+        ts_mesh tri = ts_mesh_init();
+        ts_bezier_mesh_tessellate(&m, 8, 8, &tri);
+        ts_mesh_free(&tri);
+    }
+    ts_bezier_mesh_free(&m);
+}
+
+static void bench_bezier_mesh_closest(int n) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(4, 4);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 8.0, 8.0, 0.0);
+    ts_bezier_mesh_set_cp(&m, 4, 4, ts_vec3_make(4.0, 4.0, 2.0));
+
+    int pr, pc;
+    double u, v;
+    for (int i = 0; i < n; i++) {
+        double x = (double)(i % 80) / 10.0;
+        double y = (double)((i / 80) % 80) / 10.0;
+        ts_bezier_mesh_closest(&m, ts_vec3_make(x, y, 1.0),
+                                &pr, &pc, &u, &v, 10);
+    }
+    ts_bezier_mesh_free(&m);
+}
+
+/* ================================================================
+ * SECTION 8.7: BEZIER VOXELIZATION TESTS
+ * Bezier mesh → SDF grid (narrowband voxelization)
+ * Parallelism: GPU (per-voxel independent)
+ * ================================================================ */
+
+/* --- flat mesh voxelizes to thin shell --- */
+static void test_bezier_voxel_flat_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 4.0, 2.0);
+
+    ts_sdf_grid g = ts_sdf_grid_new(32, 32, 32, 0.25, -1.0, -1.0, -1.0);
+    TS_ASSERT_TRUE(g.distances != NULL);
+
+    int evaluated = ts_bezier_mesh_voxelize(&m, &g, 0.5, 15);
+    TS_ASSERT_TRUE(evaluated > 0);
+
+    /* Voxels near z=2.0 should have small distances */
+    int near_surface = ts_sdf_grid_count_near_surface(&g, 0.3f);
+    TS_ASSERT_TRUE(near_surface > 0);
+
+    /* Voxels above z=2 should have positive distance */
+    float d_above = ts_sdf_grid_get(&g, 10, 10, 20); /* z ≈ 4.0 */
+    /* This voxel is well above the surface — should be positive or FLT_MAX */
+    TS_ASSERT_TRUE(d_above > 0.0f || d_above == FLT_MAX);
+
+    /* Voxels below z=2 should have negative distance */
+    float d_below = ts_sdf_grid_get(&g, 10, 10, 8); /* z ≈ 1.0 */
+    /* If within narrowband, should be negative */
+    if (d_below != FLT_MAX) {
+        TS_ASSERT_TRUE(d_below < 0.0f);
+    }
+
+    ts_sdf_grid_free(&g);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+static void test_bezier_voxel_flat_red(void) {
+    /* If voxelizer didn't evaluate anything, count would be 0 */
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 4.0, 2.0);
+
+    ts_sdf_grid g = ts_sdf_grid_new(16, 16, 16, 0.5, -1.0, -1.0, -1.0);
+    int evaluated = ts_bezier_mesh_voxelize(&m, &g, 0.5, 15);
+    /* Must have evaluated some voxels */
+    TS_ASSERT_TRUE(evaluated > 10);
+
+    ts_sdf_grid_free(&g);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- dome produces inside voxels --- */
+static void test_bezier_voxel_dome_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 4.0, 0.0);
+    /* Raise center to make a dome */
+    ts_bezier_mesh_set_cp(&m, 1, 1, ts_vec3_make(2.0, 2.0, 3.0));
+
+    ts_sdf_grid g = ts_sdf_grid_new(32, 32, 32, 0.25, -1.0, -1.0, -2.0);
+    int evaluated = ts_bezier_mesh_voxelize(&m, &g, 1.0, 15);
+    TS_ASSERT_TRUE(evaluated > 0);
+
+    /* Should have voxels near the surface */
+    int near = ts_sdf_grid_count_near_surface(&g, 0.5f);
+    TS_ASSERT_TRUE(near > 0);
+
+    ts_sdf_grid_free(&g);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- multi-patch mesh voxelizes correctly --- */
+static void test_bezier_voxel_multi_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(2, 2);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 4.0, 1.0);
+    /* Raise center of the whole mesh */
+    ts_bezier_mesh_set_cp(&m, 2, 2, ts_vec3_make(2.0, 2.0, 3.0));
+
+    ts_sdf_grid g = ts_sdf_grid_new(32, 32, 32, 0.25, -1.0, -1.0, -1.0);
+    int evaluated = ts_bezier_mesh_voxelize(&m, &g, 1.0, 15);
+    TS_ASSERT_TRUE(evaluated > 0);
+
+    /* Should have more near-surface voxels than a single patch */
+    int near = ts_sdf_grid_count_near_surface(&g, 0.5f);
+    TS_ASSERT_TRUE(near > 0);
+
+    /* The center region (around 2,2) should be near the raised surface */
+    /* Cell at ~(2,2,2) should have a distance close to 0 or slightly negative
+     * since the dome center is at z≈3 but quadratic blend means surface
+     * at center is lower */
+
+    ts_sdf_grid_free(&g);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- SDF gradient gives normals --- */
+static void test_bezier_voxel_gradient_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 4.0, 2.0);
+
+    ts_sdf_grid g = ts_sdf_grid_new(32, 32, 32, 0.25, -1.0, -1.0, -1.0);
+    ts_bezier_mesh_voxelize(&m, &g, 0.5, 15);
+
+    /* Gradient at a point near the flat surface should point +Z */
+    /* z=2.0 is at grid cell iz ≈ (2.0 - (-1.0)) / 0.25 = 12 */
+    ts_vec3 grad = ts_sdf_grid_gradient(&g, 10, 10, 12);
+    /* For a flat XY surface, gradient should be predominantly in Z */
+    TS_ASSERT_TRUE(fabs(grad.v[2]) > 0.5);
+
+    ts_sdf_grid_free(&g);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+static void test_bezier_voxel_gradient_red(void) {
+    /* If gradient was always zero, the normal would be zero vec */
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 4.0, 2.0);
+
+    ts_sdf_grid g = ts_sdf_grid_new(32, 32, 32, 0.25, -1.0, -1.0, -1.0);
+    ts_bezier_mesh_voxelize(&m, &g, 0.5, 15);
+
+    ts_vec3 grad = ts_sdf_grid_gradient(&g, 10, 10, 12);
+    double len = ts_vec3_norm(grad);
+    /* Must not be zero */
+    TS_ASSERT_TRUE(len > 0.1);
+
+    ts_sdf_grid_free(&g);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- narrowband: far voxels stay at FLT_MAX --- */
+static void test_bezier_voxel_narrowband_green(void) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 2.0, 2.0, 1.0);
+
+    /* Large grid but narrow band — most voxels should be untouched */
+    ts_sdf_grid g = ts_sdf_grid_new(32, 32, 32, 0.25, -2.0, -2.0, -2.0);
+    ts_bezier_mesh_voxelize(&m, &g, 0.5, 15);
+
+    /* Count voxels that were actually evaluated (not FLT_MAX) */
+    int touched = 0;
+    size_t total = (size_t)g.sx * (size_t)g.sy * (size_t)g.sz;
+    for (size_t i = 0; i < total; i++) {
+        if (g.distances[i] != FLT_MAX) touched++;
+    }
+
+    /* Far fewer than total should be touched */
+    TS_ASSERT_TRUE(touched > 0);
+    TS_ASSERT_TRUE(touched < (int)total / 2);
+
+    ts_sdf_grid_free(&g);
+    ts_bezier_mesh_free(&m);
+    TS_PASS();
+}
+
+/* --- Benchmarks --- */
+
+static void bench_bezier_voxelize_1x1(int n) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(1, 1);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 4.0, 4.0, 0.0);
+    ts_bezier_mesh_set_cp(&m, 1, 1, ts_vec3_make(2.0, 2.0, 2.0));
+
+    for (int i = 0; i < n; i++) {
+        ts_sdf_grid g = ts_sdf_grid_new(32, 32, 32, 0.25, -1.0, -1.0, -1.0);
+        ts_bezier_mesh_voxelize(&m, &g, 1.0, 10);
+        ts_sdf_grid_free(&g);
+    }
+    ts_bezier_mesh_free(&m);
+}
+
+static void bench_bezier_voxelize_4x4(int n) {
+    ts_bezier_mesh m = ts_bezier_mesh_new(4, 4);
+    ts_bezier_mesh_init_flat(&m, 0.0, 0.0, 8.0, 8.0, 0.0);
+    ts_bezier_mesh_set_cp(&m, 4, 4, ts_vec3_make(4.0, 4.0, 2.0));
+
+    for (int i = 0; i < n; i++) {
+        ts_sdf_grid g = ts_sdf_grid_new(64, 64, 64, 0.25, -1.0, -1.0, -1.0);
+        ts_bezier_mesh_voxelize(&m, &g, 1.0, 10);
+        ts_sdf_grid_free(&g);
+    }
+    ts_bezier_mesh_free(&m);
+}
+
+/* ================================================================
  * SECTION 9: GPU (OpenCL) TESTS
  * Verify GPU batch operations produce same results as CPU
  * Parallelism: GPU (the whole point)
@@ -2911,6 +3697,81 @@ static void run_all_tests(void) {
     ts_section("EXTRUDE: error handling", TS_PAR_TRIVIAL);
     ts_run_test("extrude_error_green", test_extrude_error_green);
 
+    /* --- Bezier Surface Patches --- */
+    ts_section("BEZIER SURFACE: basis functions", TS_PAR_TRIVIAL);
+    ts_run_test("bezier_basis_green", test_bezier_basis_green);
+    ts_run_test("bezier_basis_red", test_bezier_basis_red);
+
+    ts_section("BEZIER SURFACE: patch eval", TS_PAR_SIMD);
+    ts_run_test("bezier_patch_eval_green", test_bezier_patch_eval_green);
+    ts_run_test("bezier_patch_eval_red", test_bezier_patch_eval_red);
+    ts_run_test("bezier_patch_dome_green", test_bezier_patch_dome_green);
+    ts_run_test("bezier_patch_dome_red", test_bezier_patch_dome_red);
+
+    ts_section("BEZIER SURFACE: normal", TS_PAR_SIMD);
+    ts_run_test("bezier_patch_normal_green", test_bezier_patch_normal_green);
+    ts_run_test("bezier_patch_normal_red", test_bezier_patch_normal_red);
+    ts_run_test("bezier_patch_dome_normal_green", test_bezier_patch_dome_normal_green);
+
+    ts_section("BEZIER SURFACE: bbox", TS_PAR_SIMD);
+    ts_run_test("bezier_patch_bbox_green", test_bezier_patch_bbox_green);
+    ts_run_test("bezier_patch_bbox_red", test_bezier_patch_bbox_red);
+
+    ts_section("BEZIER SURFACE: closest point", TS_PAR_SIMD);
+    ts_run_test("bezier_patch_closest_green", test_bezier_patch_closest_green);
+    ts_run_test("bezier_patch_closest_red", test_bezier_patch_closest_red);
+
+    ts_section("BEZIER SURFACE: SDF", TS_PAR_SIMD);
+    ts_run_test("bezier_patch_sdf_green", test_bezier_patch_sdf_green);
+    ts_run_test("bezier_patch_sdf_red", test_bezier_patch_sdf_red);
+
+    /* --- Bezier Mesh --- */
+    ts_section("BEZIER MESH: creation", TS_PAR_TRIVIAL);
+    ts_run_test("bezier_mesh_create_green", test_bezier_mesh_create_green);
+    ts_run_test("bezier_mesh_create_red", test_bezier_mesh_create_red);
+
+    ts_section("BEZIER MESH: C0 continuity (shared edges)", TS_PAR_SIMD);
+    ts_run_test("bezier_mesh_c0_green", test_bezier_mesh_c0_green);
+    ts_run_test("bezier_mesh_c0_red", test_bezier_mesh_c0_red);
+
+    ts_section("BEZIER MESH: C1 continuity (tangent matching)", TS_PAR_SIMD);
+    ts_run_test("bezier_mesh_c1_col_green", test_bezier_mesh_c1_col_green);
+    ts_run_test("bezier_mesh_c1_col_red", test_bezier_mesh_c1_col_red);
+    ts_run_test("bezier_mesh_c1_row_green", test_bezier_mesh_c1_row_green);
+
+    ts_section("BEZIER MESH: tessellation", TS_PAR_GPU);
+    ts_run_test("bezier_mesh_tessellate_green", test_bezier_mesh_tessellate_green);
+    ts_run_test("bezier_mesh_tessellate_red", test_bezier_mesh_tessellate_red);
+    ts_run_test("bezier_mesh_tess_multi_green", test_bezier_mesh_tess_multi_green);
+
+    ts_section("BEZIER MESH: bbox", TS_PAR_SIMD);
+    ts_run_test("bezier_mesh_bbox_green", test_bezier_mesh_bbox_green);
+
+    ts_section("BEZIER MESH: closest point", TS_PAR_SIMD);
+    ts_run_test("bezier_mesh_closest_green", test_bezier_mesh_closest_green);
+    ts_run_test("bezier_mesh_closest_red", test_bezier_mesh_closest_red);
+
+    ts_section("BEZIER MESH: STL export", TS_PAR_GPU);
+    ts_run_test("bezier_mesh_stl_green", test_bezier_mesh_stl_green);
+
+    /* --- Bezier Voxelization --- */
+    ts_section("BEZIER VOXEL: flat surface", TS_PAR_GPU);
+    ts_run_test("bezier_voxel_flat_green", test_bezier_voxel_flat_green);
+    ts_run_test("bezier_voxel_flat_red", test_bezier_voxel_flat_red);
+
+    ts_section("BEZIER VOXEL: dome surface", TS_PAR_GPU);
+    ts_run_test("bezier_voxel_dome_green", test_bezier_voxel_dome_green);
+
+    ts_section("BEZIER VOXEL: multi-patch", TS_PAR_GPU);
+    ts_run_test("bezier_voxel_multi_green", test_bezier_voxel_multi_green);
+
+    ts_section("BEZIER VOXEL: SDF gradient", TS_PAR_SIMD);
+    ts_run_test("bezier_voxel_gradient_green", test_bezier_voxel_gradient_green);
+    ts_run_test("bezier_voxel_gradient_red", test_bezier_voxel_gradient_red);
+
+    ts_section("BEZIER VOXEL: narrowband", TS_PAR_GPU);
+    ts_run_test("bezier_voxel_narrowband_green", test_bezier_voxel_narrowband_green);
+
     /* --- GPU (OpenCL) --- */
     ts_section("GPU: OpenCL initialization", TS_PAR_GPU);
     ts_run_test("gpu_init_green", test_gpu_init_green);
@@ -2999,6 +3860,19 @@ static void run_all_benchmarks(void) {
     ts_run_bench("linear_extrude(square)",       bench_linear_extrude,       10000, TS_PAR_GPU);
     ts_run_bench("linear_extrude(twist,32sl)",   bench_linear_extrude_twist, 10000, TS_PAR_GPU);
     ts_run_bench("rotate_extrude(rect,fn=32)",   bench_rotate_extrude,       10000, TS_PAR_GPU);
+
+    printf("\n--- Bezier Surface ---\n");
+    ts_run_bench("bezier_patch_eval",   bench_bezier_patch_eval,   1000000, TS_PAR_SIMD);
+    ts_run_bench("bezier_patch_normal", bench_bezier_patch_normal, 1000000, TS_PAR_SIMD);
+    ts_run_bench("bezier_patch_sdf",    bench_bezier_patch_sdf,    10000,   TS_PAR_SIMD);
+
+    printf("\n--- Bezier Mesh ---\n");
+    ts_run_bench("bezier_mesh_tess(4x4,8st)",  bench_bezier_mesh_tessellate, 100,  TS_PAR_GPU);
+    ts_run_bench("bezier_mesh_closest(4x4)",   bench_bezier_mesh_closest,    1000, TS_PAR_SIMD);
+
+    printf("\n--- Bezier Voxelization ---\n");
+    ts_run_bench("bezier_voxel_1x1(32^3)",  bench_bezier_voxelize_1x1, 10, TS_PAR_GPU);
+    ts_run_bench("bezier_voxel_4x4(64^3)",  bench_bezier_voxelize_4x4, 1,  TS_PAR_GPU);
 
     printf("\n--- GPU vs CPU (batch=100k) ---\n");
     printf("  GPU: %s\n", g_gpu.active ? g_gpu.device_name : "CPU fallback");

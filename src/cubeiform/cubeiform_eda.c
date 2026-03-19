@@ -19,9 +19,10 @@
  * DC_CubeiformEda — internal structure
  * ========================================================================= */
 struct DC_CubeiformEda {
-    DC_Array *sch_ops;  /* DC_SchOp elements */
-    DC_Array *pcb_ops;  /* DC_PcbOp elements */
-    DC_Array *vox_ops;  /* DC_VoxOp elements */
+    DC_Array *sch_ops;   /* DC_SchOp elements */
+    DC_Array *pcb_ops;   /* DC_PcbOp elements */
+    DC_Array *vox_ops;   /* DC_VoxOp elements */
+    DC_Array *bmesh_ops; /* DC_BMeshOp elements */
 };
 
 /* =========================================================================
@@ -1527,7 +1528,139 @@ static int is_vox_assignment(EParser *p)
     return result;
 }
 
-static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_ops, DC_Array *vox_ops)
+/* =========================================================================
+ * Bezier mesh block parser: bezier_mesh { ... }
+ * ========================================================================= */
+static void parse_bezier_mesh_block(EParser *p, DC_Array *bmesh_ops)
+{
+    expect(p, ETOK_LBRACE);
+    while (p->cur.type != ETOK_RBRACE && p->cur.type != ETOK_EOF && !p->has_error) {
+        if (ident_eq(&p->cur, "sphere")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_BMeshOp op = { .type = DC_BMESH_OP_SPHERE };
+            op.radius = 5.0;
+            if (p->cur.type == ETOK_NUMBER) {
+                op.radius = p->cur.num_val;
+                next_token(p);
+            }
+            expect(p, ETOK_RPAREN);
+            if (p->cur.type == ETOK_SEMI) next_token(p);
+            dc_array_push(bmesh_ops, &op);
+
+        } else if (ident_eq(&p->cur, "torus")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_BMeshOp op = { .type = DC_BMESH_OP_TORUS };
+            op.radius = 5.0;
+            op.radius2 = 2.0;
+            if (p->cur.type == ETOK_NUMBER) {
+                op.radius = p->cur.num_val;
+                next_token(p);
+                if (p->cur.type == ETOK_COMMA) {
+                    next_token(p);
+                    if (p->cur.type == ETOK_NUMBER) {
+                        op.radius2 = p->cur.num_val;
+                        next_token(p);
+                    }
+                }
+            }
+            expect(p, ETOK_RPAREN);
+            if (p->cur.type == ETOK_SEMI) next_token(p);
+            dc_array_push(bmesh_ops, &op);
+
+        } else if (ident_eq(&p->cur, "grid")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_BMeshOp op = { .type = DC_BMESH_OP_GRID };
+            op.rows = 2;
+            op.cols = 2;
+            if (p->cur.type == ETOK_NUMBER) {
+                op.rows = (int)p->cur.num_val;
+                next_token(p);
+                if (p->cur.type == ETOK_COMMA) {
+                    next_token(p);
+                    if (p->cur.type == ETOK_NUMBER) {
+                        op.cols = (int)p->cur.num_val;
+                        next_token(p);
+                    }
+                }
+            }
+            expect(p, ETOK_RPAREN);
+            if (p->cur.type == ETOK_SEMI) next_token(p);
+            dc_array_push(bmesh_ops, &op);
+
+        } else if (ident_eq(&p->cur, "cp")) {
+            /* cp[r][c] = [x, y, z]; */
+            next_token(p);
+            expect(p, ETOK_LBRACKET);
+            DC_BMeshOp op = { .type = DC_BMESH_OP_SET_CP };
+            op.rows = 0;
+            op.cols = 0;
+            if (p->cur.type == ETOK_NUMBER) {
+                op.rows = (int)p->cur.num_val;
+                next_token(p);
+            }
+            expect(p, ETOK_RBRACKET);
+            expect(p, ETOK_LBRACKET);
+            if (p->cur.type == ETOK_NUMBER) {
+                op.cols = (int)p->cur.num_val;
+                next_token(p);
+            }
+            expect(p, ETOK_RBRACKET);
+            expect(p, ETOK_EQ);
+            expect(p, ETOK_LBRACKET);
+            op.x = op.y = op.z = 0.0;
+            if (p->cur.type == ETOK_NUMBER || p->cur.type == ETOK_MINUS) {
+                int sign = 1;
+                if (p->cur.type == ETOK_MINUS) { sign = -1; next_token(p); }
+                op.x = sign * p->cur.num_val; next_token(p);
+                if (p->cur.type == ETOK_COMMA) next_token(p);
+                sign = 1;
+                if (p->cur.type == ETOK_MINUS) { sign = -1; next_token(p); }
+                op.y = sign * p->cur.num_val; next_token(p);
+                if (p->cur.type == ETOK_COMMA) next_token(p);
+                sign = 1;
+                if (p->cur.type == ETOK_MINUS) { sign = -1; next_token(p); }
+                op.z = sign * p->cur.num_val; next_token(p);
+            }
+            expect(p, ETOK_RBRACKET);
+            if (p->cur.type == ETOK_SEMI) next_token(p);
+            dc_array_push(bmesh_ops, &op);
+
+        } else if (ident_eq(&p->cur, "resolution")) {
+            next_token(p);
+            expect(p, ETOK_EQ);
+            DC_BMeshOp op = { .type = DC_BMESH_OP_RESOLUTION };
+            op.resolution = 64;
+            if (p->cur.type == ETOK_NUMBER) {
+                op.resolution = (int)p->cur.num_val;
+                next_token(p);
+            }
+            if (p->cur.type == ETOK_SEMI) next_token(p);
+            dc_array_push(bmesh_ops, &op);
+
+        } else if (ident_eq(&p->cur, "view")) {
+            next_token(p);
+            expect(p, ETOK_EQ);
+            DC_BMeshOp op = { .type = DC_BMESH_OP_VIEW };
+            op.view_mode = 3;  /* default: both */
+            if (ident_eq(&p->cur, "wireframe"))     { op.view_mode = 1; next_token(p); }
+            else if (ident_eq(&p->cur, "voxel"))    { op.view_mode = 2; next_token(p); }
+            else if (ident_eq(&p->cur, "both"))     { op.view_mode = 3; next_token(p); }
+            else if (ident_eq(&p->cur, "none"))     { op.view_mode = 0; next_token(p); }
+            if (p->cur.type == ETOK_SEMI) next_token(p);
+            dc_array_push(bmesh_ops, &op);
+
+        } else {
+            /* Skip unknown statement */
+            next_token(p);
+        }
+    }
+    if (p->cur.type == ETOK_RBRACE) next_token(p);
+}
+
+static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_ops, DC_Array *vox_ops, DC_Array *bmesh_ops)
 {
     while (p->cur.type != ETOK_EOF && !p->has_error) {
         if (ident_eq(&p->cur, "schematic")) {
@@ -1539,6 +1672,9 @@ static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_o
         } else if (ident_eq(&p->cur, "voxel")) {
             next_token(p);
             parse_voxel_block(p, vox_ops);
+        } else if (ident_eq(&p->cur, "bezier_mesh")) {
+            next_token(p);
+            parse_bezier_mesh_block(p, bmesh_ops);
         } else if (is_vox_keyword(p) || is_vox_assignment(p)) {
             /* Top-level Cubeiform voxel statements — parse all as a batch
              * so variables persist across statements */
@@ -1594,7 +1730,8 @@ dc_cubeiform_parse_eda(const char *dcad_src, DC_Error *err)
     eda->sch_ops = dc_array_new(sizeof(DC_SchOp));
     eda->pcb_ops = dc_array_new(sizeof(DC_PcbOp));
     eda->vox_ops = dc_array_new(sizeof(DC_VoxOp));
-    if (!eda->sch_ops || !eda->pcb_ops || !eda->vox_ops) {
+    eda->bmesh_ops = dc_array_new(sizeof(DC_BMeshOp));
+    if (!eda->sch_ops || !eda->pcb_ops || !eda->vox_ops || !eda->bmesh_ops) {
         dc_cubeiform_eda_free(eda);
         DC_SET_ERROR(err, DC_ERROR_MEMORY, "alloc op arrays");
         return NULL;
@@ -1608,7 +1745,7 @@ dc_cubeiform_parse_eda(const char *dcad_src, DC_Error *err)
     p.has_error = 0;
 
     next_token(&p);
-    find_and_parse_blocks(&p, eda->sch_ops, eda->pcb_ops, eda->vox_ops);
+    find_and_parse_blocks(&p, eda->sch_ops, eda->pcb_ops, eda->vox_ops, eda->bmesh_ops);
 
     if (p.has_error) {
         dc_cubeiform_eda_free(eda);
@@ -1647,6 +1784,9 @@ dc_cubeiform_eda_free(DC_CubeiformEda *eda)
     if (eda->vox_ops)
         dc_array_free(eda->vox_ops);
 
+    if (eda->bmesh_ops)
+        dc_array_free(eda->bmesh_ops);
+
     free(eda);
 }
 
@@ -1684,6 +1824,17 @@ const DC_VoxOp *dc_cubeiform_eda_get_vox_op(const DC_CubeiformEda *eda, size_t i
 {
     if (!eda || !eda->vox_ops || i >= dc_array_length(eda->vox_ops)) return NULL;
     return dc_array_get(eda->vox_ops, i);
+}
+
+size_t dc_cubeiform_eda_bmesh_op_count(const DC_CubeiformEda *eda)
+{
+    return eda && eda->bmesh_ops ? dc_array_length(eda->bmesh_ops) : 0;
+}
+
+const DC_BMeshOp *dc_cubeiform_eda_get_bmesh_op(const DC_CubeiformEda *eda, size_t i)
+{
+    if (!eda || !eda->bmesh_ops || i >= dc_array_length(eda->bmesh_ops)) return NULL;
+    return dc_array_get(eda->bmesh_ops, i);
 }
 
 /* =========================================================================

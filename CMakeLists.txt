@@ -84,6 +84,7 @@ add_library(dc_core STATIC
     src/voxel/voxel.c
     src/voxel/sdf.c
     src/voxel/voxelize_stl.c
+    src/voxel/voxelize_bezier.c
 )
 target_include_directories(dc_core PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(dc_core
@@ -122,6 +123,7 @@ add_executable(duncad
     src/ui/eda_view.c
     src/gl/gl_viewport.c
     src/gl/gl_voxel.c
+    src/gl/gl_bezier_wire.c
     src/gl/stl_loader.c
     src/bezier/bezier_canvas.c
     src/bezier/bezier_editor.c
@@ -194,8 +196,9 @@ dc_add_test(test_eda_library      tests/test_eda_library.c)
 # Cubeiform EDA test
 dc_add_test(test_cubeiform_eda    tests/test_cubeiform_eda.c)
 
-# Voxel test
+# Voxel tests
 dc_add_test(test_voxel            tests/test_voxel.c)
+dc_add_test(test_bezier_voxel     tests/test_bezier_voxel.c)
 
 # Pass test data directory to EDA tests
 set(DC_EDA_TEST_TARGETS test_sexpr test_eda_schematic test_eda_pcb test_eda_library test_cubeiform_eda)
@@ -245,6 +248,7 @@ add_executable(test_bezier_canvas
     src/ui/eda_view.c
     src/gl/gl_viewport.c
     src/gl/gl_voxel.c
+    src/gl/gl_bezier_wire.c
     src/gl/stl_loader.c
     src/inspect/inspect.c
     src/scad/scad_runner.c
@@ -286,6 +290,7 @@ add_executable(test_bezier_editor
     src/ui/eda_view.c
     src/gl/gl_viewport.c
     src/gl/gl_voxel.c
+    src/gl/gl_bezier_wire.c
     src/gl/stl_loader.c
     src/inspect/inspect.c
     src/scad/scad_runner.c

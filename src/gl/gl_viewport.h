@@ -130,6 +130,31 @@ void dc_gl_viewport_select_object_quiet(DC_GlViewport *vp, int obj_idx);
 void dc_gl_viewport_set_locked(DC_GlViewport *vp, int locked);
 int  dc_gl_viewport_get_locked(DC_GlViewport *vp);
 
+/* ---- Bezier patch mesh wireframe ---- */
+
+typedef enum {
+    DC_BEZIER_VIEW_NONE      = 0,
+    DC_BEZIER_VIEW_WIREFRAME = 1,
+    DC_BEZIER_VIEW_VOXEL     = 2,
+    DC_BEZIER_VIEW_BOTH      = 3,
+} DC_BezierViewMode;
+
+/* Set a bezier mesh for wireframe display. Copies the mesh internally.
+ * Pass NULL to clear. mesh_ptr is const ts_bezier_mesh*. */
+void dc_gl_viewport_set_bezier_mesh(DC_GlViewport *vp, const void *mesh_ptr);
+
+/* Set bezier view mode (wireframe, voxel, both, none). */
+void dc_gl_viewport_set_bezier_view(DC_GlViewport *vp, DC_BezierViewMode mode);
+DC_BezierViewMode dc_gl_viewport_get_bezier_view(DC_GlViewport *vp);
+
+/* Update a single control point in the stored bezier mesh. Marks wireframe dirty. */
+void dc_gl_viewport_update_bezier_cp(DC_GlViewport *vp,
+                                       int cp_row, int cp_col,
+                                       float x, float y, float z);
+
+/* Set/get the selected loop highlight. type: 0=row, 1=col, -1=none. */
+void dc_gl_viewport_set_bezier_loop(DC_GlViewport *vp, int loop_type, int loop_index);
+
 /* ---- Voxel rendering ---- */
 
 struct DC_VoxelGrid;

@@ -1,10 +1,16 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gl/gl_viewport.h"
 #include "gl/gl_voxel.h"
+#include "gl/gl_bezier_wire.h"
 #include "voxel/voxel.h"
 #include "gl/stl_loader.h"
 #include "gl/dc_topo.h"
 #include "core/log.h"
+
+/* Trinity Site bezier mesh — header-only */
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_vec.h"
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_surface.h"
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_mesh.h"
 
 #include <epoxy/gl.h>
 #include <math.h>
@@ -308,6 +314,17 @@ struct DC_GlViewport {
     DC_GlVoxelBuf *voxel_buf;     /* NULL if no voxels loaded */
     int             voxel_pending; /* 1 if grid needs upload on next frame */
     const DC_VoxelGrid *voxel_grid_pending; /* grid to upload */
+
+    /* Bezier patch mesh wireframe */
+    ts_bezier_mesh  *bezier_mesh;       /* owned copy, NULL if none */
+    DC_GlBezierWire  bezier_wire;       /* wireframe VAO/VBO */
+    DC_BezierViewMode bezier_view_mode; /* NONE/WIREFRAME/VOXEL/BOTH */
+    int              bezier_wire_dirty;  /* 1 = needs rebuild */
+    GLuint           bezier_loop_vao;
+    GLuint           bezier_loop_vbo;
+    int              bezier_loop_vert_count;
+    int              bezier_loop_type;   /* 0=row, 1=col, -1=none */
+    int              bezier_loop_index;
 };
 
 /* Forward declarations for lazy topology builders */
@@ -829,6 +846,42 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
     glBindVertexArray(0);
     glUseProgram(0);
 
+    /* --- Bezier patch mesh wireframe --- */
+    if (vp->bezier_mesh && (vp->bezier_view_mode & DC_BEZIER_VIEW_WIREFRAME)) {
+        /* Rebuild wireframe if dirty */
+        if (vp->bezier_wire_dirty || !vp->bezier_wire.built) {
+            dc_gl_bezier_wire_build(&vp->bezier_wire, vp->bezier_mesh, 4, 16);
+            vp->bezier_wire_dirty = 0;
+        }
+
+        if (vp->bezier_wire.vert_count > 0 && vp->line_prog) {
+            glUseProgram(vp->line_prog);
+            glUniformMatrix4fv(glGetUniformLocation(vp->line_prog, "uMVP"),
+                               1, GL_FALSE, vp_mat);
+            glBindVertexArray(vp->bezier_wire.vao);
+            glDepthFunc(GL_LEQUAL);
+            glDrawArrays(GL_LINES, 0, vp->bezier_wire.vert_count);
+            glDepthFunc(GL_LESS);
+            glBindVertexArray(0);
+        }
+
+        /* Draw loop highlight (cyan, thick) */
+        if (vp->bezier_loop_vert_count > 0 && vp->bezier_loop_vao) {
+            glUseProgram(vp->line_prog);
+            glUniformMatrix4fv(glGetUniformLocation(vp->line_prog, "uMVP"),
+                               1, GL_FALSE, vp_mat);
+            glBindVertexArray(vp->bezier_loop_vao);
+            glDepthFunc(GL_LEQUAL);
+            glLineWidth(3.0f);
+            glDrawArrays(GL_LINES, 0, vp->bezier_loop_vert_count);
+            glLineWidth(1.0f);
+            glDepthFunc(GL_LESS);
+            glBindVertexArray(0);
+        }
+
+        glUseProgram(0);
+    }
+
     /* --- Voxel rendering --- */
     if (vp->voxel_pending && vp->voxel_grid_pending) {
         if (!vp->voxel_buf)
@@ -842,7 +895,9 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         vp->voxel_pending = 0;
         vp->voxel_grid_pending = NULL;
     }
-    if (vp->voxel_buf && dc_gl_voxel_buf_instance_count(vp->voxel_buf) > 0) {
+    /* Only draw voxels if no bezier mesh, or bezier mode includes VOXEL */
+    if ((!vp->bezier_mesh || (vp->bezier_view_mode & DC_BEZIER_VIEW_VOXEL))
+        && vp->voxel_buf && dc_gl_voxel_buf_instance_count(vp->voxel_buf) > 0) {
         float inv_vp[16];
         if (mat4_invert(inv_vp, vp_mat) == 0) {
             dc_gl_voxel_buf_draw(vp->voxel_buf, inv_vp, eye, light_dir, w, h);
@@ -1593,6 +1648,8 @@ dc_gl_viewport_new(void)
     vp->sel_mode = DC_SEL_OBJECT;
     vp->selected_face = -1;
     vp->selected_edge = -1;
+    vp->bezier_loop_type = -1;  /* no loop selected */
+    dc_gl_bezier_wire_init(&vp->bezier_wire);
 
     /* Create GtkGLArea */
     vp->gl_area = gtk_gl_area_new();
@@ -1701,6 +1758,13 @@ dc_gl_viewport_free(DC_GlViewport *vp)
         free(vp->objects[i].face_draw_start);
         free(vp->objects[i].face_draw_count);
     }
+    /* Bezier mesh cleanup (no GL context here — GPU resources leak if not
+     * cleaned up during GL teardown, but that's fine for app shutdown) */
+    if (vp->bezier_mesh) {
+        ts_bezier_mesh_free(vp->bezier_mesh);
+        free(vp->bezier_mesh);
+    }
+
     dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP, "gl_viewport freed");
     free(vp);
 }
@@ -2651,4 +2715,93 @@ dc_gl_viewport_get_object_extent(DC_GlViewport *vp, int obj_idx,
         if (proj > proj_max) proj_max = proj;
     }
     return proj_max - proj_min;
+}
+
+/* =========================================================================
+ * Bezier patch mesh wireframe API
+ * ========================================================================= */
+
+void
+dc_gl_viewport_set_bezier_mesh(DC_GlViewport *vp, const void *mesh_ptr)
+{
+    if (!vp) return;
+
+    /* Free old mesh */
+    if (vp->bezier_mesh) {
+        ts_bezier_mesh_free(vp->bezier_mesh);
+        free(vp->bezier_mesh);
+        vp->bezier_mesh = NULL;
+    }
+
+    if (mesh_ptr) {
+        const ts_bezier_mesh *src = (const ts_bezier_mesh *)mesh_ptr;
+        vp->bezier_mesh = (ts_bezier_mesh *)malloc(sizeof(ts_bezier_mesh));
+        if (vp->bezier_mesh) {
+            vp->bezier_mesh->rows = src->rows;
+            vp->bezier_mesh->cols = src->cols;
+            vp->bezier_mesh->cp_rows = src->cp_rows;
+            vp->bezier_mesh->cp_cols = src->cp_cols;
+            int total = src->cp_rows * src->cp_cols;
+            vp->bezier_mesh->cps = (ts_vec3 *)malloc((size_t)total * sizeof(ts_vec3));
+            if (vp->bezier_mesh->cps) {
+                memcpy(vp->bezier_mesh->cps, src->cps,
+                       (size_t)total * sizeof(ts_vec3));
+            }
+        }
+    }
+
+    vp->bezier_wire_dirty = 1;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+void
+dc_gl_viewport_set_bezier_view(DC_GlViewport *vp, DC_BezierViewMode mode)
+{
+    if (!vp) return;
+    vp->bezier_view_mode = mode;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+DC_BezierViewMode
+dc_gl_viewport_get_bezier_view(DC_GlViewport *vp)
+{
+    return vp ? vp->bezier_view_mode : DC_BEZIER_VIEW_NONE;
+}
+
+void
+dc_gl_viewport_update_bezier_cp(DC_GlViewport *vp,
+                                  int cp_row, int cp_col,
+                                  float x, float y, float z)
+{
+    if (!vp || !vp->bezier_mesh) return;
+    if (cp_row < 0 || cp_row >= vp->bezier_mesh->cp_rows) return;
+    if (cp_col < 0 || cp_col >= vp->bezier_mesh->cp_cols) return;
+
+    ts_bezier_mesh_set_cp(vp->bezier_mesh, cp_row, cp_col,
+                           ts_vec3_make((double)x, (double)y, (double)z));
+    vp->bezier_wire_dirty = 1;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+void
+dc_gl_viewport_set_bezier_loop(DC_GlViewport *vp, int loop_type, int loop_index)
+{
+    if (!vp) return;
+
+    /* Clear old highlight */
+    dc_gl_bezier_wire_destroy_loop(&vp->bezier_loop_vao,
+                                    &vp->bezier_loop_vbo,
+                                    &vp->bezier_loop_vert_count);
+    vp->bezier_loop_type = loop_type;
+    vp->bezier_loop_index = loop_index;
+
+    if (loop_type >= 0 && vp->bezier_mesh) {
+        dc_gl_bezier_wire_build_loop(&vp->bezier_loop_vao,
+                                      &vp->bezier_loop_vbo,
+                                      &vp->bezier_loop_vert_count,
+                                      vp->bezier_mesh,
+                                      loop_type, loop_index, 16);
+    }
+
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
 }

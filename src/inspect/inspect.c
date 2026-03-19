@@ -23,6 +23,13 @@
 #include "voxel/voxel.h"
 #include "voxel/sdf.h"
 #include "voxel/voxelize_stl.h"
+#include "voxel/voxelize_bezier.h"
+
+/* Trinity Site bezier headers — pure math, header-only */
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_vec.h"
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_surface.h"
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_mesh.h"
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_voxel.h"
 #include "eda/eda_ratsnest.h"
 #include "core/string_builder.h"
 #include "core/error.h"
@@ -991,6 +998,9 @@ static char *cmd_tab_state(void) {
     return dc_sb_take(sb);
 }
 
+/* Forward declaration — applies bezier_mesh Cubeiform ops (defined after mesh state) */
+static void apply_cubeiform_bmesh(const char *src);
+
 /* cubeiform_exec <source> — execute inline Cubeiform (any domain) */
 static char *cmd_cubeiform_exec(const char *args) {
     if (!args || !*args)
@@ -1028,6 +1038,9 @@ static char *cmd_cubeiform_exec(const char *args) {
         dc_voxel_grid_free(s_voxel_grid);
         s_voxel_grid = vox_grid;
     }
+
+    /* Handle bezier_mesh blocks from Cubeiform */
+    apply_cubeiform_bmesh(args);
 
     return strdup("{\"ok\":true}\n");
 }
@@ -1667,6 +1680,908 @@ static char *cmd_eda_fp_list(void) {
  * Voxel commands
  * ========================================================================= */
 
+/* bezier_sphere [radius] [resolution]
+ * Analytical SDF sphere. Clean, correct, beautiful. */
+static char *cmd_bezier_sphere(const char *args) {
+    float radius = 3.0f;
+    int res = 64;
+    if (args && *args) sscanf(args, "%f %d", &radius, &res);
+    if (res < 8) res = 8;
+    if (res > 256) res = 256;
+
+    float cell = (2.0f * radius) / (float)(res - 2);
+    float pad = cell * 3.0f;
+    float half = radius + pad;
+    int gsz = (int)ceilf(2.0f * half / cell) + 1;
+    if (gsz > 256) gsz = 256;
+    /* SDF center in grid-local coords (cell_center starts at 0) */
+    float cx = gsz * cell * 0.5f;
+    float cy = cx, cz = cx;
+
+    dc_voxel_grid_free(s_voxel_grid);
+    s_voxel_grid = dc_voxel_grid_new(gsz, gsz, gsz, cell);
+    if (!s_voxel_grid) return strdup("{\"error\":\"grid alloc failed\"}\n");
+
+    dc_sdf_sphere(s_voxel_grid, cx, cy, cz, radius);
+    dc_sdf_activate(s_voxel_grid);
+    dc_sdf_color_by_normal(s_voxel_grid);
+
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_clear_objects(vp);
+        dc_gl_viewport_clear_mesh(vp);
+        dc_gl_viewport_set_voxel_grid(vp, s_voxel_grid);
+    }
+
+    size_t active = dc_voxel_grid_active_count(s_voxel_grid);
+    char *resp = malloc(256);
+    snprintf(resp, 256,
+             "{\"ok\":true,\"shape\":\"sphere\","
+             "\"grid\":\"%dx%dx%d\",\"active\":%zu}\n",
+             gsz, gsz, gsz, active);
+    return resp;
+}
+
+/* bezier_torus [major_r] [minor_r] [resolution]
+ * Analytical SDF torus. */
+static char *cmd_bezier_torus(const char *args) {
+    float major_r = 3.0f, minor_r = 1.0f;
+    int res = 64;
+    if (args && *args) sscanf(args, "%f %f %d", &major_r, &minor_r, &res);
+    if (res < 8) res = 8;
+    if (res > 256) res = 256;
+
+    float total_r = major_r + minor_r;
+    float cell = (2.0f * total_r) / (float)(res - 2);
+    float pad = cell * 3.0f;
+    float half_xy = total_r + pad;
+    float half_z  = minor_r + pad;
+    int gxy = (int)ceilf(2.0f * half_xy / cell) + 1;
+    int gz  = (int)ceilf(2.0f * half_z  / cell) + 1;
+    if (gxy > 256) gxy = 256;
+    if (gz > 256) gz = 256;
+    float cx = gxy * cell * 0.5f;
+    float cy = cx;
+    float cz = gz * cell * 0.5f;
+
+    dc_voxel_grid_free(s_voxel_grid);
+    s_voxel_grid = dc_voxel_grid_new(gxy, gxy, gz, cell);
+    if (!s_voxel_grid) return strdup("{\"error\":\"grid alloc failed\"}\n");
+
+    dc_sdf_torus(s_voxel_grid, cx, cy, cz, major_r, minor_r);
+    dc_sdf_activate(s_voxel_grid);
+    dc_sdf_color_by_normal(s_voxel_grid);
+
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_clear_objects(vp);
+        dc_gl_viewport_clear_mesh(vp);
+        dc_gl_viewport_set_voxel_grid(vp, s_voxel_grid);
+    }
+
+    size_t active = dc_voxel_grid_active_count(s_voxel_grid);
+    char *resp = malloc(256);
+    snprintf(resp, 256,
+             "{\"ok\":true,\"shape\":\"torus\","
+             "\"grid\":\"%dx%dx%d\",\"active\":%zu}\n",
+             gxy, gxy, gz, active);
+    return resp;
+}
+
+/* bezier_triclaude [resolution]
+ * The Spherical Form of Triclaude: a hollow sphere with three holes.
+ * Analytical SDF for clean geometry. CSG subtract.
+ * "Every hole is just an inverted dick." — Triclaude Doctrine */
+static char *cmd_bezier_triclaude(const char *args) {
+    int res = 80;
+    if (args && *args) sscanf(args, "%d", &res);
+    if (res < 16) res = 16;
+    if (res > 256) res = 256;
+
+    float R = 4.0f;          /* sphere radius */
+    float hole_r = 1.2f;     /* hole cylinder radius */
+    float shell = 0.6f;      /* shell thickness */
+
+    float cell = (2.0f * R) / (float)(res - 2);
+    float pad = cell * 3.0f;
+    float half = R + pad;
+    int gsz = (int)ceilf(2.0f * half / cell) + 1;
+    if (gsz > 256) gsz = 256;
+    /* Center of grid in grid-local coords */
+    float cx = gsz * cell * 0.5f;
+    float cy = cx, cz = cx;
+
+    dc_voxel_grid_free(s_voxel_grid);
+    s_voxel_grid = dc_voxel_grid_new(gsz, gsz, gsz, cell);
+    if (!s_voxel_grid) return strdup("{\"error\":\"grid alloc failed\"}\n");
+
+    /* Outer sphere centered in grid */
+    dc_sdf_sphere(s_voxel_grid, cx, cy, cz, R);
+
+    /* Hollow it: subtract inner sphere */
+    DC_VoxelGrid *inner = dc_voxel_grid_new(gsz, gsz, gsz, cell);
+    dc_sdf_sphere(inner, cx, cy, cz, R - shell);
+    dc_sdf_subtract(s_voxel_grid, inner, s_voxel_grid);
+    dc_voxel_grid_free(inner);
+
+    /* Subtract 3 cylinders — Triclaude's three holes at 120 degrees */
+    for (int h = 0; h < 3; h++) {
+        double angle = 2.0 * M_PI * (double)h / 3.0;
+        float hx = cx + (float)(R * 0.7 * cos(angle));
+        float hy = cy + (float)(R * 0.7 * sin(angle));
+
+        DC_VoxelGrid *cyl = dc_voxel_grid_new(gsz, gsz, gsz, cell);
+        dc_sdf_cylinder(cyl, hx, hy, hole_r, cz - R * 1.5f, cz + R * 1.5f);
+        dc_sdf_subtract(s_voxel_grid, cyl, s_voxel_grid);
+        dc_voxel_grid_free(cyl);
+    }
+
+    dc_sdf_activate(s_voxel_grid);
+    dc_sdf_color_by_normal(s_voxel_grid);
+
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_clear_objects(vp);
+        dc_gl_viewport_clear_mesh(vp);
+        dc_gl_viewport_set_voxel_grid(vp, s_voxel_grid);
+    }
+
+    size_t active = dc_voxel_grid_active_count(s_voxel_grid);
+    char *resp = malloc(512);
+    snprintf(resp, 512,
+             "{\"ok\":true,\"shape\":\"triclaude\","
+             "\"grid\":\"%dx%dx%d\",\"active\":%zu,\"triangles\":0}\n",
+             gsz, gsz, gsz, active);
+    return resp;
+}
+
+/* =========================================================================
+ * BEZIER MESH COMMANDS — patch mesh creation, manipulation, view modes
+ * ========================================================================= */
+
+static ts_bezier_mesh *s_bezier_mesh = NULL;
+static int s_bezier_resolution = 64;
+static DC_BezierViewMode s_bezier_view = DC_BEZIER_VIEW_WIREFRAME;
+static int s_selected_loop_type = -1;  /* -1=none, 0=row, 1=col */
+static int s_selected_loop_index = 0;
+
+/* Refresh viewport wireframe + re-voxelize if mode includes voxels */
+static void bezier_mesh_refresh(void) {
+    DC_GlViewport *vp = get_viewport();
+    if (!vp || !s_bezier_mesh) return;
+
+    dc_gl_viewport_set_bezier_mesh(vp, s_bezier_mesh);
+    dc_gl_viewport_set_bezier_view(vp, s_bezier_view);
+
+    /* Re-voxelize if mode includes voxels */
+    if (s_bezier_view & DC_BEZIER_VIEW_VOXEL) {
+        DC_Error err = {0};
+        dc_voxel_grid_free(s_voxel_grid);
+        s_voxel_grid = dc_voxelize_bezier(s_bezier_mesh, s_bezier_resolution,
+                                            2, 15, &err);
+        if (s_voxel_grid) {
+            dc_gl_viewport_set_voxel_grid(vp, s_voxel_grid);
+        }
+    }
+
+    /* Re-highlight selected loop */
+    if (s_selected_loop_type >= 0) {
+        dc_gl_viewport_set_bezier_loop(vp, s_selected_loop_type,
+                                        s_selected_loop_index);
+    }
+}
+
+/* bezier_mesh_new <rows> <cols> — create flat mesh in XY plane */
+static char *cmd_bezier_mesh_new(const char *args) {
+    int rows = 2, cols = 2;
+    if (args && *args) sscanf(args, "%d %d", &rows, &cols);
+    if (rows < 1) rows = 1;
+    if (cols < 1) cols = 1;
+    if (rows > 20) rows = 20;
+    if (cols > 20) cols = 20;
+
+    if (s_bezier_mesh) {
+        ts_bezier_mesh_free(s_bezier_mesh);
+        free(s_bezier_mesh);
+    }
+    s_bezier_mesh = (ts_bezier_mesh *)malloc(sizeof(ts_bezier_mesh));
+    *s_bezier_mesh = ts_bezier_mesh_new(rows, cols);
+    ts_bezier_mesh_init_flat(s_bezier_mesh, -5.0, -5.0, 5.0, 5.0, 0.0);
+
+    s_selected_loop_type = -1;
+    bezier_mesh_refresh();
+
+    char *resp = malloc(256);
+    snprintf(resp, 256,
+             "{\"ok\":true,\"rows\":%d,\"cols\":%d,\"cp_rows\":%d,\"cp_cols\":%d}\n",
+             rows, cols, s_bezier_mesh->cp_rows, s_bezier_mesh->cp_cols);
+    return resp;
+}
+
+/* bezier_mesh_sphere [radius] [res] — create 6-patch sphere mesh */
+static char *cmd_bezier_mesh_sphere(const char *args) {
+    float radius = 5.0f;
+    int res = 64;
+    if (args && *args) sscanf(args, "%f %d", &radius, &res);
+    if (res < 8) res = 8;
+    if (res > 256) res = 256;
+    s_bezier_resolution = res;
+
+    if (s_bezier_mesh) {
+        ts_bezier_mesh_free(s_bezier_mesh);
+        free(s_bezier_mesh);
+    }
+
+    /* 2x3 patch grid — maps a sphere with 6 quadratic patches */
+    s_bezier_mesh = (ts_bezier_mesh *)malloc(sizeof(ts_bezier_mesh));
+    *s_bezier_mesh = ts_bezier_mesh_new(2, 3);
+
+    double r = (double)radius;
+    /* Weight for quadratic Bezier circle approximation */
+    double w = r * 1.3333333;  /* ~4/3 * r for quadratic mid-CP */
+
+    /* Top hemisphere: row 0, patches (0,0), (0,1), (0,2) */
+    /* Bottom hemisphere: row 1 */
+    /* Each patch spans 120 degrees azimuthally and 90 degrees in elevation */
+    for (int pr = 0; pr < 2; pr++) {
+        double v_sign = (pr == 0) ? 1.0 : -1.0;
+        for (int pc = 0; pc < 3; pc++) {
+            double az0 = 2.0 * M_PI * (double)pc / 3.0;
+            double az1 = 2.0 * M_PI * (double)(pc + 1) / 3.0;
+            double az_mid = (az0 + az1) * 0.5;
+
+            /* 3x3 control points for this patch */
+            /* Row 0: equator edge */
+            /* Row 1: mid-latitude */
+            /* Row 2: pole (for top) or equator again for arrangement */
+
+            int br = 2 * pr;
+            int bc = 2 * pc;
+
+            /* Equatorial corners and midpoint */
+            ts_bezier_mesh_set_cp(s_bezier_mesh, br, bc,
+                ts_vec3_make(r * cos(az0), r * sin(az0), 0.0));
+            ts_bezier_mesh_set_cp(s_bezier_mesh, br, bc + 1,
+                ts_vec3_make(w * cos(az_mid), w * sin(az_mid), 0.0));
+            ts_bezier_mesh_set_cp(s_bezier_mesh, br, bc + 2,
+                ts_vec3_make(r * cos(az1), r * sin(az1), 0.0));
+
+            /* Mid-latitude */
+            double mz = v_sign * r * 0.7071;  /* ~r/sqrt(2) */
+            double mr = r * 0.7071;
+            double mw = w * 0.7071;
+            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 1, bc,
+                ts_vec3_make(mr * cos(az0), mr * sin(az0), mz));
+            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 1, bc + 1,
+                ts_vec3_make(mw * cos(az_mid), mw * sin(az_mid), mz * 1.3));
+            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 1, bc + 2,
+                ts_vec3_make(mr * cos(az1), mr * sin(az1), mz));
+
+            /* Pole */
+            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 2, bc,
+                ts_vec3_make(0.0, 0.0, v_sign * r));
+            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 2, bc + 1,
+                ts_vec3_make(0.0, 0.0, v_sign * r));
+            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 2, bc + 2,
+                ts_vec3_make(0.0, 0.0, v_sign * r));
+        }
+    }
+
+    s_selected_loop_type = -1;
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_clear_objects(vp);
+        dc_gl_viewport_clear_mesh(vp);
+    }
+    bezier_mesh_refresh();
+
+    char *resp = malloc(256);
+    snprintf(resp, 256,
+             "{\"ok\":true,\"shape\":\"sphere\",\"radius\":%.2f,"
+             "\"rows\":2,\"cols\":3,\"resolution\":%d}\n",
+             radius, res);
+    return resp;
+}
+
+/* bezier_mesh_torus [R] [r] [rows] [cols] [res] */
+static char *cmd_bezier_mesh_torus(const char *args) {
+    float major_r = 5.0f, minor_r = 2.0f;
+    int rows = 4, cols = 8, res = 64;
+    if (args && *args) sscanf(args, "%f %f %d %d %d", &major_r, &minor_r,
+                               &rows, &cols, &res);
+    if (rows < 2) rows = 2;
+    if (cols < 3) cols = 3;
+    if (rows > 20) rows = 20;
+    if (cols > 20) cols = 20;
+    if (res < 8) res = 8;
+    if (res > 256) res = 256;
+    s_bezier_resolution = res;
+
+    if (s_bezier_mesh) {
+        ts_bezier_mesh_free(s_bezier_mesh);
+        free(s_bezier_mesh);
+    }
+    s_bezier_mesh = (ts_bezier_mesh *)malloc(sizeof(ts_bezier_mesh));
+    *s_bezier_mesh = ts_bezier_mesh_new(rows, cols);
+
+    double R = (double)major_r;
+    double r_val = (double)minor_r;
+
+    /* Place CPs on the torus surface: (R + r*cos(phi)) * cos(theta), etc. */
+    for (int cr = 0; cr < s_bezier_mesh->cp_rows; cr++) {
+        double phi = 2.0 * M_PI * (double)cr / (double)(s_bezier_mesh->cp_rows - 1);
+        for (int cc = 0; cc < s_bezier_mesh->cp_cols; cc++) {
+            double theta = 2.0 * M_PI * (double)cc / (double)(s_bezier_mesh->cp_cols - 1);
+            double x = (R + r_val * cos(phi)) * cos(theta);
+            double y = (R + r_val * cos(phi)) * sin(theta);
+            double z = r_val * sin(phi);
+            ts_bezier_mesh_set_cp(s_bezier_mesh, cr, cc, ts_vec3_make(x, y, z));
+        }
+    }
+
+    s_selected_loop_type = -1;
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_clear_objects(vp);
+        dc_gl_viewport_clear_mesh(vp);
+    }
+    bezier_mesh_refresh();
+
+    char *resp = malloc(256);
+    snprintf(resp, 256,
+             "{\"ok\":true,\"shape\":\"torus\",\"major_r\":%.2f,\"minor_r\":%.2f,"
+             "\"rows\":%d,\"cols\":%d,\"resolution\":%d}\n",
+             major_r, minor_r, rows, cols, res);
+    return resp;
+}
+
+/* bezier_mesh_set_cp <r> <c> <x> <y> <z> */
+static char *cmd_bezier_mesh_set_cp(const char *args) {
+    if (!s_bezier_mesh) return strdup("{\"error\":\"no bezier mesh\"}\n");
+    int r = 0, c = 0;
+    float x = 0, y = 0, z = 0;
+    if (!args || sscanf(args, "%d %d %f %f %f", &r, &c, &x, &y, &z) < 5)
+        return strdup("{\"error\":\"usage: bezier_mesh_set_cp <r> <c> <x> <y> <z>\"}\n");
+    if (r < 0 || r >= s_bezier_mesh->cp_rows || c < 0 || c >= s_bezier_mesh->cp_cols)
+        return strdup("{\"error\":\"CP index out of range\"}\n");
+
+    ts_bezier_mesh_set_cp(s_bezier_mesh, r, c,
+                           ts_vec3_make((double)x, (double)y, (double)z));
+    bezier_mesh_refresh();
+
+    char *resp = malloc(128);
+    snprintf(resp, 128, "{\"ok\":true,\"cp\":[%d,%d],\"pos\":[%.4f,%.4f,%.4f]}\n",
+             r, c, x, y, z);
+    return resp;
+}
+
+/* bezier_mesh_state — JSON state dump */
+static char *cmd_bezier_mesh_state(void) {
+    if (!s_bezier_mesh) return strdup("{\"mesh\":null}\n");
+
+    ts_vec3 bmin, bmax;
+    ts_bezier_mesh_bbox(s_bezier_mesh, &bmin, &bmax);
+
+    const char *mode_str = "none";
+    switch (s_bezier_view) {
+        case DC_BEZIER_VIEW_WIREFRAME: mode_str = "wireframe"; break;
+        case DC_BEZIER_VIEW_VOXEL:     mode_str = "voxel"; break;
+        case DC_BEZIER_VIEW_BOTH:      mode_str = "both"; break;
+        default: break;
+    }
+
+    char *resp = malloc(512);
+    snprintf(resp, 512,
+             "{\"rows\":%d,\"cols\":%d,\"cp_rows\":%d,\"cp_cols\":%d,"
+             "\"bbox\":[[%.4f,%.4f,%.4f],[%.4f,%.4f,%.4f]],"
+             "\"mode\":\"%s\",\"resolution\":%d,"
+             "\"selected_loop\":{\"type\":%d,\"index\":%d}}\n",
+             s_bezier_mesh->rows, s_bezier_mesh->cols,
+             s_bezier_mesh->cp_rows, s_bezier_mesh->cp_cols,
+             bmin.v[0], bmin.v[1], bmin.v[2],
+             bmax.v[0], bmax.v[1], bmax.v[2],
+             mode_str, s_bezier_resolution,
+             s_selected_loop_type, s_selected_loop_index);
+    return resp;
+}
+
+/* bezier_mesh_view wireframe|voxel|both|none */
+static char *cmd_bezier_mesh_view(const char *args) {
+    if (!args || !*args)
+        return strdup("{\"error\":\"usage: bezier_mesh_view wireframe|voxel|both|none\"}\n");
+
+    if (strcmp(args, "wireframe") == 0)     s_bezier_view = DC_BEZIER_VIEW_WIREFRAME;
+    else if (strcmp(args, "voxel") == 0)    s_bezier_view = DC_BEZIER_VIEW_VOXEL;
+    else if (strcmp(args, "both") == 0)     s_bezier_view = DC_BEZIER_VIEW_BOTH;
+    else if (strcmp(args, "none") == 0)     s_bezier_view = DC_BEZIER_VIEW_NONE;
+    else return strdup("{\"error\":\"unknown mode\"}\n");
+
+    bezier_mesh_refresh();
+
+    char *resp = malloc(128);
+    snprintf(resp, 128, "{\"ok\":true,\"mode\":\"%s\"}\n", args);
+    return resp;
+}
+
+/* bezier_mesh_resolution <n> */
+static char *cmd_bezier_mesh_resolution(const char *args) {
+    int n = 64;
+    if (args && *args) sscanf(args, "%d", &n);
+    if (n < 8) n = 8;
+    if (n > 256) n = 256;
+    s_bezier_resolution = n;
+
+    if (s_bezier_mesh) bezier_mesh_refresh();
+
+    char *resp = malloc(128);
+    snprintf(resp, 128, "{\"ok\":true,\"resolution\":%d}\n", n);
+    return resp;
+}
+
+/* bezier_mesh_clear */
+static char *cmd_bezier_mesh_clear(void) {
+    if (s_bezier_mesh) {
+        ts_bezier_mesh_free(s_bezier_mesh);
+        free(s_bezier_mesh);
+        s_bezier_mesh = NULL;
+    }
+    s_selected_loop_type = -1;
+
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_set_bezier_mesh(vp, NULL);
+        dc_gl_viewport_set_bezier_loop(vp, -1, 0);
+    }
+
+    return strdup("{\"ok\":true}\n");
+}
+
+/* bezier_mesh_cp_list — JSON array of all CPs */
+static char *cmd_bezier_mesh_cp_list(void) {
+    if (!s_bezier_mesh) return strdup("{\"error\":\"no bezier mesh\"}\n");
+
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_append(sb, "{\"cps\":[");
+
+    int total = s_bezier_mesh->cp_rows * s_bezier_mesh->cp_cols;
+    for (int i = 0; i < total; i++) {
+        int r = i / s_bezier_mesh->cp_cols;
+        int c = i % s_bezier_mesh->cp_cols;
+        ts_vec3 cp = ts_bezier_mesh_get_cp(s_bezier_mesh, r, c);
+        if (i > 0) dc_sb_append(sb, ",");
+        char buf[128];
+        snprintf(buf, sizeof(buf), "[%d,%d,%.6f,%.6f,%.6f]",
+                 r, c, cp.v[0], cp.v[1], cp.v[2]);
+        dc_sb_append(sb, buf);
+    }
+    dc_sb_append(sb, "]}\n");
+
+    char *result = strdup(dc_sb_get(sb));
+    dc_sb_free(sb);
+    return result;
+}
+
+/* --- Loop selection commands (Phase 3) --- */
+
+/* bezier_mesh_loops — list all available loops */
+static char *cmd_bezier_mesh_loops(void) {
+    if (!s_bezier_mesh) return strdup("{\"error\":\"no bezier mesh\"}\n");
+
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_append(sb, "{\"loops\":[");
+
+    int idx = 0;
+    /* Row loops: rows+1 boundaries */
+    for (int r = 0; r <= s_bezier_mesh->rows; r++) {
+        if (idx > 0) dc_sb_append(sb, ",");
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "{\"type\":\"row\",\"index\":%d,\"cp_count\":%d}",
+                 r, s_bezier_mesh->cp_cols);
+        dc_sb_append(sb, buf);
+        idx++;
+    }
+    /* Col loops: cols+1 boundaries */
+    for (int c = 0; c <= s_bezier_mesh->cols; c++) {
+        if (idx > 0) dc_sb_append(sb, ",");
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "{\"type\":\"col\",\"index\":%d,\"cp_count\":%d}",
+                 c, s_bezier_mesh->cp_rows);
+        dc_sb_append(sb, buf);
+        idx++;
+    }
+
+    dc_sb_append(sb, "]}\n");
+    char *result = strdup(dc_sb_get(sb));
+    dc_sb_free(sb);
+    return result;
+}
+
+/* bezier_mesh_select_loop <row|col> <index> */
+static char *cmd_bezier_mesh_select_loop(const char *args) {
+    if (!s_bezier_mesh) return strdup("{\"error\":\"no bezier mesh\"}\n");
+    if (!args || !*args)
+        return strdup("{\"error\":\"usage: bezier_mesh_select_loop <row|col> <index>\"}\n");
+
+    char type_str[16];
+    int index = 0;
+    if (sscanf(args, "%15s %d", type_str, &index) < 2)
+        return strdup("{\"error\":\"usage: bezier_mesh_select_loop <row|col> <index>\"}\n");
+
+    int type;
+    if (strcmp(type_str, "row") == 0) {
+        type = 0;
+        if (index < 0 || index > s_bezier_mesh->rows)
+            return strdup("{\"error\":\"row index out of range\"}\n");
+    } else if (strcmp(type_str, "col") == 0) {
+        type = 1;
+        if (index < 0 || index > s_bezier_mesh->cols)
+            return strdup("{\"error\":\"col index out of range\"}\n");
+    } else {
+        return strdup("{\"error\":\"type must be 'row' or 'col'\"}\n");
+    }
+
+    s_selected_loop_type = type;
+    s_selected_loop_index = index;
+
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_set_bezier_loop(vp, type, index);
+    }
+
+    char *resp = malloc(128);
+    snprintf(resp, 128, "{\"ok\":true,\"type\":\"%s\",\"index\":%d}\n",
+             type_str, index);
+    return resp;
+}
+
+/* bezier_mesh_loop_cps — JSON of selected loop's control points */
+static char *cmd_bezier_mesh_loop_cps(void) {
+    if (!s_bezier_mesh) return strdup("{\"error\":\"no bezier mesh\"}\n");
+    if (s_selected_loop_type < 0) return strdup("{\"error\":\"no loop selected\"}\n");
+
+    DC_StringBuilder *sb = dc_sb_new();
+    dc_sb_append(sb, "{\"loop\":{\"type\":");
+    dc_sb_append(sb, s_selected_loop_type == 0 ? "\"row\"" : "\"col\"");
+
+    char ibuf[32];
+    snprintf(ibuf, sizeof(ibuf), ",\"index\":%d", s_selected_loop_index);
+    dc_sb_append(sb, ibuf);
+    dc_sb_append(sb, ",\"cps\":[");
+
+    int cp_idx = 2 * s_selected_loop_index;
+    int count;
+
+    if (s_selected_loop_type == 0) {
+        /* Row loop: all columns at this CP row */
+        count = s_bezier_mesh->cp_cols;
+        for (int c = 0; c < count; c++) {
+            ts_vec3 cp = ts_bezier_mesh_get_cp(s_bezier_mesh, cp_idx, c);
+            if (c > 0) dc_sb_append(sb, ",");
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[%.6f,%.6f,%.6f]",
+                     cp.v[0], cp.v[1], cp.v[2]);
+            dc_sb_append(sb, buf);
+        }
+    } else {
+        /* Col loop: all rows at this CP column */
+        count = s_bezier_mesh->cp_rows;
+        for (int r = 0; r < count; r++) {
+            ts_vec3 cp = ts_bezier_mesh_get_cp(s_bezier_mesh, r, cp_idx);
+            if (r > 0) dc_sb_append(sb, ",");
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[%.6f,%.6f,%.6f]",
+                     cp.v[0], cp.v[1], cp.v[2]);
+            dc_sb_append(sb, buf);
+        }
+    }
+
+    dc_sb_append(sb, "]}}\n");
+    char *result = strdup(dc_sb_get(sb));
+    dc_sb_free(sb);
+    return result;
+}
+
+/* =========================================================================
+ * BEZIER MESH LOOP EDITING — 2D editor integration
+ * ========================================================================= */
+
+/* State for loop editing: stores the 3D plane frame for reverse mapping */
+static struct {
+    int    active;
+    int    loop_type;      /* 0=row, 1=col */
+    int    loop_index;
+    double origin[3];       /* plane origin (centroid) */
+    double u_axis[3];       /* plane U axis */
+    double v_axis[3];       /* plane V axis */
+    double normal[3];       /* plane normal */
+    int   *cp_indices;      /* pairs of (cp_row, cp_col) for each point */
+    int    cp_count;
+} s_loop_edit = {0};
+
+static void loop_edit_clear(void) {
+    free(s_loop_edit.cp_indices);
+    memset(&s_loop_edit, 0, sizeof(s_loop_edit));
+}
+
+/* PCA best-fit plane for a set of 3D points */
+static void fit_plane_pca(const double *pts, int n,
+                           double *origin, double *u_axis,
+                           double *v_axis, double *normal) {
+    /* Compute centroid */
+    double cx = 0, cy = 0, cz = 0;
+    for (int i = 0; i < n; i++) {
+        cx += pts[i*3]; cy += pts[i*3+1]; cz += pts[i*3+2];
+    }
+    cx /= n; cy /= n; cz /= n;
+    origin[0] = cx; origin[1] = cy; origin[2] = cz;
+
+    /* Compute covariance matrix (symmetric 3x3) */
+    double cov[9] = {0};
+    for (int i = 0; i < n; i++) {
+        double dx = pts[i*3] - cx;
+        double dy = pts[i*3+1] - cy;
+        double dz = pts[i*3+2] - cz;
+        cov[0] += dx*dx; cov[1] += dx*dy; cov[2] += dx*dz;
+        cov[3] += dy*dx; cov[4] += dy*dy; cov[5] += dy*dz;
+        cov[6] += dz*dx; cov[7] += dz*dy; cov[8] += dz*dz;
+    }
+
+    /* Power iteration to find the normal (smallest eigenvector).
+     * We find the two largest eigenvectors first (those span the plane). */
+    /* Iterative approach: find dominant eigenvector, deflate, repeat */
+    double v1[3] = {1, 0, 0}, v2[3] = {0, 1, 0};
+
+    /* Find largest eigenvector */
+    for (int iter = 0; iter < 50; iter++) {
+        double nv[3] = {
+            cov[0]*v1[0] + cov[1]*v1[1] + cov[2]*v1[2],
+            cov[3]*v1[0] + cov[4]*v1[1] + cov[5]*v1[2],
+            cov[6]*v1[0] + cov[7]*v1[1] + cov[8]*v1[2]
+        };
+        double len = sqrt(nv[0]*nv[0] + nv[1]*nv[1] + nv[2]*nv[2]);
+        if (len > 1e-12) { v1[0]=nv[0]/len; v1[1]=nv[1]/len; v1[2]=nv[2]/len; }
+    }
+
+    /* Deflate: cov2 = cov - lambda1 * v1 * v1^T */
+    double lambda1 = cov[0]*v1[0]*v1[0] + cov[4]*v1[1]*v1[1] + cov[8]*v1[2]*v1[2]
+                   + 2*(cov[1]*v1[0]*v1[1] + cov[2]*v1[0]*v1[2] + cov[5]*v1[1]*v1[2]);
+    double cov2[9];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            cov2[i*3+j] = cov[i*3+j] - lambda1 * v1[i] * v1[j];
+
+    /* Find second largest eigenvector of deflated matrix */
+    /* Initialize v2 orthogonal to v1 */
+    if (fabs(v1[0]) < 0.9) {
+        v2[0] = 0; v2[1] = -v1[2]; v2[2] = v1[1];
+    } else {
+        v2[0] = -v1[2]; v2[1] = 0; v2[2] = v1[0];
+    }
+    double d = v2[0]*v1[0] + v2[1]*v1[1] + v2[2]*v1[2];
+    v2[0] -= d*v1[0]; v2[1] -= d*v1[1]; v2[2] -= d*v1[2];
+    double len2 = sqrt(v2[0]*v2[0] + v2[1]*v2[1] + v2[2]*v2[2]);
+    if (len2 > 1e-12) { v2[0]/=len2; v2[1]/=len2; v2[2]/=len2; }
+
+    for (int iter = 0; iter < 50; iter++) {
+        double nv[3] = {
+            cov2[0]*v2[0] + cov2[1]*v2[1] + cov2[2]*v2[2],
+            cov2[3]*v2[0] + cov2[4]*v2[1] + cov2[5]*v2[2],
+            cov2[6]*v2[0] + cov2[7]*v2[1] + cov2[8]*v2[2]
+        };
+        /* Re-orthogonalize against v1 */
+        double dot = nv[0]*v1[0] + nv[1]*v1[1] + nv[2]*v1[2];
+        nv[0] -= dot*v1[0]; nv[1] -= dot*v1[1]; nv[2] -= dot*v1[2];
+        double len = sqrt(nv[0]*nv[0] + nv[1]*nv[1] + nv[2]*nv[2]);
+        if (len > 1e-12) { v2[0]=nv[0]/len; v2[1]=nv[1]/len; v2[2]=nv[2]/len; }
+    }
+
+    /* Normal = v1 x v2 */
+    u_axis[0] = v1[0]; u_axis[1] = v1[1]; u_axis[2] = v1[2];
+    v_axis[0] = v2[0]; v_axis[1] = v2[1]; v_axis[2] = v2[2];
+    normal[0] = v1[1]*v2[2] - v1[2]*v2[1];
+    normal[1] = v1[2]*v2[0] - v1[0]*v2[2];
+    normal[2] = v1[0]*v2[1] - v1[1]*v2[0];
+}
+
+/* bezier_mesh_edit_loop — open selected loop in 2D editor with live sync */
+static char *cmd_bezier_mesh_edit_loop(void) {
+    if (!s_bezier_mesh) return strdup("{\"error\":\"no bezier mesh\"}\n");
+    if (s_selected_loop_type < 0) return strdup("{\"error\":\"no loop selected\"}\n");
+
+    DC_BezierEditor *editor = get_editor();
+    if (!editor) return strdup("{\"error\":\"no bezier editor\"}\n");
+
+    loop_edit_clear();
+
+    int cp_row_idx = 2 * s_selected_loop_index;
+    int n_pts;
+    double *pts3d;  /* [x,y,z] x n_pts */
+
+    if (s_selected_loop_type == 0) {
+        /* Row loop — all CPs along this row */
+        n_pts = s_bezier_mesh->cp_cols;
+        pts3d = (double *)malloc((size_t)n_pts * 3 * sizeof(double));
+        s_loop_edit.cp_indices = (int *)malloc((size_t)n_pts * 2 * sizeof(int));
+        for (int c = 0; c < n_pts; c++) {
+            ts_vec3 cp = ts_bezier_mesh_get_cp(s_bezier_mesh, cp_row_idx, c);
+            pts3d[c*3]   = cp.v[0];
+            pts3d[c*3+1] = cp.v[1];
+            pts3d[c*3+2] = cp.v[2];
+            s_loop_edit.cp_indices[c*2]   = cp_row_idx;
+            s_loop_edit.cp_indices[c*2+1] = c;
+        }
+    } else {
+        /* Col loop — all CPs along this column */
+        n_pts = s_bezier_mesh->cp_rows;
+        pts3d = (double *)malloc((size_t)n_pts * 3 * sizeof(double));
+        s_loop_edit.cp_indices = (int *)malloc((size_t)n_pts * 2 * sizeof(int));
+        for (int r = 0; r < n_pts; r++) {
+            ts_vec3 cp = ts_bezier_mesh_get_cp(s_bezier_mesh, r, cp_row_idx);
+            pts3d[r*3]   = cp.v[0];
+            pts3d[r*3+1] = cp.v[1];
+            pts3d[r*3+2] = cp.v[2];
+            s_loop_edit.cp_indices[r*2]   = r;
+            s_loop_edit.cp_indices[r*2+1] = cp_row_idx;
+        }
+    }
+
+    s_loop_edit.cp_count = n_pts;
+    s_loop_edit.loop_type = s_selected_loop_type;
+    s_loop_edit.loop_index = s_selected_loop_index;
+
+    /* Fit best plane via PCA */
+    fit_plane_pca(pts3d, n_pts,
+                   s_loop_edit.origin,
+                   s_loop_edit.u_axis,
+                   s_loop_edit.v_axis,
+                   s_loop_edit.normal);
+
+    /* Project 3D CPs to 2D on the plane.
+     * The CPs form quadratic bezier segments: for n_pts CPs,
+     * there are (n_pts-1)/2 quadratic segments if n_pts is odd,
+     * or we treat them as a polyline of quadratic curves.
+     * The 2D editor expects points as [x,y] pairs with alternating
+     * on-curve (even) and off-curve (odd) points. */
+    double *pts2d = (double *)malloc((size_t)n_pts * 2 * sizeof(double));
+    for (int i = 0; i < n_pts; i++) {
+        double dx = pts3d[i*3]   - s_loop_edit.origin[0];
+        double dy = pts3d[i*3+1] - s_loop_edit.origin[1];
+        double dz = pts3d[i*3+2] - s_loop_edit.origin[2];
+        pts2d[i*2]   = dx * s_loop_edit.u_axis[0]
+                      + dy * s_loop_edit.u_axis[1]
+                      + dz * s_loop_edit.u_axis[2];
+        pts2d[i*2+1] = dx * s_loop_edit.v_axis[0]
+                      + dy * s_loop_edit.v_axis[1]
+                      + dz * s_loop_edit.v_axis[2];
+    }
+
+    /* Load into 2D editor as an open profile.
+     * The existing load_profile expects alternating on-curve/off-curve points,
+     * which matches our quadratic CP grid (even = on-curve, odd = off-curve). */
+    DC_ProfileMeta meta = {0};
+    meta.active = 1;
+    dc_bezier_editor_load_profile(editor, pts2d, n_pts, 0, &meta);
+
+    s_loop_edit.active = 1;
+
+    free(pts3d);
+    free(pts2d);
+
+    char *resp = malloc(256);
+    snprintf(resp, 256,
+             "{\"ok\":true,\"loop_type\":%d,\"loop_index\":%d,\"cp_count\":%d}\n",
+             s_loop_edit.loop_type, s_loop_edit.loop_index, n_pts);
+    return resp;
+}
+
+/* bezier_mesh_apply_loop — write 2D editor points back to 3D mesh */
+static char *cmd_bezier_mesh_apply_loop(void) {
+    if (!s_loop_edit.active)
+        return strdup("{\"error\":\"no loop edit active\"}\n");
+    if (!s_bezier_mesh)
+        return strdup("{\"error\":\"no bezier mesh\"}\n");
+
+    DC_BezierEditor *editor = get_editor();
+    if (!editor) return strdup("{\"error\":\"no bezier editor\"}\n");
+
+    int n = dc_bezier_editor_point_count(editor);
+    if (n != s_loop_edit.cp_count)
+        return strdup("{\"error\":\"point count mismatch\"}\n");
+
+    /* Read 2D points and un-project to 3D */
+    for (int i = 0; i < n; i++) {
+        double u2d, v2d;
+        dc_bezier_editor_get_point(editor, i, &u2d, &v2d);
+
+        /* 3D = origin + u2d * u_axis + v2d * v_axis */
+        double x = s_loop_edit.origin[0]
+                 + u2d * s_loop_edit.u_axis[0]
+                 + v2d * s_loop_edit.v_axis[0];
+        double y = s_loop_edit.origin[1]
+                 + u2d * s_loop_edit.u_axis[1]
+                 + v2d * s_loop_edit.v_axis[1];
+        double z = s_loop_edit.origin[2]
+                 + u2d * s_loop_edit.u_axis[2]
+                 + v2d * s_loop_edit.v_axis[2];
+
+        int cp_r = s_loop_edit.cp_indices[i*2];
+        int cp_c = s_loop_edit.cp_indices[i*2+1];
+        ts_bezier_mesh_set_cp(s_bezier_mesh, cp_r, cp_c,
+                               ts_vec3_make(x, y, z));
+    }
+
+    bezier_mesh_refresh();
+
+    return strdup("{\"ok\":true,\"applied\":true}\n");
+}
+
+/* bezier_mesh_cancel_loop — cancel loop editing */
+static char *cmd_bezier_mesh_cancel_loop(void) {
+    loop_edit_clear();
+
+    DC_BezierEditor *editor = get_editor();
+    if (editor) dc_bezier_editor_clear_profile(editor);
+
+    return strdup("{\"ok\":true}\n");
+}
+
+/* Apply bezier_mesh ops from Cubeiform source (called by cubeiform_exec) */
+static void apply_cubeiform_bmesh(const char *src) {
+    DC_Error err = {0};
+    DC_CubeiformEda *eda = dc_cubeiform_parse_eda(src, &err);
+    if (!eda) return;
+
+    size_t bm_count = dc_cubeiform_eda_bmesh_op_count(eda);
+    for (size_t i = 0; i < bm_count; i++) {
+        const DC_BMeshOp *bop = dc_cubeiform_eda_get_bmesh_op(eda, i);
+        if (!bop) continue;
+        switch (bop->type) {
+            case DC_BMESH_OP_SPHERE: {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "%.4f %d",
+                         bop->radius, s_bezier_resolution);
+                char *r = cmd_bezier_mesh_sphere(buf);
+                free(r);
+                break;
+            }
+            case DC_BMESH_OP_TORUS: {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "%.4f %.4f 4 8 %d",
+                         bop->radius, bop->radius2, s_bezier_resolution);
+                char *r = cmd_bezier_mesh_torus(buf);
+                free(r);
+                break;
+            }
+            case DC_BMESH_OP_GRID: {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%d %d", bop->rows, bop->cols);
+                char *r = cmd_bezier_mesh_new(buf);
+                free(r);
+                break;
+            }
+            case DC_BMESH_OP_SET_CP:
+                if (s_bezier_mesh) {
+                    ts_bezier_mesh_set_cp(s_bezier_mesh,
+                        bop->rows, bop->cols,
+                        ts_vec3_make(bop->x, bop->y, bop->z));
+                }
+                break;
+            case DC_BMESH_OP_RESOLUTION:
+                s_bezier_resolution = bop->resolution;
+                break;
+            case DC_BMESH_OP_VIEW:
+                s_bezier_view = (DC_BezierViewMode)bop->view_mode;
+                break;
+        }
+    }
+    if (bm_count > 0 && s_bezier_mesh) {
+        bezier_mesh_refresh();
+    }
+    dc_cubeiform_eda_free(eda);
+}
+
 /* voxel_sphere <cx> <cy> <cz> <radius> [resolution] [cell_size]
  * Create a sphere SDF, activate, color by normal, display in viewport. */
 static char *cmd_voxel_sphere(const char *args) {
@@ -1968,6 +2883,28 @@ dispatch(const char *cmd)
     if (strcmp(name, "eda_fp_list")        == 0) return cmd_eda_fp_list();
     if (strcmp(name, "eda_fp_lib_list")    == 0) return cmd_eda_fp_lib_list();
     if (strcmp(name, "eda_fp_lib_footprints") == 0) return cmd_eda_fp_lib_footprints(args);
+
+    /* Bezier surface (closed manifolds — no triangles) */
+    if (strcmp(name, "bezier_sphere")      == 0) return cmd_bezier_sphere(args);
+    if (strcmp(name, "bezier_torus")       == 0) return cmd_bezier_torus(args);
+    if (strcmp(name, "bezier_triclaude")   == 0) return cmd_bezier_triclaude(args);
+
+    /* Bezier patch mesh */
+    if (strcmp(name, "bezier_mesh_new")         == 0) return cmd_bezier_mesh_new(args);
+    if (strcmp(name, "bezier_mesh_sphere")      == 0) return cmd_bezier_mesh_sphere(args);
+    if (strcmp(name, "bezier_mesh_torus")       == 0) return cmd_bezier_mesh_torus(args);
+    if (strcmp(name, "bezier_mesh_set_cp")      == 0) return cmd_bezier_mesh_set_cp(args);
+    if (strcmp(name, "bezier_mesh_state")       == 0) return cmd_bezier_mesh_state();
+    if (strcmp(name, "bezier_mesh_view")        == 0) return cmd_bezier_mesh_view(args);
+    if (strcmp(name, "bezier_mesh_resolution")  == 0) return cmd_bezier_mesh_resolution(args);
+    if (strcmp(name, "bezier_mesh_clear")       == 0) return cmd_bezier_mesh_clear();
+    if (strcmp(name, "bezier_mesh_cp_list")     == 0) return cmd_bezier_mesh_cp_list();
+    if (strcmp(name, "bezier_mesh_loops")       == 0) return cmd_bezier_mesh_loops();
+    if (strcmp(name, "bezier_mesh_select_loop") == 0) return cmd_bezier_mesh_select_loop(args);
+    if (strcmp(name, "bezier_mesh_loop_cps")    == 0) return cmd_bezier_mesh_loop_cps();
+    if (strcmp(name, "bezier_mesh_edit_loop")   == 0) return cmd_bezier_mesh_edit_loop();
+    if (strcmp(name, "bezier_mesh_apply_loop")  == 0) return cmd_bezier_mesh_apply_loop();
+    if (strcmp(name, "bezier_mesh_cancel_loop") == 0) return cmd_bezier_mesh_cancel_loop();
 
     /* Voxel */
     if (strcmp(name, "voxel_sphere")       == 0) return cmd_voxel_sphere(args);
