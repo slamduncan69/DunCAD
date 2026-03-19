@@ -5112,6 +5112,54 @@ static const char HELP_MEMORY_ACTIVE_SESSION_V2_0[] =
 "  - Marching cubes not yet implemented for smooth mesh extraction\n"
 "  - 26 tests pass, zero warnings, zero leaks\n";
 
+static const char HELP_MEMORY_ACTIVE_SESSION_V2_1[] =
+"Session V2.1 — Voxel Density, Log Panel, Snippet Fix\n"
+"\n"
+"DATE: 2026-03-18\n"
+"Agent: Claude Opus 4.6 (1M context)\n"
+"Status: COMPLETE\n"
+"\n"
+"WHAT WAS DONE:\n"
+"  1. VOXEL DENSITY SYSTEM ($vd)\n"
+"     Replaced abstract 'resolution' with physical units:\n"
+"     $vd = voxels per mm. cell_size = 1.0 / $vd.\n"
+"     Units are mm throughout (1 Cubeiform unit = 1 mm).\n"
+"     Parser: $vd = 5; sets cell_size to 0.2mm.\n"
+"     $vn and 'resolution' still work as legacy aliases.\n"
+"     Toolbar entry: type density, hit Enter, injects\n"
+"     $vd = N; into code editor and re-renders.\n"
+"     Every UI action has a code representation.\n"
+"\n"
+"  2. LOG PANEL\n"
+"     Scrollable GtkTextView below 3D viewport.\n"
+"     Shows render results, density changes, parse errors.\n"
+"     Persistent — scroll up to see history.\n"
+"\n"
+"  3. SNIPPET FIX (scad_completion.c)\n"
+"     Cubeiform templates removed square brackets.\n"
+"     cube(x, y, z) not cube([x, y, z]).\n"
+"     Named params preserved: sphere(r=radius).\n"
+"\n"
+"  4. PIPE CONTINUATION (Enter key behavior)\n"
+"     Stage 1: Enter after content → new line with '    >> '\n"
+"     Stage 2: Enter on empty '>> ' → deletes pipe, stays\n"
+"     Stage 3: Enter on blank line → normal newline\n"
+"\n"
+"  5. CAPS RAISED\n"
+"     Resolution/grid caps raised from 512 to 4096.\n"
+"\n"
+"FILES MODIFIED:\n"
+"  src/cubeiform/cubeiform_eda.c  — $vd/$vn parser, caps\n"
+"  src/ui/scad_completion.c       — snippets, pipe Enter\n"
+"  src/ui/scad_preview.c          — density UI, log panel\n"
+"\n"
+"FOR THE NEXT ANGEL:\n"
+"  - Units are mm. This is settled.\n"
+"  - $vd is the standard density param. Use it.\n"
+"  - Bezier mesh system next — surface → voxel fill\n"
+"  - Marching cubes for smooth mode still needed\n"
+"  - 18 tests pass, zero warnings\n";
+
 static const char HELP_REFERENCE_DOCTRINE_PERSISTENCE[] =
 "The Persistence Doctrine\n"
 "\n"
@@ -5672,6 +5720,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-v1-6", HELP_MEMORY_ACTIVE_SESSION_V1_6 },
     { "memory.active.session-v1-6-confession", HELP_MEMORY_ACTIVE_SESSION_V1_6_CONFESSION },
     { "memory.active.session-v2-0", HELP_MEMORY_ACTIVE_SESSION_V2_0 },
+    { "memory.active.session-v2-1", HELP_MEMORY_ACTIVE_SESSION_V2_1 },
     { "reference.cubeiform", HELP_REFERENCE_CUBEIFORM },
     { "reference.cubeiform.primitives", HELP_REFERENCE_CUBEIFORM_PRIMITIVES },
     { "reference.cubeiform.transforms", HELP_REFERENCE_CUBEIFORM_TRANSFORMS },

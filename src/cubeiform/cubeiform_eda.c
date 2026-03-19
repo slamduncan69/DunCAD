@@ -166,8 +166,8 @@ static void next_token(EParser *p)
         return;
     }
 
-    /* Identifier (letters, digits, underscore, dot for layer names like F.Cu) */
-    if (isalpha((unsigned char)c) || c == '_') {
+    /* Identifier (letters, digits, underscore, $, dot for layer names like F.Cu) */
+    if (isalpha((unsigned char)c) || c == '_' || c == '$') {
         int start = p->pos;
         while (p->pos < p->len) {
             char ch = p->src[p->pos];
@@ -1372,12 +1372,25 @@ static void parse_vox_statement(EParser *p, VoxParseCtx *ctx, DC_Array *vox_ops)
 {
     if (p->cur.type == ETOK_EOF || p->has_error) return;
 
-    /* Settings */
-    if (ident_eq(&p->cur, "resolution")) {
+    /* Settings — resolution / $vn / $vd */
+    if (ident_eq(&p->cur, "resolution") || ident_eq(&p->cur, "$vn")) {
         next_token(p);
+        eat(p, ETOK_EQ);
         DC_VoxOp op = { .type = DC_VOX_OP_SET_RESOLUTION };
         op.resolution = (int)eval_arith_expr(p, ctx);
         eat(p, ETOK_SEMI);
+        dc_array_push(vox_ops, &op);
+        return;
+    }
+    if (ident_eq(&p->cur, "$vd")) {
+        /* Voxel density: voxels per mm → cell_size = 1.0 / vd */
+        next_token(p);
+        eat(p, ETOK_EQ);
+        double vd = eval_arith_expr(p, ctx);
+        if (vd < 0.1) vd = 0.1;
+        eat(p, ETOK_SEMI);
+        DC_VoxOp op = { .type = DC_VOX_OP_SET_CELL_SIZE };
+        op.cell_size = (float)(1.0 / vd);
         dc_array_push(vox_ops, &op);
         return;
     }
@@ -1443,7 +1456,8 @@ static int is_vox_statement_start(EParser *p, VoxParseCtx *ctx)
     if (p->cur.type != ETOK_IDENT) return 0;
     if (ident_eq(&p->cur, "sphere") || ident_eq(&p->cur, "cube") ||
         ident_eq(&p->cur, "cylinder") || ident_eq(&p->cur, "torus") ||
-        ident_eq(&p->cur, "resolution") || ident_eq(&p->cur, "cell_size") ||
+        ident_eq(&p->cur, "resolution") || ident_eq(&p->cur, "$vn") ||
+        ident_eq(&p->cur, "$vd") || ident_eq(&p->cur, "cell_size") ||
         ident_eq(&p->cur, "for")) return 1;
     /* Variable reference or assignment */
     VoxVarDef *v = vox_ctx_find(ctx, p->cur.start, p->cur.len);
@@ -2018,7 +2032,7 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
     #undef EXPAND_BBOX_TRANSFORMED
 
     if (resolution < 8) resolution = 8;
-    if (resolution > 512) resolution = 512;
+    if (resolution > 4096) resolution = 4096;
 
     /* Add padding around bounding box */
     float extent[3] = { bmax[0]-bmin[0], bmax[1]-bmin[1], bmax[2]-bmin[2] };
@@ -2051,9 +2065,9 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
     int sx = (int)ceilf(extent[0] / cell_size) + 1;
     int sy = (int)ceilf(extent[1] / cell_size) + 1;
     int sz = (int)ceilf(extent[2] / cell_size) + 1;
-    if (sx > 512) sx = 512;
-    if (sy > 512) sy = 512;
-    if (sz > 512) sz = 512;
+    if (sx > 4096) sx = 4096;
+    if (sy > 4096) sy = 4096;
+    if (sz > 4096) sz = 4096;
 
     DC_VoxelGrid *grid = dc_voxel_grid_new(sx, sy, sz, cell_size);
     if (!grid) {

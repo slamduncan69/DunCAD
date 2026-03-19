@@ -70,7 +70,7 @@ static const DC_Snippet SNIPPET_DB[] = {
     /* 3D Primitives */
     { "cube",
       "cube([${1:x}, ${2:y}, ${3:z}]);",
-      "cube([${1:x}, ${2:y}, ${3:z}])",
+      "cube(${1:x}, ${2:y}, ${3:z})",
       cube_opts },
     { "sphere",
       "sphere(r=${1:radius});",
@@ -92,7 +92,7 @@ static const DC_Snippet SNIPPET_DB[] = {
       circle_opts },
     { "square",
       "square([${1:x}, ${2:y}]);",
-      "square([${1:x}, ${2:y}])",
+      "square(${1:x}, ${2:y})",
       square_opts },
     { "polygon",
       "polygon(points=${1:[[x,y], ...]});",
@@ -890,34 +890,13 @@ hide_opt_popover(DC_ScadCompletion *comp)
  * Cubeiform pipe continuation helpers
  * ========================================================================= */
 
-/* Check if the current line (up to cursor) ends with ';' (ignoring whitespace) */
-static int
-line_has_semicolon(DC_ScadCompletion *comp)
-{
-    GtkTextBuffer *buf = GTK_TEXT_BUFFER(comp->buffer);
-    GtkTextIter cursor, line_start;
-    GtkTextMark *m = gtk_text_buffer_get_insert(buf);
-    gtk_text_buffer_get_iter_at_mark(buf, &cursor, m);
-
-    line_start = cursor;
-    gtk_text_iter_set_line_offset(&line_start, 0);
-
-    char *line = gtk_text_iter_get_text(&line_start, &cursor);
-    if (!line) return 0;
-
-    /* Check if there's a semicolon anywhere on the line up to cursor */
-    int found = (strchr(line, ';') != NULL);
-    g_free(line);
-    return found;
-}
-
 /* Insert newline + indent + ">>" for pipe continuation */
 static void
 insert_pipe_continuation(DC_ScadCompletion *comp)
 {
     GtkTextBuffer *buf = GTK_TEXT_BUFFER(comp->buffer);
     gtk_text_buffer_begin_user_action(buf);
-    gtk_text_buffer_insert_at_cursor(buf, "\n    >>", -1);
+    gtk_text_buffer_insert_at_cursor(buf, "\n    >> ", -1);
     gtk_text_buffer_end_user_action(buf);
 }
 
@@ -1069,23 +1048,66 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
 
     /* ---- Cubeiform pipe continuation (outside all modes) ---- */
     if (comp->lang_mode == DC_LANG_CUBEIFORM) {
-        int ctrl = (mods & GDK_CONTROL_MASK) != 0;
+        int ctrl_key = (mods & GDK_CONTROL_MASK) != 0;
 
         /* Ctrl+Tab: insert pipe continuation line */
-        if (keyval == GDK_KEY_Tab && ctrl) {
+        if (keyval == GDK_KEY_Tab && ctrl_key) {
             insert_pipe_continuation(comp);
             return TRUE;
         }
 
-        /* Enter: check if line has semicolon */
-        if (keyval == GDK_KEY_Return && !shift && !ctrl) {
-            if (!line_has_semicolon(comp)) {
-                /* No semicolon — pipe continuation */
+        /* Enter: three-stage behavior
+         *   1. Line has content (no semicolon) → insert pipe continuation
+         *   2. Line is just "    >>" (empty pipe) → delete it, leave blank line
+         *   3. Line is empty/whitespace → normal unindented newline */
+        if (keyval == GDK_KEY_Return && !shift && !ctrl_key) {
+            GtkTextBuffer *buf = GTK_TEXT_BUFFER(comp->buffer);
+            GtkTextIter cursor, line_start;
+            GtkTextMark *m = gtk_text_buffer_get_insert(buf);
+            gtk_text_buffer_get_iter_at_mark(buf, &cursor, m);
+            line_start = cursor;
+            gtk_text_iter_set_line_offset(&line_start, 0);
+            char *line = gtk_text_iter_get_text(&line_start, &cursor);
+
+            if (line) {
+                /* Check what's on this line */
+                char *stripped = line;
+                while (*stripped == ' ' || *stripped == '\t') stripped++;
+
+                /* Check for empty pipe: just ">>" with optional trailing spaces */
+                const char *p = stripped;
+                int is_empty_pipe = (p[0] == '>' && p[1] == '>');
+                if (is_empty_pipe) {
+                    p += 2;
+                    while (*p == ' ') p++;
+                    is_empty_pipe = (*p == '\0');
+                }
+                if (is_empty_pipe) {
+                    /* Stage 2: empty pipe line "    >>" → delete it, leave cursor on blank line */
+                    gtk_text_buffer_begin_user_action(buf);
+                    gtk_text_buffer_delete(buf, &line_start, &cursor);
+                    gtk_text_buffer_end_user_action(buf);
+                    g_free(line);
+                    return TRUE;
+                }
+
+                if (*stripped == '\0') {
+                    /* Stage 3: empty/whitespace line → normal newline (let GTK handle) */
+                    g_free(line);
+                    return FALSE;
+                }
+
+                if (strchr(line, ';') != NULL) {
+                    /* Has semicolon — normal newline */
+                    g_free(line);
+                    return FALSE;
+                }
+
+                /* Stage 1: line has content, no semicolon → pipe continuation */
+                g_free(line);
                 insert_pipe_continuation(comp);
                 return TRUE;
             }
-            /* Has semicolon — normal newline, let GTK handle it */
-            return FALSE;
         }
     }
 

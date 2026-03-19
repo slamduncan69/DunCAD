@@ -34,7 +34,9 @@ struct DC_ScadPreview {
     GtkWidget      *grid_btn;
     GtkWidget      *axes_btn;
     GtkWidget      *blocky_btn;
-    GtkWidget      *res_dropdown;
+    GtkWidget      *density_combo;  /* editable combo: voxels per mm */
+    GtkWidget      *log_view;       /* GtkTextView for log panel */
+    GtkTextBuffer  *log_buffer;     /* log text buffer */
     DC_CodeEditor  *code_ed;        /* borrowed */
     int             rendering;
     guint           progress_id;    /* timer source for progress polling */
@@ -353,6 +355,7 @@ render_thread_func(GTask *task, gpointer source_obj,
 /* Forward declarations */
 static void launch_hq_render(DC_ScadPreview *pv, const char *source);
 static void do_render(DC_ScadPreview *pv);
+static void log_append(DC_ScadPreview *pv, const char *msg);
 
 /* Main thread callback for BOTH preview and HQ results */
 static void
@@ -555,16 +558,20 @@ do_render(DC_ScadPreview *pv)
         /* SDF RENDERING — the only path */
         gtk_label_set_text(GTK_LABEL(pv->status_label), "Rendering SDF...");
 
-        /* Prepend resolution from UI dropdown */
-        int ui_res = pv->voxel_resolution > 0 ? pv->voxel_resolution : 64;
-        size_t tlen = strlen(text);
-        char *full_src = malloc(tlen + 32);
-        if (full_src) {
-            int hlen = snprintf(full_src, 32, "resolution %d;\n", ui_res);
-            memcpy(full_src + hlen, text, tlen + 1);
-            free(text);
-        } else {
-            full_src = text;
+        /* If source already has $vd, use it as-is.
+         * Otherwise prepend the UI density setting. */
+        char *full_src = text;
+        if (!strstr(text, "$vd")) {
+            int ui_vd = pv->voxel_resolution > 0 ? pv->voxel_resolution : 3;
+            size_t tlen = strlen(text);
+            full_src = malloc(tlen + 32);
+            if (full_src) {
+                int hlen = snprintf(full_src, 32, "$vd = %d;\n", ui_vd);
+                memcpy(full_src + hlen, text, tlen + 1);
+                free(text);
+            } else {
+                full_src = text;
+            }
         }
 
         DC_Error err = {0};
@@ -580,7 +587,9 @@ do_render(DC_ScadPreview *pv)
             dc_gl_viewport_set_voxel_grid(pv->viewport, grid);
 
             size_t active = dc_voxel_grid_active_count(grid);
-            int res = dc_voxel_grid_size_x(grid);
+            int gx = dc_voxel_grid_size_x(grid);
+            int gy = dc_voxel_grid_size_y(grid);
+            int gz = dc_voxel_grid_size_z(grid);
 
             /* Fit camera */
             if (!pv->camera_fitted) {
@@ -600,14 +609,20 @@ do_render(DC_ScadPreview *pv)
             char status[192];
             snprintf(status, sizeof(status),
                      "Rendered: %zu active (%dx%dx%d)",
-                     active, res, res, res);
+                     active, gx, gy, gz);
             gtk_label_set_text(GTK_LABEL(pv->status_label), status);
+            log_append(pv, status);
 
             dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-                   "SDF RENDER: %zu active, resolution %d", active, res);
+                   "SDF RENDER: %zu active, grid %dx%dx%d", active, gx, gy, gz);
         } else {
-            gtk_label_set_text(GTK_LABEL(pv->status_label),
-                               "No renderable geometry (use sphere/box/cylinder/torus)");
+            const char *msg = err.message[0]
+                ? err.message
+                : "No renderable geometry";
+            gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
+            char log_msg[1024];
+            snprintf(log_msg, sizeof(log_msg), "Error: %s", msg);
+            log_append(pv, log_msg);
         }
     }
 }
@@ -640,6 +655,63 @@ static void on_grid_clicked(GtkButton *b, gpointer d)
 static void on_axes_clicked(GtkButton *b, gpointer d)
 { (void)b; dc_gl_viewport_toggle_axes(((DC_ScadPreview*)d)->viewport); }
 
+/* ---- Log panel helper ---- */
+static void
+log_append(DC_ScadPreview *pv, const char *msg)
+{
+    if (!pv->log_buffer) return;
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(pv->log_buffer, &end);
+    gtk_text_buffer_insert(pv->log_buffer, &end, msg, -1);
+    gtk_text_buffer_insert(pv->log_buffer, &end, "\n", 1);
+    /* Auto-scroll to bottom */
+    gtk_text_buffer_get_end_iter(pv->log_buffer, &end);
+    GtkTextMark *mark = gtk_text_buffer_get_mark(pv->log_buffer, "end");
+    if (!mark)
+        mark = gtk_text_buffer_create_mark(pv->log_buffer, "end", &end, FALSE);
+    else
+        gtk_text_buffer_move_mark(pv->log_buffer, mark, &end);
+    gtk_text_view_scroll_mark_onscreen(GTK_TEXT_VIEW(pv->log_view), mark);
+}
+
+/* ---- Inject $vd = N; at top of code editor ---- */
+static void
+inject_vd_param(DC_ScadPreview *pv, int vd)
+{
+    if (!pv->code_ed) return;
+    char *text = dc_code_editor_get_text(pv->code_ed);
+    if (!text) return;
+
+    /* Remove existing $vd line if present */
+    char *clean = text;
+    char *vd_line = strstr(text, "$vd");
+    if (vd_line) {
+        /* Find start of line */
+        char *ls = vd_line;
+        while (ls > text && *(ls-1) != '\n') ls--;
+        /* Find end of line */
+        char *le = strchr(vd_line, '\n');
+        if (!le) le = vd_line + strlen(vd_line);
+        else le++; /* include newline */
+        /* Build new text without the $vd line */
+        size_t before = (size_t)(ls - text);
+        size_t after = strlen(le);
+        clean = malloc(before + after + 1);
+        memcpy(clean, text, before);
+        memcpy(clean + before, le, after + 1);
+        free(text);
+    }
+
+    /* Prepend $vd = N; */
+    size_t clen = strlen(clean);
+    char *full = malloc(clen + 32);
+    int hlen = snprintf(full, 32, "$vd = %d;\n", vd);
+    memcpy(full + hlen, clean, clen + 1);
+    dc_code_editor_set_text(pv->code_ed, full);
+    free(full);
+    if (clean != text) free(clean);
+}
+
 static void on_blocky_clicked(GtkButton *b, gpointer d)
 {
     (void)b;
@@ -650,18 +722,26 @@ static void on_blocky_clicked(GtkButton *b, gpointer d)
     gtk_button_set_label(GTK_BUTTON(pv->blocky_btn), next ? "Blocky" : "Smooth");
 }
 
-static void on_res_changed(GtkDropDown *dd, GParamSpec *spec, gpointer d)
+/* Density entry: user types a number, hits Enter.
+ * Injects $vd = N; into the code editor and re-renders. */
+static void on_density_changed(GtkEntry *entry, gpointer d)
 {
-    (void)spec;
     DC_ScadPreview *pv = d;
-    guint idx = gtk_drop_down_get_selected(dd);
-    static const int res_values[] = {16, 32, 48, 64, 96, 128, 192, 256};
-    if (idx < G_N_ELEMENTS(res_values)) {
-        dc_scad_preview_set_voxel_resolution(pv, res_values[idx]);
-        /* Auto re-render if we have a grid */
-        if (pv->voxel_grid || pv->code_ed)
-            dc_scad_preview_render(pv);
-    }
+    if (!pv->code_ed) return; /* not connected yet */
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(entry));
+    if (!text || !*text) return;
+    int val = atoi(text);
+    if (val < 1) val = 1;
+    if (val > 100) val = 100;
+
+    pv->voxel_resolution = val;
+    inject_vd_param(pv, val);
+
+    char msg[64];
+    snprintf(msg, sizeof(msg), "$vd = %d (voxels/mm)", val);
+    log_append(pv, msg);
+
+    dc_scad_preview_render(pv);
 }
 
 /* -------------------------------------------------------------------------
@@ -673,7 +753,7 @@ dc_scad_preview_new(void)
 {
     DC_ScadPreview *pv = calloc(1, sizeof(*pv));
     if (!pv) return NULL;
-    pv->voxel_resolution = 64; /* default — the holy number */
+    pv->voxel_resolution = 3; /* default $vd = 3 voxels/mm */
 
     /* GL viewport */
     pv->viewport = dc_gl_viewport_new();
@@ -723,17 +803,19 @@ dc_scad_preview_new(void)
     g_signal_connect(pv->blocky_btn, "clicked", G_CALLBACK(on_blocky_clicked), pv);
     gtk_box_append(GTK_BOX(toolbar), pv->blocky_btn);
 
-    /* Resolution dropdown */
-    static const char * const res_labels[] = {
-        "16", "32", "48", "64", "96", "128", "192", "256", NULL
-    };
-    pv->res_dropdown = gtk_drop_down_new_from_strings(res_labels);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(pv->res_dropdown), 3); /* default 64 */
-    gtk_widget_set_focusable(pv->res_dropdown, FALSE);
-    gtk_widget_set_size_request(pv->res_dropdown, 70, -1);
-    gtk_widget_set_tooltip_text(pv->res_dropdown, "Voxel Resolution");
-    g_signal_connect(pv->res_dropdown, "notify::selected", G_CALLBACK(on_res_changed), pv);
-    gtk_box_append(GTK_BOX(toolbar), pv->res_dropdown);
+    /* Voxel density — editable entry. Type a number, hit Enter.
+     * Values are voxels per mm ($vd parameter). */
+    pv->density_combo = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(pv->density_combo), "$vd");
+    gtk_editable_set_text(GTK_EDITABLE(pv->density_combo), "3");
+    gtk_widget_set_size_request(pv->density_combo, 45, -1);
+    gtk_widget_set_tooltip_text(pv->density_combo, "Voxel density — voxels/mm (Enter to apply)");
+    g_signal_connect(pv->density_combo, "activate", G_CALLBACK(on_density_changed), pv);
+    gtk_box_append(GTK_BOX(toolbar), pv->density_combo);
+
+    GtkWidget *vd_label = gtk_label_new("v/mm");
+    gtk_widget_set_opacity(vd_label, 0.6);
+    gtk_box_append(GTK_BOX(toolbar), vd_label);
 
     GtkWidget *sep2 = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
     gtk_box_append(GTK_BOX(toolbar), sep2);
@@ -764,12 +846,38 @@ dc_scad_preview_new(void)
     gtk_widget_set_vexpand(overlay, TRUE);
     gtk_widget_set_hexpand(overlay, TRUE);
 
+    /* Log panel — scrollable text view below viewport */
+    pv->log_buffer = gtk_text_buffer_new(NULL);
+    pv->log_view = gtk_text_view_new_with_buffer(pv->log_buffer);
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(pv->log_view), FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(pv->log_view), FALSE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(pv->log_view), GTK_WRAP_WORD_CHAR);
+    gtk_widget_set_opacity(pv->log_view, 0.85);
+    gtk_widget_add_css_class(pv->log_view, "monospace");
+
+    GtkWidget *log_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(log_scroll), pv->log_view);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(log_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(log_scroll, -1, 80);
+
+    /* Paned: viewport on top, log on bottom */
+    GtkWidget *vpaned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
+    gtk_paned_set_start_child(GTK_PANED(vpaned), overlay);
+    gtk_paned_set_end_child(GTK_PANED(vpaned), log_scroll);
+    gtk_paned_set_resize_start_child(GTK_PANED(vpaned), TRUE);
+    gtk_paned_set_resize_end_child(GTK_PANED(vpaned), FALSE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(vpaned), FALSE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(vpaned), TRUE);
+
     /* Container */
     pv->container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_append(GTK_BOX(pv->container), toolbar);
-    gtk_box_append(GTK_BOX(pv->container), overlay);
+    gtk_box_append(GTK_BOX(pv->container), vpaned);
+    gtk_widget_set_vexpand(vpaned, TRUE);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "scad preview created");
+    log_append(pv, "DunCAD ready.");
     return pv;
 }
 
@@ -845,7 +953,7 @@ dc_scad_preview_set_voxel_resolution(DC_ScadPreview *pv, int resolution)
 {
     if (!pv) return;
     if (resolution < 8) resolution = 8;
-    if (resolution > 512) resolution = 512;
+    if (resolution > 4096) resolution = 4096;
     pv->voxel_resolution = resolution;
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP, "voxel resolution set to %d", resolution);
 }
