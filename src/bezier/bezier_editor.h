@@ -134,4 +134,15 @@ void dc_bezier_editor_set_profile_apply_cb(DC_BezierEditor *editor,
                                              DC_ProfileApplyCb cb,
                                              void *userdata);
 
+/* Point changed callback — called whenever a control point is moved in the
+ * 2D editor (during drag, not just on release). Enables live 3D sync.
+ * index: which point moved (-1 = multiple/all changed).
+ * x, y: new 2D position. */
+typedef void (*DC_PointChangedCb)(int index, double x, double y, void *userdata);
+
+/* Set the callback for point changes. */
+void dc_bezier_editor_set_point_changed_cb(DC_BezierEditor *editor,
+                                            DC_PointChangedCb cb,
+                                            void *userdata);
+
 #endif /* DC_BEZIER_EDITOR_H */

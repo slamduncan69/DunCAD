@@ -89,6 +89,7 @@ typedef enum {
     DC_VOX_OP_POP_TRANSFORM, /* end of transform block */
     DC_VOX_OP_GROUP_BEGIN,   /* start of CSG operand group */
     DC_VOX_OP_GROUP_END,     /* end of CSG operand group */
+    DC_VOX_OP_TO_MESH,       /* >> to_mesh([rows], [cols]) — SDF → bezier mesh */
 } DC_VoxOpType;
 
 typedef struct {
@@ -106,6 +107,8 @@ typedef struct {
 typedef enum {
     DC_BMESH_OP_SPHERE,        /* sphere(radius) */
     DC_BMESH_OP_TORUS,         /* torus(R, r) */
+    DC_BMESH_OP_BOX,           /* box(sx, sy, sz) */
+    DC_BMESH_OP_CYLINDER,      /* cylinder(r, h, [segments]) */
     DC_BMESH_OP_GRID,          /* grid(rows, cols) */
     DC_BMESH_OP_SET_CP,        /* cp[r][c] = [x, y, z] */
     DC_BMESH_OP_RESOLUTION,    /* resolution = N */

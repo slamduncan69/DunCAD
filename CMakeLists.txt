@@ -85,6 +85,8 @@ add_library(dc_core STATIC
     src/voxel/sdf.c
     src/voxel/voxelize_stl.c
     src/voxel/voxelize_bezier.c
+    src/voxel/marching_cubes.c
+    src/voxel/sdf_to_bezier.c
 )
 target_include_directories(dc_core PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(dc_core
@@ -199,6 +201,10 @@ dc_add_test(test_cubeiform_eda    tests/test_cubeiform_eda.c)
 # Voxel tests
 dc_add_test(test_voxel            tests/test_voxel.c)
 dc_add_test(test_bezier_voxel     tests/test_bezier_voxel.c)
+dc_add_test(test_marching_cubes   tests/test_marching_cubes.c)
+target_include_directories(test_marching_cubes PRIVATE
+    "${CMAKE_SOURCE_DIR}/talmud-main/talmud/sacred/trinity_site"
+)
 
 # Pass test data directory to EDA tests
 set(DC_EDA_TEST_TARGETS test_sexpr test_eda_schematic test_eda_pcb test_eda_library test_cubeiform_eda)
@@ -338,6 +344,6 @@ set_tests_properties(test_scad_runner PROPERTIES
 # ---------------------------------------------------------------------------
 add_custom_target(tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_bezier_fit test_scad_export test_cubeiform test_sexpr test_eda_schematic test_eda_pcb test_eda_library test_cubeiform_eda test_voxel test_topo test_edge_profile test_bezier_canvas test_bezier_editor test_scad_runner
+    DEPENDS test_array test_string_builder test_manifest test_bezier_curve test_bezier_fit test_scad_export test_cubeiform test_sexpr test_eda_schematic test_eda_pcb test_eda_library test_cubeiform_eda test_voxel test_bezier_voxel test_marching_cubes test_topo test_edge_profile test_bezier_canvas test_bezier_editor test_scad_runner
     COMMENT "Building and running all DunCAD tests"
 )

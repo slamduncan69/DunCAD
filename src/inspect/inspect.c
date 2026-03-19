@@ -24,11 +24,14 @@
 #include "voxel/sdf.h"
 #include "voxel/voxelize_stl.h"
 #include "voxel/voxelize_bezier.h"
+#include "voxel/marching_cubes.h"
+#include "voxel/sdf_to_bezier.h"
 
 /* Trinity Site bezier headers — pure math, header-only */
 #include "../../talmud-main/talmud/sacred/trinity_site/ts_vec.h"
 #include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_surface.h"
 #include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_mesh.h"
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_primitives.h"
 #include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_voxel.h"
 #include "eda/eda_ratsnest.h"
 #include "core/string_builder.h"
@@ -48,6 +51,13 @@
 static GSocketService  *s_service = NULL;
 static GtkWidget       *s_window  = NULL;
 static DC_VoxelGrid    *s_voxel_grid = NULL;
+
+/* Forward declarations for bezier mesh state (defined later in file) */
+static ts_bezier_mesh *s_bezier_mesh;
+static int s_bezier_resolution;
+static int s_selected_loop_type;
+static void bezier_mesh_refresh(void);
+static void on_2d_point_changed(int index, double u2d, double v2d, void *userdata);
 
 /* Convenience accessors — all borrowed pointers, may be NULL */
 static DC_BezierEditor  *get_editor(void)  { return dc_app_window_get_editor(s_window); }
@@ -1036,11 +1046,53 @@ static char *cmd_cubeiform_exec(const char *args) {
 
     /* Display voxel grid in viewport */
     if (vox_grid) {
-        DC_GlViewport *vp = get_viewport();
-        if (vp) dc_gl_viewport_set_voxel_grid(vp, vox_grid);
-        /* Store globally for lifetime */
-        dc_voxel_grid_free(s_voxel_grid);
-        s_voxel_grid = vox_grid;
+        /* Check if any vox op is to_mesh — if so, convert SDF → bezier mesh */
+        DC_Error err2 = {0};
+        DC_CubeiformEda *eda2 = dc_cubeiform_parse_eda(args, &err2);
+        int has_to_mesh = 0;
+        int tm_rows = 4, tm_cols = 4;
+        if (eda2) {
+            size_t nv = dc_cubeiform_eda_vox_op_count(eda2);
+            for (size_t vi = 0; vi < nv; vi++) {
+                const DC_VoxOp *vop = dc_cubeiform_eda_get_vox_op(eda2, vi);
+                if (vop && vop->type == DC_VOX_OP_TO_MESH) {
+                    has_to_mesh = 1;
+                    tm_rows = vop->resolution;
+                    tm_cols = (int)vop->x;
+                    break;
+                }
+            }
+            dc_cubeiform_eda_free(eda2);
+        }
+
+        if (has_to_mesh) {
+            /* SDF → marching cubes → bezier patch fitting */
+            DC_Error fit_err = {0};
+            ts_bezier_mesh *fitted = (ts_bezier_mesh *)dc_sdf_to_bezier(
+                vox_grid, tm_rows, tm_cols, &fit_err);
+            if (fitted) {
+                if (s_bezier_mesh) {
+                    ts_bezier_mesh_free(s_bezier_mesh);
+                    free(s_bezier_mesh);
+                }
+                s_bezier_mesh = fitted;
+                s_selected_loop_type = -1;
+                DC_GlViewport *vp = get_viewport();
+                if (vp) {
+                    dc_gl_viewport_clear_objects(vp);
+                    dc_gl_viewport_clear_mesh(vp);
+                    dc_gl_viewport_set_voxel_grid(vp, NULL);
+                }
+                bezier_mesh_refresh();
+            }
+            dc_voxel_grid_free(vox_grid);
+        } else {
+            DC_GlViewport *vp = get_viewport();
+            if (vp) dc_gl_viewport_set_voxel_grid(vp, vox_grid);
+            /* Store globally for lifetime */
+            dc_voxel_grid_free(s_voxel_grid);
+            s_voxel_grid = vox_grid;
+        }
     }
 
     /* Handle bezier_mesh blocks from Cubeiform */
@@ -1902,7 +1954,9 @@ static char *cmd_bezier_mesh_new(const char *args) {
     return resp;
 }
 
-/* bezier_mesh_sphere [radius] [res] — create 6-patch sphere mesh */
+/* bezier_mesh_sphere [radius] [res] — create 6-patch sphere mesh
+ * Uses ts_bezier_sphere_new() for mathematically correct geometry,
+ * then converts to shared-CP mesh grid via ts_bezier_mesh_from_sphere(). */
 static char *cmd_bezier_mesh_sphere(const char *args) {
     float radius = 5.0f;
     int res = 64;
@@ -1916,60 +1970,10 @@ static char *cmd_bezier_mesh_sphere(const char *args) {
         free(s_bezier_mesh);
     }
 
-    /* 2x3 patch grid — maps a sphere with 6 quadratic patches */
+    /* Analytical sphere → mesh conversion */
+    ts_bezier_sphere sphere = ts_bezier_sphere_new(ts_vec3_zero(), (double)radius);
     s_bezier_mesh = (ts_bezier_mesh *)malloc(sizeof(ts_bezier_mesh));
-    *s_bezier_mesh = ts_bezier_mesh_new(2, 3);
-
-    double r = (double)radius;
-    /* Weight for quadratic Bezier circle approximation */
-    double w = r * 1.3333333;  /* ~4/3 * r for quadratic mid-CP */
-
-    /* Top hemisphere: row 0, patches (0,0), (0,1), (0,2) */
-    /* Bottom hemisphere: row 1 */
-    /* Each patch spans 120 degrees azimuthally and 90 degrees in elevation */
-    for (int pr = 0; pr < 2; pr++) {
-        double v_sign = (pr == 0) ? 1.0 : -1.0;
-        for (int pc = 0; pc < 3; pc++) {
-            double az0 = 2.0 * M_PI * (double)pc / 3.0;
-            double az1 = 2.0 * M_PI * (double)(pc + 1) / 3.0;
-            double az_mid = (az0 + az1) * 0.5;
-
-            /* 3x3 control points for this patch */
-            /* Row 0: equator edge */
-            /* Row 1: mid-latitude */
-            /* Row 2: pole (for top) or equator again for arrangement */
-
-            int br = 2 * pr;
-            int bc = 2 * pc;
-
-            /* Equatorial corners and midpoint */
-            ts_bezier_mesh_set_cp(s_bezier_mesh, br, bc,
-                ts_vec3_make(r * cos(az0), r * sin(az0), 0.0));
-            ts_bezier_mesh_set_cp(s_bezier_mesh, br, bc + 1,
-                ts_vec3_make(w * cos(az_mid), w * sin(az_mid), 0.0));
-            ts_bezier_mesh_set_cp(s_bezier_mesh, br, bc + 2,
-                ts_vec3_make(r * cos(az1), r * sin(az1), 0.0));
-
-            /* Mid-latitude */
-            double mz = v_sign * r * 0.7071;  /* ~r/sqrt(2) */
-            double mr = r * 0.7071;
-            double mw = w * 0.7071;
-            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 1, bc,
-                ts_vec3_make(mr * cos(az0), mr * sin(az0), mz));
-            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 1, bc + 1,
-                ts_vec3_make(mw * cos(az_mid), mw * sin(az_mid), mz * 1.3));
-            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 1, bc + 2,
-                ts_vec3_make(mr * cos(az1), mr * sin(az1), mz));
-
-            /* Pole */
-            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 2, bc,
-                ts_vec3_make(0.0, 0.0, v_sign * r));
-            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 2, bc + 1,
-                ts_vec3_make(0.0, 0.0, v_sign * r));
-            ts_bezier_mesh_set_cp(s_bezier_mesh, br + 2, bc + 2,
-                ts_vec3_make(0.0, 0.0, v_sign * r));
-        }
-    }
+    *s_bezier_mesh = ts_bezier_mesh_from_sphere(&sphere);
 
     s_selected_loop_type = -1;
     DC_GlViewport *vp = get_viewport();
@@ -1982,12 +1986,14 @@ static char *cmd_bezier_mesh_sphere(const char *args) {
     char *resp = malloc(256);
     snprintf(resp, 256,
              "{\"ok\":true,\"shape\":\"sphere\",\"radius\":%.2f,"
-             "\"rows\":2,\"cols\":3,\"resolution\":%d}\n",
-             radius, res);
+             "\"rows\":%d,\"cols\":%d,\"resolution\":%d}\n",
+             radius, s_bezier_mesh->rows, s_bezier_mesh->cols, res);
     return resp;
 }
 
-/* bezier_mesh_torus [R] [r] [rows] [cols] [res] */
+/* bezier_mesh_torus [R] [r] [rows] [cols] [res]
+ * Uses ts_bezier_torus_new() for analytical geometry,
+ * then converts to shared-CP mesh via ts_bezier_mesh_from_torus(). */
 static char *cmd_bezier_mesh_torus(const char *args) {
     float major_r = 5.0f, minor_r = 2.0f;
     int rows = 4, cols = 8, res = 64;
@@ -2005,23 +2011,15 @@ static char *cmd_bezier_mesh_torus(const char *args) {
         ts_bezier_mesh_free(s_bezier_mesh);
         free(s_bezier_mesh);
     }
+
+    /* Analytical torus → mesh conversion */
+    ts_bezier_torus torus = ts_bezier_torus_new(ts_vec3_zero(),
+                                                 (double)major_r,
+                                                 (double)minor_r,
+                                                 rows, cols);
     s_bezier_mesh = (ts_bezier_mesh *)malloc(sizeof(ts_bezier_mesh));
-    *s_bezier_mesh = ts_bezier_mesh_new(rows, cols);
-
-    double R = (double)major_r;
-    double r_val = (double)minor_r;
-
-    /* Place CPs on the torus surface: (R + r*cos(phi)) * cos(theta), etc. */
-    for (int cr = 0; cr < s_bezier_mesh->cp_rows; cr++) {
-        double phi = 2.0 * M_PI * (double)cr / (double)(s_bezier_mesh->cp_rows - 1);
-        for (int cc = 0; cc < s_bezier_mesh->cp_cols; cc++) {
-            double theta = 2.0 * M_PI * (double)cc / (double)(s_bezier_mesh->cp_cols - 1);
-            double x = (R + r_val * cos(phi)) * cos(theta);
-            double y = (R + r_val * cos(phi)) * sin(theta);
-            double z = r_val * sin(phi);
-            ts_bezier_mesh_set_cp(s_bezier_mesh, cr, cc, ts_vec3_make(x, y, z));
-        }
-    }
+    *s_bezier_mesh = ts_bezier_mesh_from_torus(&torus);
+    ts_bezier_torus_free(&torus);
 
     s_selected_loop_type = -1;
     DC_GlViewport *vp = get_viewport();
@@ -2036,6 +2034,79 @@ static char *cmd_bezier_mesh_torus(const char *args) {
              "{\"ok\":true,\"shape\":\"torus\",\"major_r\":%.2f,\"minor_r\":%.2f,"
              "\"rows\":%d,\"cols\":%d,\"resolution\":%d}\n",
              major_r, minor_r, rows, cols, res);
+    return resp;
+}
+
+/* bezier_mesh_box [sx] [sy] [sz] [res]
+ * Analytical box as 6 flat bezier patches in a 2×3 grid. */
+static char *cmd_bezier_mesh_box(const char *args) {
+    float sx = 10.0f, sy = 10.0f, sz = 10.0f;
+    int res = 64;
+    if (args && *args) sscanf(args, "%f %f %f %d", &sx, &sy, &sz, &res);
+    if (res < 8) res = 8;
+    if (res > 256) res = 256;
+    s_bezier_resolution = res;
+
+    if (s_bezier_mesh) {
+        ts_bezier_mesh_free(s_bezier_mesh);
+        free(s_bezier_mesh);
+    }
+
+    ts_vec3 half = ts_vec3_make((double)sx * 0.5, (double)sy * 0.5, (double)sz * 0.5);
+    ts_vec3 neg_half = ts_vec3_scale(half, -1.0);
+    s_bezier_mesh = (ts_bezier_mesh *)malloc(sizeof(ts_bezier_mesh));
+    *s_bezier_mesh = ts_bezier_mesh_from_box(neg_half, half);
+
+    s_selected_loop_type = -1;
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_clear_objects(vp);
+        dc_gl_viewport_clear_mesh(vp);
+    }
+    bezier_mesh_refresh();
+
+    char *resp = malloc(256);
+    snprintf(resp, 256,
+             "{\"ok\":true,\"shape\":\"box\",\"size\":[%.2f,%.2f,%.2f],"
+             "\"rows\":2,\"cols\":3,\"resolution\":%d}\n",
+             sx, sy, sz, res);
+    return resp;
+}
+
+/* bezier_mesh_cylinder [radius] [height] [segments] [res]
+ * Analytical cylinder with caps as bezier patch mesh. */
+static char *cmd_bezier_mesh_cylinder(const char *args) {
+    float radius = 5.0f, height = 10.0f;
+    int segments = 8, res = 64;
+    if (args && *args) sscanf(args, "%f %f %d %d", &radius, &height, &segments, &res);
+    if (segments < 3) segments = 3;
+    if (segments > 64) segments = 64;
+    if (res < 8) res = 8;
+    if (res > 256) res = 256;
+    s_bezier_resolution = res;
+
+    if (s_bezier_mesh) {
+        ts_bezier_mesh_free(s_bezier_mesh);
+        free(s_bezier_mesh);
+    }
+
+    double h2 = (double)height * 0.5;
+    s_bezier_mesh = (ts_bezier_mesh *)malloc(sizeof(ts_bezier_mesh));
+    *s_bezier_mesh = ts_bezier_mesh_from_cylinder((double)radius, -h2, h2, segments);
+
+    s_selected_loop_type = -1;
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_clear_objects(vp);
+        dc_gl_viewport_clear_mesh(vp);
+    }
+    bezier_mesh_refresh();
+
+    char *resp = malloc(256);
+    snprintf(resp, 256,
+             "{\"ok\":true,\"shape\":\"cylinder\",\"radius\":%.2f,"
+             "\"height\":%.2f,\"segments\":%d,\"resolution\":%d}\n",
+             radius, height, segments, res);
     return resp;
 }
 
@@ -2470,6 +2541,9 @@ static char *cmd_bezier_mesh_edit_loop(void) {
 
     s_loop_edit.active = 1;
 
+    /* Register live-sync callback: 2D drag → 3D mesh update */
+    dc_bezier_editor_set_point_changed_cb(editor, on_2d_point_changed, NULL);
+
     free(pts3d);
     free(pts2d);
 
@@ -2575,6 +2649,23 @@ static void apply_cubeiform_bmesh(const char *src) {
             case DC_BMESH_OP_RESOLUTION:
                 s_bezier_resolution = bop->resolution;
                 break;
+            case DC_BMESH_OP_BOX: {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "%.4f %.4f %.4f %d",
+                         bop->x, bop->y, bop->z, s_bezier_resolution);
+                char *r = cmd_bezier_mesh_box(buf);
+                free(r);
+                break;
+            }
+            case DC_BMESH_OP_CYLINDER: {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "%.4f %.4f %d %d",
+                         bop->radius, bop->radius2, bop->cols,
+                         s_bezier_resolution);
+                char *r = cmd_bezier_mesh_cylinder(buf);
+                free(r);
+                break;
+            }
             case DC_BMESH_OP_VIEW:
                 s_bezier_view = (DC_BezierViewMode)bop->view_mode;
                 break;
@@ -2683,6 +2774,47 @@ static char *cmd_voxel_csg(const char *args) {
     size_t active = dc_voxel_grid_active_count(s_voxel_grid);
     char *resp = malloc(256);
     snprintf(resp, 256, "{\"ok\":true,\"op\":\"%s\",\"active\":%zu}\n", op, active);
+    return resp;
+}
+
+/* marching_cubes [path.stl] — extract isosurface from current voxel grid.
+ * If path given, writes STL. If no path, writes to /tmp/duncad_mc.stl
+ * and loads into viewport. */
+static char *cmd_marching_cubes(const char *args) {
+    if (!s_voxel_grid) return strdup("{\"error\":\"no voxel grid\"}\n");
+
+    ts_mesh mesh = ts_mesh_init();
+    int rc = dc_marching_cubes(s_voxel_grid, 0.0f, &mesh);
+    if (rc != 0) {
+        ts_mesh_free(&mesh);
+        return strdup("{\"error\":\"marching cubes failed\"}\n");
+    }
+
+    const char *path = (args && *args) ? args : "/tmp/duncad_mc.stl";
+
+    int wrc = ts_mesh_write_stl(&mesh, path);
+    if (wrc != 0) {
+        ts_mesh_free(&mesh);
+        char *resp = malloc(512);
+        snprintf(resp, 512, "{\"error\":\"failed to write %s\"}\n", path);
+        return resp;
+    }
+
+    /* Load into viewport if no explicit path (interactive use) */
+    if (!args || !*args) {
+        DC_GlViewport *vp = get_viewport();
+        if (vp) {
+            dc_gl_viewport_clear_mesh(vp);
+            dc_gl_viewport_load_stl(vp, path);
+        }
+    }
+
+    char *resp = malloc(512);
+    snprintf(resp, 512,
+             "{\"ok\":true,\"path\":\"%s\",\"verts\":%d,\"tris\":%d}\n",
+             path, mesh.vert_count, mesh.tri_count);
+
+    ts_mesh_free(&mesh);
     return resp;
 }
 
@@ -2897,10 +3029,26 @@ dispatch(const char *cmd)
     if (strcmp(name, "bezier_mesh_new")         == 0) return cmd_bezier_mesh_new(args);
     if (strcmp(name, "bezier_mesh_sphere")      == 0) return cmd_bezier_mesh_sphere(args);
     if (strcmp(name, "bezier_mesh_torus")       == 0) return cmd_bezier_mesh_torus(args);
+    if (strcmp(name, "bezier_mesh_box")         == 0) return cmd_bezier_mesh_box(args);
+    if (strcmp(name, "bezier_mesh_cylinder")    == 0) return cmd_bezier_mesh_cylinder(args);
     if (strcmp(name, "bezier_mesh_set_cp")      == 0) return cmd_bezier_mesh_set_cp(args);
     if (strcmp(name, "bezier_mesh_state")       == 0) return cmd_bezier_mesh_state();
     if (strcmp(name, "bezier_mesh_view")        == 0) return cmd_bezier_mesh_view(args);
     if (strcmp(name, "bezier_mesh_resolution")  == 0) return cmd_bezier_mesh_resolution(args);
+    if (strcmp(name, "bezier_2d_move_point") == 0) {
+        /* Move a 2D editor point and fire the live-sync callback.
+         * Usage: bezier_2d_move_point <index> <x2d> <y2d> */
+        if (!args || !*args)
+            return strdup("{\"error\":\"usage: bezier_2d_move_point <idx> <x> <y>\"}\n");
+        int idx = 0; double px = 0, py = 0;
+        sscanf(args, "%d %lf %lf", &idx, &px, &py);
+        DC_BezierEditor *editor = get_editor();
+        if (!editor) return strdup("{\"error\":\"no editor\"}\n");
+        dc_bezier_editor_set_point(editor, idx, px, py);
+        char *resp = malloc(128);
+        snprintf(resp, 128, "{\"ok\":true,\"idx\":%d,\"x\":%.4f,\"y\":%.4f}\n", idx, px, py);
+        return resp;
+    }
     if (strcmp(name, "bezier_mesh_clear")       == 0) return cmd_bezier_mesh_clear();
     if (strcmp(name, "bezier_mesh_cp_list")     == 0) return cmd_bezier_mesh_cp_list();
     if (strcmp(name, "bezier_mesh_loops")       == 0) return cmd_bezier_mesh_loops();
@@ -2947,6 +3095,7 @@ dispatch(const char *cmd)
     if (strcmp(name, "voxel_box")          == 0) return cmd_voxel_box(args);
     if (strcmp(name, "voxel_csg")          == 0) return cmd_voxel_csg(args);
     if (strcmp(name, "voxel_clear")        == 0) return cmd_voxel_clear();
+    if (strcmp(name, "marching_cubes")    == 0) return cmd_marching_cubes(args);
     if (strcmp(name, "voxel_state")        == 0) return cmd_voxel_state();
     if (strcmp(name, "voxel_resolution")   == 0) return cmd_voxel_resolution(args);
     if (strcmp(name, "voxel_blocky")      == 0) return cmd_voxel_blocky(args);
@@ -3038,7 +3187,45 @@ on_bez_curve_selected(int loop_type, int loop_index, void *userdata)
            loop_type, loop_index);
 }
 
-/* Bezier CP move callback — sync inspect state when viewport moves a CP */
+/* 2D editor point changed → un-project to 3D and update mesh + viewport live */
+static void
+on_2d_point_changed(int index, double u2d, double v2d, void *userdata)
+{
+    (void)userdata;
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "2D→3D sync: idx=%d u=%.3f v=%.3f active=%d cp_count=%d",
+           index, u2d, v2d, s_loop_edit.active, s_loop_edit.cp_count);
+
+    if (!s_loop_edit.active || !s_bezier_mesh) return;
+    if (index < 0 || index >= s_loop_edit.cp_count) return;
+
+    /* Un-project 2D → 3D: pos = origin + u2d * u_axis + v2d * v_axis */
+    double x = s_loop_edit.origin[0]
+             + u2d * s_loop_edit.u_axis[0]
+             + v2d * s_loop_edit.v_axis[0];
+    double y = s_loop_edit.origin[1]
+             + u2d * s_loop_edit.u_axis[1]
+             + v2d * s_loop_edit.v_axis[1];
+    double z = s_loop_edit.origin[2]
+             + u2d * s_loop_edit.u_axis[2]
+             + v2d * s_loop_edit.v_axis[2];
+
+    int cp_r = s_loop_edit.cp_indices[index * 2];
+    int cp_c = s_loop_edit.cp_indices[index * 2 + 1];
+
+    /* Update inspect's mesh */
+    ts_bezier_mesh_set_cp(s_bezier_mesh, cp_r, cp_c,
+                           ts_vec3_make(x, y, z));
+
+    /* Update viewport's mesh copy directly (avoid full deep copy) */
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_update_bezier_cp(vp, cp_r, cp_c,
+                                         (float)x, (float)y, (float)z);
+    }
+}
+
 static void
 on_bez_cp_moved(int cp_row, int cp_col, int phase,
                 float x, float y, float z, void *userdata)
@@ -3052,11 +3239,12 @@ on_bez_cp_moved(int cp_row, int cp_col, int phase,
                            ts_vec3_make((double)x, (double)y, (double)z));
 
     if (phase == 2) {
-        /* Drag ended — rebuild wireframe (already done by viewport)
-         * and update loop highlight if active */
-        dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP,
+        /* Drag ended — push the updated mesh back to viewport so
+         * voxel rendering, loop highlights, and 2D editor stay in sync */
+        dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
                "bezier CP moved: [%d,%d] → (%.3f, %.3f, %.3f)",
                cp_row, cp_col, x, y, z);
+        bezier_mesh_refresh();
     }
 }
 

@@ -5401,6 +5401,65 @@ static const char HELP_REFERENCE_DOCTRINE_PERSISTENCE[] =
 "  shadow knowledge base that competes with the Talmud,\n"
 "  grows stale, and misleads future agents.\n";
 
+static const char HELP_MEMORY_ACTIVE_SESSION_S023[] =
+"Session s023 (SDF-to-Mesh Pipeline + Primitive Mesh Gen)\n"
+"\n"
+"DATE: 2026-03-19\n"
+"\n"
+"THREE-PHASE MESH PIPELINE IMPLEMENTATION:\n"
+"\n"
+"Phase 1 — Analytical Primitive Mesh Constructors:\n"
+"  NEW: ts_bezier_primitives.h (trinity_site, header-only)\n"
+"  - ts_bezier_mesh_from_sphere(): 2x3 grid, equator/pole\n"
+"    topology, optimal quadratic circle compensation\n"
+"    (mid_factor = 2 - cos(alpha), NOT 1/cos(alpha))\n"
+"  - ts_bezier_mesh_from_torus(): analytical patches -> grid\n"
+"  - ts_bezier_mesh_from_box(): 6 flat coplanar patches\n"
+"  - ts_bezier_mesh_from_cylinder(): 4xN grid with caps\n"
+"  Replaced ad-hoc CP math in cmd_bezier_mesh_sphere/torus.\n"
+"  Added box() and cylinder() to Cubeiform bezier_mesh{}.\n"
+"\n"
+"Phase 2 — Marching Cubes (SDF -> Triangle Mesh):\n"
+"  NEW: marching_cubes.h/c (src/voxel/)\n"
+"  Standard MC with 256-entry lookup tables. Linear vertex\n"
+"  interpolation, central-difference SDF gradient normals.\n"
+"  Coordinate system: cell centers at (ix+0.5)*cs (matches\n"
+"  SDF, which ignores DC_VoxelGrid origin for eval).\n"
+"  NEW: test_marching_cubes.c — 7 tests, all passing.\n"
+"  NEW: marching_cubes inspect command.\n"
+"\n"
+"Phase 3 — Bezier Patch Fitting + SDF-to-Bezier Bridge:\n"
+"  NEW: ts_bezier_fit.h (trinity_site, header-only)\n"
+"  - ts_solve_9x9(): Gaussian elim with partial pivoting\n"
+"  - ts_bezier_fit_from_trimesh(): bbox subdivision, vertex\n"
+"    collection, (u,v) parameterization, least-squares 9-CP\n"
+"    fit per patch, C1 enforcement\n"
+"  NEW: sdf_to_bezier.h/c — bridge: MC -> fitting\n"
+"  NEW: DC_VOX_OP_TO_MESH in Cubeiform voxel pipe\n"
+"  Usage: sphere(5) - cube(3,3,3) >> to_mesh(4, 6);\n"
+"\n"
+"2D<->3D LIVE SYNC:\n"
+"  Added DC_PointChangedCb to bezier_editor. When a 2D CP\n"
+"  moves, on_2d_point_changed() un-projects to 3D via stored\n"
+"  loop plane (origin + u*u_axis + v*v_axis) and calls\n"
+"  dc_gl_viewport_update_bezier_cp() for live wireframe.\n"
+"  Also: on_bez_cp_moved phase=2 now calls bezier_mesh_refresh()\n"
+"  so 3D drag results persist for voxel render/export.\n"
+"  NOTE: GTK4 canvas left-drag gesture was intercepting\n"
+"  editor click events — removed from bezier_canvas.c.\n"
+"\n"
+"NEW INSPECT COMMANDS:\n"
+"  bezier_mesh_box, bezier_mesh_cylinder, marching_cubes,\n"
+"  bezier_2d_move_point\n"
+"\n"
+"KEY LESSONS:\n"
+"  - Quadratic bezier circle: mid_factor = 2-cos(alpha)\n"
+"    NOT 1/cos(alpha). Places t=0.5 exactly on circle.\n"
+"  - Viewport deep-copies mesh (set_bezier_mesh). Changes\n"
+"    in 3D drag must sync back via callback.\n"
+"  - SDF cell_center ignores grid origin. MC vertex coords\n"
+"    must match: pos = (ix+0.5)*cell_size, no origin.\n";
+
 static const char HELP_REFERENCE_DOCTRINE_HOLY_PATH[] =
 "The Visual Inspection Rite\n"
 "\n"
@@ -5916,6 +5975,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s020", HELP_MEMORY_ACTIVE_SESSION_S020 },
     { "memory.active.session-s021", HELP_MEMORY_ACTIVE_SESSION_S021 },
     { "memory.active.session-s022", HELP_MEMORY_ACTIVE_SESSION_S022 },
+    { "memory.active.session-s023", HELP_MEMORY_ACTIVE_SESSION_S023 },
     { "memory.active.session-e5", HELP_MEMORY_ACTIVE_SESSION_E5 },
     { "memory.active.session-v1", HELP_MEMORY_ACTIVE_SESSION_V1 },
     { "memory.active.session-v1-6", HELP_MEMORY_ACTIVE_SESSION_V1_6 },

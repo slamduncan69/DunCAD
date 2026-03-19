@@ -65,12 +65,6 @@ static void on_drag_end_middle(GtkGestureDrag *gesture,
                                double offset_x, double offset_y,
                                gpointer data);
 
-static void on_drag_begin_left(GtkGestureDrag *gesture,
-                               double start_x, double start_y,
-                               gpointer data);
-static void on_drag_update_left(GtkGestureDrag *gesture,
-                                double offset_x, double offset_y,
-                                gpointer data);
 static void on_drag_end_left(GtkGestureDrag *gesture,
                              double offset_x, double offset_y,
                              gpointer data);
@@ -337,6 +331,7 @@ on_drag_end_middle(GtkGestureDrag *gesture, double offset_x, double offset_y,
  * Space+left-click pan
  * ---------------------------------------------------------------------- */
 static void
+__attribute__((unused))
 on_drag_begin_left(GtkGestureDrag *gesture, double start_x, double start_y,
                    gpointer data)
 {
@@ -354,6 +349,7 @@ on_drag_begin_left(GtkGestureDrag *gesture, double start_x, double start_y,
 }
 
 static void
+__attribute__((unused))
 on_drag_update_left(GtkGestureDrag *gesture, double offset_x, double offset_y,
                     gpointer data)
 {
@@ -366,6 +362,7 @@ on_drag_update_left(GtkGestureDrag *gesture, double offset_x, double offset_y,
 }
 
 static void
+__attribute__((unused))
 on_drag_end_left(GtkGestureDrag *gesture, double offset_x, double offset_y,
                  gpointer data)
 {
@@ -471,16 +468,13 @@ dc_bezier_canvas_new(void)
                      G_CALLBACK(on_drag_end_middle), c);
     gtk_widget_add_controller(c->drawing_area, GTK_EVENT_CONTROLLER(drag_middle));
 
-    /* Left-click drag (space+drag pan) */
-    GtkGesture *drag_left = gtk_gesture_drag_new();
-    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag_left), 1);
-    g_signal_connect(drag_left, "drag-begin",
-                     G_CALLBACK(on_drag_begin_left), c);
-    g_signal_connect(drag_left, "drag-update",
-                     G_CALLBACK(on_drag_update_left), c);
-    g_signal_connect(drag_left, "drag-end",
-                     G_CALLBACK(on_drag_end_left), c);
-    gtk_widget_add_controller(c->drawing_area, GTK_EVENT_CONTROLLER(drag_left));
+    /* Left-click drag for space+drag panning.
+     * DISABLED: This gesture was intercepting button-1 events before the
+     * bezier editor's click gesture could receive them, even when it
+     * immediately denied the sequence (non-space case). Space+drag pan
+     * is now handled by the editor's own drag gesture which checks
+     * dc_bezier_canvas_space_held(). */
+    /* (removed — see bezier_editor.c on_drag_begin for space+drag pan) */
 
     /* Motion (cursor tracking) */
     GtkEventController *motion = gtk_event_controller_motion_new();

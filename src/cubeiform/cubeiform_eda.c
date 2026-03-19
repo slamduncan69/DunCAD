@@ -1148,6 +1148,17 @@ static void parse_vox_pipe(EParser *p, VoxParseCtx *ctx, DC_Array *out)
             dc_array_push(out, &op);
             continue; /* don't add to xforms stack */
 
+        } else if (ident_eq(&p->cur, "to_mesh")) {
+            next_token(p);
+            VoxArgs args;
+            parse_vox_args(p, ctx, &args);
+            DC_VoxOp tmop = { .type = DC_VOX_OP_TO_MESH };
+            tmop.resolution = (int)vox_arg_pos(&args, 0, 4); /* patch_rows */
+            tmop.x = vox_arg_pos(&args, 1, 4);               /* patch_cols */
+            /* to_mesh is terminal — not a transform, handled below */
+            xforms[nxform++] = tmop;
+            break;
+
         } else {
             /* Unknown pipe target — skip */
             next_token(p);
@@ -1161,16 +1172,32 @@ static void parse_vox_pipe(EParser *p, VoxParseCtx *ctx, DC_Array *out)
         }
     }
 
-    /* Emit: transforms in pipe order (push), then primary, then N POPs */
-    for (int i = 0; i < nxform; i++)
-        dc_array_push(out, &xforms[i]);
+    /* Emit: transforms in pipe order (push), then primary, then N POPs.
+     * to_mesh is special: it goes AFTER everything as a terminal op. */
+    DC_VoxOp *to_mesh_op = NULL;
+    for (int i = 0; i < nxform; i++) {
+        if (xforms[i].type == DC_VOX_OP_TO_MESH) {
+            to_mesh_op = &xforms[i];
+        } else {
+            dc_array_push(out, &xforms[i]);
+        }
+    }
 
     vox_copy_ops(out, scratch);
 
+    int pop_count = 0;
     for (int i = 0; i < nxform; i++) {
+        if (xforms[i].type != DC_VOX_OP_TO_MESH)
+            pop_count++;
+    }
+    for (int i = 0; i < pop_count; i++) {
         DC_VoxOp pop = { .type = DC_VOX_OP_POP_TRANSFORM };
         dc_array_push(out, &pop);
     }
+
+    /* Emit to_mesh as the very last operation */
+    if (to_mesh_op)
+        dc_array_push(out, to_mesh_op);
 
     dc_array_free(scratch);
 }
@@ -1562,6 +1589,62 @@ static void parse_bezier_mesh_block(EParser *p, DC_Array *bmesh_ops)
                     if (p->cur.type == ETOK_NUMBER) {
                         op.radius2 = p->cur.num_val;
                         next_token(p);
+                    }
+                }
+            }
+            expect(p, ETOK_RPAREN);
+            if (p->cur.type == ETOK_SEMI) next_token(p);
+            dc_array_push(bmesh_ops, &op);
+
+        } else if (ident_eq(&p->cur, "box")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_BMeshOp op = { .type = DC_BMESH_OP_BOX };
+            op.x = 10.0; op.y = 10.0; op.z = 10.0;
+            if (p->cur.type == ETOK_NUMBER) {
+                op.x = p->cur.num_val;
+                next_token(p);
+                if (p->cur.type == ETOK_COMMA) {
+                    next_token(p);
+                    if (p->cur.type == ETOK_NUMBER) {
+                        op.y = p->cur.num_val;
+                        next_token(p);
+                    }
+                    if (p->cur.type == ETOK_COMMA) {
+                        next_token(p);
+                        if (p->cur.type == ETOK_NUMBER) {
+                            op.z = p->cur.num_val;
+                            next_token(p);
+                        }
+                    }
+                }
+            }
+            expect(p, ETOK_RPAREN);
+            if (p->cur.type == ETOK_SEMI) next_token(p);
+            dc_array_push(bmesh_ops, &op);
+
+        } else if (ident_eq(&p->cur, "cylinder")) {
+            next_token(p);
+            expect(p, ETOK_LPAREN);
+            DC_BMeshOp op = { .type = DC_BMESH_OP_CYLINDER };
+            op.radius = 5.0;   /* radius */
+            op.radius2 = 10.0; /* height */
+            op.cols = 8;       /* segments */
+            if (p->cur.type == ETOK_NUMBER) {
+                op.radius = p->cur.num_val;
+                next_token(p);
+                if (p->cur.type == ETOK_COMMA) {
+                    next_token(p);
+                    if (p->cur.type == ETOK_NUMBER) {
+                        op.radius2 = p->cur.num_val;
+                        next_token(p);
+                    }
+                    if (p->cur.type == ETOK_COMMA) {
+                        next_token(p);
+                        if (p->cur.type == ETOK_NUMBER) {
+                            op.cols = (int)p->cur.num_val;
+                            next_token(p);
+                        }
                     }
                 }
             }
@@ -2334,6 +2417,10 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
             break;
         case DC_VOX_OP_POP_TRANSFORM:
             if (xform_depth > 0) xform_depth--;
+            break;
+
+        case DC_VOX_OP_TO_MESH:
+            /* Terminal op — handled by caller (inspect.c), not here */
             break;
 
         case DC_VOX_OP_SPHERE:

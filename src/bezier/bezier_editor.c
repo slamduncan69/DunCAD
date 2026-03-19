@@ -57,6 +57,8 @@ struct DC_BezierEditor {
     DC_ProfileMeta   profile_meta;
     DC_ProfileApplyCb profile_apply_cb;
     void            *profile_apply_data;
+    DC_PointChangedCb point_changed_cb;
+    void            *point_changed_data;
     GtkWidget       *apply_profile_btn;  /* shown when profile is active */
     /* Drawing mode */
     DC_EditorMode    mode;
@@ -802,6 +804,10 @@ select_on_motion(DC_BezierEditor *ed, double dwx, double dwy)
             if (p && orig) {
                 p->x = orig->x + dwx;
                 p->y = orig->y + dwy;
+                /* Fire live-sync callback */
+                if (ed->point_changed_cb)
+                    ed->point_changed_cb(*idx, p->x, p->y,
+                                          ed->point_changed_data);
             }
         }
         gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
@@ -1138,12 +1144,32 @@ on_mode_freehand_toggled(GtkToggleButton *btn, gpointer data)
 /* -------------------------------------------------------------------------
  * Click handler — place or select points
  * ---------------------------------------------------------------------- */
+static gboolean
+on_legacy_event(GtkEventControllerLegacy *ctrl, GdkEvent *ev, gpointer data)
+{
+    (void)ctrl; (void)data;
+    GdkEventType t = gdk_event_get_event_type(ev);
+    if (t == GDK_BUTTON_PRESS || t == GDK_BUTTON_RELEASE || t == GDK_MOTION_NOTIFY) {
+        static int legacy_count = 0;
+        if (legacy_count < 30) {
+            fprintf(stderr, "[DEBUG] LEGACY: type=%d\n", (int)t);
+            fflush(stderr);
+            legacy_count++;
+        }
+    }
+    return GDK_EVENT_PROPAGATE;
+}
+
 static void
 on_press(GtkGestureClick *gesture, int n_press, double x, double y,
          gpointer data)
 {
     (void)n_press;
     DC_BezierEditor *ed = data;
+
+    fprintf(stderr, "[DEBUG] on_press: mode=%d x=%.1f y=%.1f pts=%d\n",
+            ed->mode, x, y, (int)dc_array_length(ed->pts));
+    fflush(stderr);
 
     /* Grab focus so key events reach the canvas */
     gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
@@ -1328,6 +1354,12 @@ on_motion(GtkEventControllerMotion *ctrl, double x, double y, gpointer data)
     (void)ctrl;
     DC_BezierEditor *ed = data;
 
+    static int motion_log_count = 0;
+    if (ed->mouse_down && motion_log_count < 20) {
+        fprintf(stderr, "[DEBUG] on_motion ACTIVE: sel=%d mode=%d cb=%d\n",
+                ed->selected, ed->mode, ed->point_changed_cb ? 1 : 0);
+        motion_log_count++;
+    }
     if (!ed->mouse_down) return;
 
     /* Convert screen delta to world delta */
@@ -1391,6 +1423,10 @@ on_motion(GtkEventControllerMotion *ctrl, double x, double y, gpointer data)
             cp->y = ed->orig_y + dwy;
         }
     }
+
+    /* Fire live-sync callback for the dragged point */
+    if (ed->point_changed_cb)
+        ed->point_changed_cb(ed->selected, p->x, p->y, ed->point_changed_data);
 
     gtk_widget_queue_draw(dc_bezier_canvas_widget(ed->canvas));
 }
@@ -1762,6 +1798,11 @@ dc_bezier_editor_new(void)
 
     GtkWidget *canvas_widget = dc_bezier_canvas_widget(ed->canvas);
 
+    /* DEBUG: catch-all event controller to verify widget gets events */
+    GtkEventController *legacy = gtk_event_controller_legacy_new();
+    g_signal_connect(legacy, "event", G_CALLBACK(on_legacy_event), ed);
+    gtk_widget_add_controller(canvas_widget, legacy);
+
     /* Click gesture for placing and selecting points */
     GtkGesture *click = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 1);
@@ -2043,6 +2084,9 @@ dc_bezier_editor_set_point(DC_BezierEditor *editor, int index,
     p->y = y;
     if (editor->closed && !is_juncture(editor, 0))
         enforce_c1_at_p0(editor);
+    /* Fire live-sync callback so 3D viewport updates */
+    if (editor->point_changed_cb)
+        editor->point_changed_cb(index, x, y, editor->point_changed_data);
     gtk_widget_queue_draw(dc_bezier_canvas_widget(editor->canvas));
     refresh_panel(editor);
 }
@@ -2520,4 +2564,14 @@ dc_bezier_editor_set_profile_apply_cb(DC_BezierEditor *editor,
     if (!editor) return;
     editor->profile_apply_cb = cb;
     editor->profile_apply_data = userdata;
+}
+
+void
+dc_bezier_editor_set_point_changed_cb(DC_BezierEditor *editor,
+                                       DC_PointChangedCb cb,
+                                       void *userdata)
+{
+    if (!editor) return;
+    editor->point_changed_cb = cb;
+    editor->point_changed_data = userdata;
 }
