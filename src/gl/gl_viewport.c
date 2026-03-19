@@ -1100,22 +1100,33 @@ on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data)
         vp->dragging = 2;
         memcpy(vp->drag_center, vp->cam_center, sizeof(vp->drag_center));
     } else if (button == 1 && !vp->locked &&
-               vp->sel_mode == DC_SEL_BEZ_CP &&
-               vp->selected_bez_cp >= 0 && vp->bezier_mesh) {
-        /* Bezier CP drag: move already-selected control point */
-        vp->dragging = 4;
-        int cr = vp->selected_bez_cp / vp->bezier_mesh->cp_cols;
-        int cc = vp->selected_bez_cp % vp->bezier_mesh->cp_cols;
-        ts_vec3 cp = ts_bezier_mesh_get_cp(vp->bezier_mesh, cr, cc);
-        vp->bez_cp_drag_start[0] = (float)cp.v[0];
-        vp->bez_cp_drag_start[1] = (float)cp.v[1];
-        vp->bez_cp_drag_start[2] = (float)cp.v[2];
-        if (vp->bez_cp_move_cb)
-            vp->bez_cp_move_cb(cr, cc, 0,
-                               vp->bez_cp_drag_start[0],
-                               vp->bez_cp_drag_start[1],
-                               vp->bez_cp_drag_start[2],
-                               vp->bez_cp_move_cb_data);
+               vp->sel_mode == DC_SEL_BEZ_CP && vp->bezier_mesh) {
+        /* Bezier CP: try pick-and-drag in one gesture.
+         * If no CP selected yet, pick under cursor. */
+        if (vp->selected_bez_cp < 0)
+            do_pick(vp, (int)x, (int)y);
+
+        if (vp->selected_bez_cp >= 0) {
+            /* CP found — start drag */
+            vp->dragging = 4;
+            int cr = vp->selected_bez_cp / vp->bezier_mesh->cp_cols;
+            int cc = vp->selected_bez_cp % vp->bezier_mesh->cp_cols;
+            ts_vec3 cp = ts_bezier_mesh_get_cp(vp->bezier_mesh, cr, cc);
+            vp->bez_cp_drag_start[0] = (float)cp.v[0];
+            vp->bez_cp_drag_start[1] = (float)cp.v[1];
+            vp->bez_cp_drag_start[2] = (float)cp.v[2];
+            if (vp->bez_cp_move_cb)
+                vp->bez_cp_move_cb(cr, cc, 0,
+                                   vp->bez_cp_drag_start[0],
+                                   vp->bez_cp_drag_start[1],
+                                   vp->bez_cp_drag_start[2],
+                                   vp->bez_cp_move_cb_data);
+        } else {
+            /* No CP under cursor — orbit instead */
+            vp->dragging = 1;
+            vp->drag_theta = vp->cam_theta;
+            vp->drag_phi = vp->cam_phi;
+        }
     } else if (button == 1 && !vp->locked && vp->last_pick_reselect &&
                vp->selected_obj >= 0 && vp->move_cb) {
         /* Move: left-drag on already-selected object */
