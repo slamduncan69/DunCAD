@@ -327,6 +327,15 @@ struct DC_GlViewport {
     int              bezier_loop_index;
     int              selected_bez_curve; /* selected curve index, -1=none */
     int              selected_bez_cp;    /* selected CP index (cp_row*cp_cols+cp_col), -1=none */
+
+    /* Bezier callbacks */
+    DC_GlBezCurveCb  bez_curve_cb;
+    void            *bez_curve_cb_data;
+    DC_GlBezCpMoveCb bez_cp_move_cb;
+    void            *bez_cp_move_cb_data;
+
+    /* Bezier CP drag state */
+    float            bez_cp_drag_start[3]; /* CP position at drag start */
 };
 
 /* Forward declarations for lazy topology builders */
@@ -881,6 +890,78 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
             glBindVertexArray(0);
         }
 
+        /* Draw all CP dots when in BezCurve or BezCP mode */
+        if ((vp->sel_mode == DC_SEL_BEZ_CURVE || vp->sel_mode == DC_SEL_BEZ_CP)
+            && vp->bezier_mesh) {
+            ts_bezier_mesh *bm = vp->bezier_mesh;
+            int total = bm->cp_rows * bm->cp_cols;
+            float dot_sz = vp->cam_dist * 0.006f;
+
+            /* Build cross data for all CPs */
+            /* 6 lines * 2 verts * 6 floats per CP, but simpler: just 3 lines
+             * (xyz cross) per CP = 6 verts * 6 floats = 36 floats/CP */
+            float *dots = (float *)malloc((size_t)total * 36 * sizeof(float));
+            if (dots) {
+                float *dp = dots;
+                for (int i = 0; i < total; i++) {
+                    int cr = i / bm->cp_cols;
+                    int cc = i % bm->cp_cols;
+                    ts_vec3 pt = ts_bezier_mesh_get_cp(bm, cr, cc);
+                    float px = (float)pt.v[0];
+                    float py = (float)pt.v[1];
+                    float pz = (float)pt.v[2];
+                    /* Color: magenta for odd CPs (off-curve), green for even (on-curve) */
+                    int is_boundary = (cr % 2 == 0) && (cc % 2 == 0);
+                    float cr_f = is_boundary ? 0.2f : 1.0f;
+                    float cg_f = is_boundary ? 1.0f : 0.4f;
+                    float cb_f = is_boundary ? 0.2f : 1.0f;
+                    /* X line */
+                    dp[0]=px-dot_sz; dp[1]=py; dp[2]=pz;
+                    dp[3]=cr_f; dp[4]=cg_f; dp[5]=cb_f; dp+=6;
+                    dp[0]=px+dot_sz; dp[1]=py; dp[2]=pz;
+                    dp[3]=cr_f; dp[4]=cg_f; dp[5]=cb_f; dp+=6;
+                    /* Y line */
+                    dp[0]=px; dp[1]=py-dot_sz; dp[2]=pz;
+                    dp[3]=cr_f; dp[4]=cg_f; dp[5]=cb_f; dp+=6;
+                    dp[0]=px; dp[1]=py+dot_sz; dp[2]=pz;
+                    dp[3]=cr_f; dp[4]=cg_f; dp[5]=cb_f; dp+=6;
+                    /* Z line */
+                    dp[0]=px; dp[1]=py; dp[2]=pz-dot_sz;
+                    dp[3]=cr_f; dp[4]=cg_f; dp[5]=cb_f; dp+=6;
+                    dp[0]=px; dp[1]=py; dp[2]=pz+dot_sz;
+                    dp[3]=cr_f; dp[4]=cg_f; dp[5]=cb_f; dp+=6;
+                }
+
+                GLuint dvao, dvbo;
+                glGenVertexArrays(1, &dvao);
+                glGenBuffers(1, &dvbo);
+                glBindVertexArray(dvao);
+                glBindBuffer(GL_ARRAY_BUFFER, dvbo);
+                glBufferData(GL_ARRAY_BUFFER,
+                             (GLsizeiptr)((size_t)total * 36 * sizeof(float)),
+                             dots, GL_STREAM_DRAW);
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                                      6*sizeof(float), (void*)0);
+                glEnableVertexAttribArray(0);
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE,
+                                      6*sizeof(float), (void*)(3*sizeof(float)));
+                glEnableVertexAttribArray(1);
+
+                glUseProgram(vp->line_prog);
+                glUniformMatrix4fv(glGetUniformLocation(vp->line_prog, "uMVP"),
+                                   1, GL_FALSE, vp_mat);
+                glDepthFunc(GL_LEQUAL);
+                glLineWidth(2.0f);
+                glDrawArrays(GL_LINES, 0, total * 6);
+                glLineWidth(1.0f);
+                glDepthFunc(GL_LESS);
+
+                glDeleteBuffers(1, &dvbo);
+                glDeleteVertexArrays(1, &dvao);
+                free(dots);
+            }
+        }
+
         /* Draw selected CP marker (yellow cross) */
         if (vp->selected_bez_cp >= 0 && vp->bezier_mesh) {
             int cr = vp->selected_bez_cp / vp->bezier_mesh->cp_cols;
@@ -1015,6 +1096,23 @@ on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data)
         /* Pan: right/middle click or shift+click */
         vp->dragging = 2;
         memcpy(vp->drag_center, vp->cam_center, sizeof(vp->drag_center));
+    } else if (button == 1 && !vp->locked &&
+               vp->sel_mode == DC_SEL_BEZ_CP &&
+               vp->selected_bez_cp >= 0 && vp->bezier_mesh) {
+        /* Bezier CP drag: move control point */
+        vp->dragging = 4;
+        int cr = vp->selected_bez_cp / vp->bezier_mesh->cp_cols;
+        int cc = vp->selected_bez_cp % vp->bezier_mesh->cp_cols;
+        ts_vec3 cp = ts_bezier_mesh_get_cp(vp->bezier_mesh, cr, cc);
+        vp->bez_cp_drag_start[0] = (float)cp.v[0];
+        vp->bez_cp_drag_start[1] = (float)cp.v[1];
+        vp->bez_cp_drag_start[2] = (float)cp.v[2];
+        if (vp->bez_cp_move_cb)
+            vp->bez_cp_move_cb(cr, cc, 0,
+                               vp->bez_cp_drag_start[0],
+                               vp->bez_cp_drag_start[1],
+                               vp->bez_cp_drag_start[2],
+                               vp->bez_cp_move_cb_data);
     } else if (button == 1 && !vp->locked && vp->last_pick_reselect &&
                vp->selected_obj >= 0 && vp->move_cb) {
         /* Move: left-drag on already-selected object */
@@ -1103,6 +1201,37 @@ on_drag_update(GtkGestureDrag *gesture, double dx, double dy, gpointer data)
         else if (c == 3) { wx = 0; wz = 0; }   /* SCAD Z only (GL_y) */
 
         vp->move_cb(vp->selected_obj, 1, wx, wy, wz, vp->move_cb_data);
+    } else if (vp->dragging == 4 && vp->bezier_mesh && vp->selected_bez_cp >= 0) {
+        /* Bezier CP drag — move control point */
+        float r_x, r_y, r_z, u_x, u_y, u_z;
+        camera_screen_vectors(vp, &r_x, &r_y, &r_z, &u_x, &u_y, &u_z);
+        float scale = vp->cam_dist * 0.001f;
+
+        float mx = (float)dx * scale;
+        float my = (float)dy * scale;
+
+        float wx =  mx * r_x - my * u_x;
+        float wy =           - my * u_y;
+        float wz =  mx * r_z - my * u_z;
+
+        /* Axis constraints */
+        int c = vp->move_constraint;
+        if (c == 1) { wy = 0; wz = 0; }
+        else if (c == 2) { wx = 0; wy = 0; }
+        else if (c == 3) { wx = 0; wz = 0; }
+
+        float nx = vp->bez_cp_drag_start[0] + wx;
+        float ny = vp->bez_cp_drag_start[1] + wy;
+        float nz = vp->bez_cp_drag_start[2] + wz;
+
+        int cr = vp->selected_bez_cp / vp->bezier_mesh->cp_cols;
+        int cc = vp->selected_bez_cp % vp->bezier_mesh->cp_cols;
+        ts_bezier_mesh_set_cp(vp->bezier_mesh, cr, cc,
+                               ts_vec3_make((double)nx, (double)ny, (double)nz));
+        vp->bezier_wire_dirty = 1;
+
+        if (vp->bez_cp_move_cb)
+            vp->bez_cp_move_cb(cr, cc, 1, nx, ny, nz, vp->bez_cp_move_cb_data);
     }
 
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
@@ -1125,6 +1254,24 @@ on_drag_end(GtkGestureDrag *gesture, double dx, double dy, gpointer data)
                     vp->objects[idx].translate[1],
                     vp->objects[idx].translate[2],
                     vp->move_cb_data);
+    } else if (vp->dragging == 4 && vp->bezier_mesh && vp->selected_bez_cp >= 0) {
+        /* CP drag end — fire callback with final position */
+        int cr = vp->selected_bez_cp / vp->bezier_mesh->cp_cols;
+        int cc = vp->selected_bez_cp % vp->bezier_mesh->cp_cols;
+        ts_vec3 cp = ts_bezier_mesh_get_cp(vp->bezier_mesh, cr, cc);
+        if (vp->bez_cp_move_cb)
+            vp->bez_cp_move_cb(cr, cc, 2,
+                               (float)cp.v[0], (float)cp.v[1], (float)cp.v[2],
+                               vp->bez_cp_move_cb_data);
+        /* Rebuild loop highlight if active */
+        if (vp->bezier_loop_type >= 0) {
+            dc_gl_bezier_wire_build_loop(&vp->bezier_loop_vao,
+                                          &vp->bezier_loop_vbo,
+                                          &vp->bezier_loop_vert_count,
+                                          vp->bezier_mesh,
+                                          vp->bezier_loop_type,
+                                          vp->bezier_loop_index, 16);
+        }
     }
 
     vp->dragging = 0;
@@ -2011,7 +2158,24 @@ on_click_pressed(GtkGestureClick *gesture, int n_press,
     /* Bezier selection modes don't require STL objects */
     if (vp->sel_mode == DC_SEL_BEZ_CURVE || vp->sel_mode == DC_SEL_BEZ_CP) {
         if (!vp->bezier_mesh) return;
+        int old_cp = vp->selected_bez_cp;
         do_pick(vp, (int)x, (int)y);
+
+        if (vp->sel_mode == DC_SEL_BEZ_CURVE && vp->selected_bez_curve >= 0) {
+            /* Fire curve selection callback → auto-populate 2D editor */
+            if (vp->bez_curve_cb) {
+                vp->bez_curve_cb(vp->bezier_loop_type,
+                                  vp->bezier_loop_index,
+                                  vp->bez_curve_cb_data);
+            }
+        }
+
+        if (vp->sel_mode == DC_SEL_BEZ_CP && vp->selected_bez_cp >= 0) {
+            /* Track reselect for drag-to-move */
+            vp->last_pick_reselect =
+                (vp->selected_bez_cp == old_cp && old_cp >= 0) ? 1 : 0;
+        }
+
         gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
         return;
     }
@@ -3229,6 +3393,24 @@ dc_gl_viewport_get_bez_cp_pos(DC_GlViewport *vp,
     ts_vec3 cp = ts_bezier_mesh_get_cp(vp->bezier_mesh, cr, cc);
     *x = (float)cp.v[0]; *y = (float)cp.v[1]; *z = (float)cp.v[2];
     return 0;
+}
+
+void
+dc_gl_viewport_set_bez_curve_callback(DC_GlViewport *vp,
+                                        DC_GlBezCurveCb cb, void *userdata)
+{
+    if (!vp) return;
+    vp->bez_curve_cb = cb;
+    vp->bez_curve_cb_data = userdata;
+}
+
+void
+dc_gl_viewport_set_bez_cp_move_callback(DC_GlViewport *vp,
+                                          DC_GlBezCpMoveCb cb, void *userdata)
+{
+    if (!vp) return;
+    vp->bez_cp_move_cb = cb;
+    vp->bez_cp_move_cb_data = userdata;
 }
 
 void

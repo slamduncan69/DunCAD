@@ -3021,6 +3021,45 @@ on_incoming(GSocketService *service, GSocketConnection *conn,
 /* -------------------------------------------------------------------------
  * Public API
  * ---------------------------------------------------------------------- */
+/* Bezier curve selection callback — auto-load loop into 2D editor */
+static void
+on_bez_curve_selected(int loop_type, int loop_index, void *userdata)
+{
+    (void)userdata;
+    s_selected_loop_type = loop_type;
+    s_selected_loop_index = loop_index;
+
+    /* Auto-load the selected curve into the 2D bezier editor */
+    char *resp = cmd_bezier_mesh_edit_loop();
+    free(resp);
+
+    dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP,
+           "bezier curve selected: type=%d index=%d → loaded into 2D editor",
+           loop_type, loop_index);
+}
+
+/* Bezier CP move callback — sync inspect state when viewport moves a CP */
+static void
+on_bez_cp_moved(int cp_row, int cp_col, int phase,
+                float x, float y, float z, void *userdata)
+{
+    (void)userdata;
+
+    if (!s_bezier_mesh) return;
+
+    /* Sync the inspect module's mesh copy with the viewport's */
+    ts_bezier_mesh_set_cp(s_bezier_mesh, cp_row, cp_col,
+                           ts_vec3_make((double)x, (double)y, (double)z));
+
+    if (phase == 2) {
+        /* Drag ended — rebuild wireframe (already done by viewport)
+         * and update loop highlight if active */
+        dc_log(DC_LOG_DEBUG, DC_LOG_EVENT_APP,
+               "bezier CP moved: [%d,%d] → (%.3f, %.3f, %.3f)",
+               cp_row, cp_col, x, y, z);
+    }
+}
+
 int
 dc_inspect_start(GtkWidget *window)
 {
@@ -3054,6 +3093,15 @@ dc_inspect_start(GtkWidget *window)
     g_signal_connect(s_service, "incoming",
                      G_CALLBACK(on_incoming), NULL);
     g_socket_service_start(s_service);
+
+    /* Register bezier callbacks on the viewport */
+    DC_GlViewport *vp = get_viewport();
+    if (vp) {
+        dc_gl_viewport_set_bez_curve_callback(vp,
+            on_bez_curve_selected, NULL);
+        dc_gl_viewport_set_bez_cp_move_callback(vp,
+            on_bez_cp_moved, NULL);
+    }
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
            "inspect: listening on %s", DC_INSPECT_SOCK_PATH);

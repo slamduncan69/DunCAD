@@ -108,6 +108,20 @@ typedef void (*DC_GlMoveCb)(int obj_idx, int phase,
 void dc_gl_viewport_set_move_callback(DC_GlViewport *vp,
                                        DC_GlMoveCb cb, void *userdata);
 
+/* Bezier curve selection callback — called when a patch boundary curve is
+ * clicked in BezCurve mode. loop_type: 0=row, 1=col. loop_index: boundary index. */
+typedef void (*DC_GlBezCurveCb)(int loop_type, int loop_index, void *userdata);
+void dc_gl_viewport_set_bez_curve_callback(DC_GlViewport *vp,
+                                             DC_GlBezCurveCb cb, void *userdata);
+
+/* Bezier CP move callback — called when a CP is dragged.
+ * phase: 0=start, 1=moving, 2=end. cp_row/cp_col identify the CP.
+ * x/y/z is the new absolute position. */
+typedef void (*DC_GlBezCpMoveCb)(int cp_row, int cp_col, int phase,
+                                   float x, float y, float z, void *userdata);
+void dc_gl_viewport_set_bez_cp_move_callback(DC_GlViewport *vp,
+                                               DC_GlBezCpMoveCb cb, void *userdata);
+
 /* Set a viewport-space translate offset for an object (live preview).
  * Applied as a model matrix during rendering — does not modify mesh data.
  * Reset to (0,0,0) when objects are cleared/reloaded. */
