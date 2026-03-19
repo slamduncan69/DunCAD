@@ -1735,6 +1735,19 @@ static void parse_bezier_mesh_block(EParser *p, DC_Array *bmesh_ops)
             if (p->cur.type == ETOK_SEMI) next_token(p);
             dc_array_push(bmesh_ops, &op);
 
+        } else if (ident_eq(&p->cur, "projection")) {
+            next_token(p);
+            expect(p, ETOK_EQ);
+            DC_BMeshOp op = { .type = DC_BMESH_OP_PROJECTION };
+            op.view_mode = 0;  /* default: auto */
+            if (ident_eq(&p->cur, "auto"))         { op.view_mode = 0; next_token(p); }
+            else if (ident_eq(&p->cur, "xy"))      { op.view_mode = 1; next_token(p); }
+            else if (ident_eq(&p->cur, "xz"))      { op.view_mode = 2; next_token(p); }
+            else if (ident_eq(&p->cur, "yz"))       { op.view_mode = 3; next_token(p); }
+            else if (ident_eq(&p->cur, "tangent"))  { op.view_mode = 4; next_token(p); }
+            if (p->cur.type == ETOK_SEMI) next_token(p);
+            dc_array_push(bmesh_ops, &op);
+
         } else {
             /* Skip unknown statement */
             next_token(p);

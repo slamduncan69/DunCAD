@@ -145,4 +145,13 @@ void dc_bezier_editor_set_point_changed_cb(DC_BezierEditor *editor,
                                             DC_PointChangedCb cb,
                                             void *userdata);
 
+/* Projection changed callback — called when user clicks an axis view button.
+ * mode: 0=auto, 1=XY, 2=XZ, 3=YZ, 4=tangent */
+typedef void (*DC_ProjectionChangedCb)(int mode, void *userdata);
+
+/* Set the callback for projection mode changes. */
+void dc_bezier_editor_set_projection_changed_cb(DC_BezierEditor *editor,
+                                                  DC_ProjectionChangedCb cb,
+                                                  void *userdata);
+
 #endif /* DC_BEZIER_EDITOR_H */

@@ -113,6 +113,7 @@ typedef enum {
     DC_BMESH_OP_SET_CP,        /* cp[r][c] = [x, y, z] */
     DC_BMESH_OP_RESOLUTION,    /* resolution = N */
     DC_BMESH_OP_VIEW,          /* view = wireframe|voxel|both|none */
+    DC_BMESH_OP_PROJECTION,    /* projection = auto|xy|xz|yz|tangent */
 } DC_BMeshOpType;
 
 typedef struct {

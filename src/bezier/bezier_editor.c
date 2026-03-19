@@ -59,6 +59,13 @@ struct DC_BezierEditor {
     void            *profile_apply_data;
     DC_PointChangedCb point_changed_cb;
     void            *point_changed_data;
+    DC_ProjectionChangedCb proj_changed_cb;
+    void            *proj_changed_data;
+    GtkWidget       *proj_btn_auto;
+    GtkWidget       *proj_btn_xy;
+    GtkWidget       *proj_btn_xz;
+    GtkWidget       *proj_btn_yz;
+    GtkWidget       *proj_btn_tangent;
     GtkWidget       *apply_profile_btn;  /* shown when profile is active */
     /* Drawing mode */
     DC_EditorMode    mode;
@@ -1144,6 +1151,22 @@ on_mode_freehand_toggled(GtkToggleButton *btn, gpointer data)
 /* -------------------------------------------------------------------------
  * Click handler — place or select points
  * ---------------------------------------------------------------------- */
+static void
+on_proj_btn_clicked(GtkButton *btn, gpointer data)
+{
+    DC_BezierEditor *ed = data;
+    int mode = 0; /* auto */
+    if (GTK_WIDGET(btn) == ed->proj_btn_xy)      mode = 1;
+    else if (GTK_WIDGET(btn) == ed->proj_btn_xz) mode = 2;
+    else if (GTK_WIDGET(btn) == ed->proj_btn_yz) mode = 3;
+    else if (GTK_WIDGET(btn) == ed->proj_btn_tangent) mode = 4;
+
+    if (ed->proj_changed_cb)
+        ed->proj_changed_cb(mode, ed->proj_changed_data);
+
+    gtk_widget_grab_focus(dc_bezier_canvas_widget(ed->canvas));
+}
+
 static gboolean
 on_legacy_event(GtkEventControllerLegacy *ctrl, GdkEvent *ev, gpointer data)
 {
@@ -1926,6 +1949,40 @@ dc_bezier_editor_new(void)
     gtk_box_append(GTK_BOX(toolbar), ed->apply_profile_btn);
     gtk_widget_set_visible(ed->apply_profile_btn, FALSE);
 
+    /* --- Projection view buttons (axis selector) --- */
+    GtkWidget *proj_sep = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+    gtk_box_append(GTK_BOX(toolbar), proj_sep);
+
+    ed->proj_btn_auto = gtk_button_new_with_label("Auto");
+    gtk_widget_set_focusable(ed->proj_btn_auto, FALSE);
+    gtk_widget_set_tooltip_text(ed->proj_btn_auto, "PCA best-fit view");
+    g_signal_connect(ed->proj_btn_auto, "clicked", G_CALLBACK(on_proj_btn_clicked), ed);
+    gtk_box_append(GTK_BOX(toolbar), ed->proj_btn_auto);
+
+    ed->proj_btn_xy = gtk_button_new_with_label("XY");
+    gtk_widget_set_focusable(ed->proj_btn_xy, FALSE);
+    gtk_widget_set_tooltip_text(ed->proj_btn_xy, "Top view (looking down Z)");
+    g_signal_connect(ed->proj_btn_xy, "clicked", G_CALLBACK(on_proj_btn_clicked), ed);
+    gtk_box_append(GTK_BOX(toolbar), ed->proj_btn_xy);
+
+    ed->proj_btn_xz = gtk_button_new_with_label("XZ");
+    gtk_widget_set_focusable(ed->proj_btn_xz, FALSE);
+    gtk_widget_set_tooltip_text(ed->proj_btn_xz, "Front view (looking down Y)");
+    g_signal_connect(ed->proj_btn_xz, "clicked", G_CALLBACK(on_proj_btn_clicked), ed);
+    gtk_box_append(GTK_BOX(toolbar), ed->proj_btn_xz);
+
+    ed->proj_btn_yz = gtk_button_new_with_label("YZ");
+    gtk_widget_set_focusable(ed->proj_btn_yz, FALSE);
+    gtk_widget_set_tooltip_text(ed->proj_btn_yz, "Side view (looking down X)");
+    g_signal_connect(ed->proj_btn_yz, "clicked", G_CALLBACK(on_proj_btn_clicked), ed);
+    gtk_box_append(GTK_BOX(toolbar), ed->proj_btn_yz);
+
+    ed->proj_btn_tangent = gtk_button_new_with_label("T");
+    gtk_widget_set_focusable(ed->proj_btn_tangent, FALSE);
+    gtk_widget_set_tooltip_text(ed->proj_btn_tangent, "Tangent view (along curve)");
+    g_signal_connect(ed->proj_btn_tangent, "clicked", G_CALLBACK(on_proj_btn_clicked), ed);
+    gtk_box_append(GTK_BOX(toolbar), ed->proj_btn_tangent);
+
     gtk_box_append(GTK_BOX(ed->container), toolbar);
 
     /* Canvas fills remaining space */
@@ -2574,4 +2631,14 @@ dc_bezier_editor_set_point_changed_cb(DC_BezierEditor *editor,
     if (!editor) return;
     editor->point_changed_cb = cb;
     editor->point_changed_data = userdata;
+}
+
+void
+dc_bezier_editor_set_projection_changed_cb(DC_BezierEditor *editor,
+                                            DC_ProjectionChangedCb cb,
+                                            void *userdata)
+{
+    if (!editor) return;
+    editor->proj_changed_cb = cb;
+    editor->proj_changed_data = userdata;
 }

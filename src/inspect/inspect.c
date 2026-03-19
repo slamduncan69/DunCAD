@@ -58,6 +58,7 @@ static int s_bezier_resolution;
 static int s_selected_loop_type;
 static void bezier_mesh_refresh(void);
 static void on_2d_point_changed(int index, double u2d, double v2d, void *userdata);
+static void on_2d_projection_changed(int mode, void *userdata);
 
 /* Convenience accessors — all borrowed pointers, may be NULL */
 static DC_BezierEditor  *get_editor(void)  { return dc_app_window_get_editor(s_window); }
@@ -2363,6 +2364,15 @@ static char *cmd_bezier_mesh_loop_cps(void) {
  * ========================================================================= */
 
 /* State for loop editing: stores the 3D plane frame for reverse mapping */
+/* Projection modes for the 2D editor view of a 3D curve */
+typedef enum {
+    LOOP_PROJ_AUTO,     /* PCA best-fit plane (default) */
+    LOOP_PROJ_XY,       /* top view:   u=X, v=Y (looking down Z) */
+    LOOP_PROJ_XZ,       /* front view: u=X, v=Z (looking down Y) */
+    LOOP_PROJ_YZ,       /* side view:  u=Y, v=Z (looking down X) */
+    LOOP_PROJ_TANGENT,  /* along curve: u=tangent, v=normal */
+} LoopProjectionMode;
+
 static struct {
     int    active;
     int    loop_type;      /* 0=row, 1=col */
@@ -2373,10 +2383,14 @@ static struct {
     double normal[3];       /* plane normal */
     int   *cp_indices;      /* pairs of (cp_row, cp_col) for each point */
     int    cp_count;
+    LoopProjectionMode proj_mode;
+    /* Stashed 3D positions for re-projection on mode switch */
+    double *pts3d;          /* [x,y,z] x cp_count, owned */
 } s_loop_edit = {0};
 
 static void loop_edit_clear(void) {
     free(s_loop_edit.cp_indices);
+    free(s_loop_edit.pts3d);
     memset(&s_loop_edit, 0, sizeof(s_loop_edit));
 }
 
@@ -2460,6 +2474,106 @@ static void fit_plane_pca(const double *pts, int n,
     normal[2] = v1[0]*v2[1] - v1[1]*v2[0];
 }
 
+/* Compute projection axes for the given mode and re-project 3D points
+ * into the 2D editor. Uses s_loop_edit.pts3d as the 3D source. */
+static void loop_edit_set_projection(LoopProjectionMode mode) {
+    if (!s_loop_edit.active || !s_loop_edit.pts3d) return;
+    int n = s_loop_edit.cp_count;
+    double *pts3d = s_loop_edit.pts3d;
+
+    s_loop_edit.proj_mode = mode;
+
+    /* Compute centroid for origin */
+    double cx = 0, cy = 0, cz = 0;
+    for (int i = 0; i < n; i++) {
+        cx += pts3d[i*3]; cy += pts3d[i*3+1]; cz += pts3d[i*3+2];
+    }
+    cx /= n; cy /= n; cz /= n;
+    s_loop_edit.origin[0] = cx;
+    s_loop_edit.origin[1] = cy;
+    s_loop_edit.origin[2] = cz;
+
+    switch (mode) {
+    case LOOP_PROJ_XY:
+        s_loop_edit.u_axis[0]=1; s_loop_edit.u_axis[1]=0; s_loop_edit.u_axis[2]=0;
+        s_loop_edit.v_axis[0]=0; s_loop_edit.v_axis[1]=1; s_loop_edit.v_axis[2]=0;
+        s_loop_edit.normal[0]=0; s_loop_edit.normal[1]=0; s_loop_edit.normal[2]=1;
+        break;
+    case LOOP_PROJ_XZ:
+        s_loop_edit.u_axis[0]=1; s_loop_edit.u_axis[1]=0; s_loop_edit.u_axis[2]=0;
+        s_loop_edit.v_axis[0]=0; s_loop_edit.v_axis[1]=0; s_loop_edit.v_axis[2]=1;
+        s_loop_edit.normal[0]=0; s_loop_edit.normal[1]=1; s_loop_edit.normal[2]=0;
+        break;
+    case LOOP_PROJ_YZ:
+        s_loop_edit.u_axis[0]=0; s_loop_edit.u_axis[1]=1; s_loop_edit.u_axis[2]=0;
+        s_loop_edit.v_axis[0]=0; s_loop_edit.v_axis[1]=0; s_loop_edit.v_axis[2]=1;
+        s_loop_edit.normal[0]=1; s_loop_edit.normal[1]=0; s_loop_edit.normal[2]=0;
+        break;
+    case LOOP_PROJ_TANGENT: {
+        /* Tangent = direction from first to last point.
+         * Normal = best-fit plane normal (PCA).
+         * v_axis = tangent × normal (binormal). */
+        double tx = pts3d[(n-1)*3]   - pts3d[0];
+        double ty = pts3d[(n-1)*3+1] - pts3d[1];
+        double tz = pts3d[(n-1)*3+2] - pts3d[2];
+        double tlen = sqrt(tx*tx + ty*ty + tz*tz);
+        if (tlen < 1e-12) { tlen = 1; tx = 1; }
+        tx /= tlen; ty /= tlen; tz /= tlen;
+
+        /* Get a PCA normal for the "up" direction */
+        double pca_u[3], pca_v[3], pca_n[3], pca_o[3];
+        fit_plane_pca(pts3d, n, pca_o, pca_u, pca_v, pca_n);
+
+        /* Binormal = tangent × PCA_normal */
+        double bx = ty*pca_n[2] - tz*pca_n[1];
+        double by = tz*pca_n[0] - tx*pca_n[2];
+        double bz = tx*pca_n[1] - ty*pca_n[0];
+        double blen = sqrt(bx*bx + by*by + bz*bz);
+        if (blen < 1e-12) { bx = 0; by = 1; bz = 0; blen = 1; }
+        bx /= blen; by /= blen; bz /= blen;
+
+        /* Recompute normal = binormal × tangent */
+        double nx2 = by*tz - bz*ty;
+        double ny2 = bz*tx - bx*tz;
+        double nz2 = bx*ty - by*tx;
+
+        s_loop_edit.u_axis[0]=bx; s_loop_edit.u_axis[1]=by; s_loop_edit.u_axis[2]=bz;
+        s_loop_edit.v_axis[0]=nx2; s_loop_edit.v_axis[1]=ny2; s_loop_edit.v_axis[2]=nz2;
+        s_loop_edit.normal[0]=tx; s_loop_edit.normal[1]=ty; s_loop_edit.normal[2]=tz;
+        break;
+    }
+    default: /* LOOP_PROJ_AUTO — use PCA */
+        fit_plane_pca(pts3d, n, s_loop_edit.origin,
+                       s_loop_edit.u_axis, s_loop_edit.v_axis,
+                       s_loop_edit.normal);
+        break;
+    }
+
+    /* Re-project all 3D points to 2D using the new axes */
+    double *pts2d = (double *)malloc((size_t)n * 2 * sizeof(double));
+    for (int i = 0; i < n; i++) {
+        double dx = pts3d[i*3]   - s_loop_edit.origin[0];
+        double dy = pts3d[i*3+1] - s_loop_edit.origin[1];
+        double dz = pts3d[i*3+2] - s_loop_edit.origin[2];
+        pts2d[i*2]   = dx*s_loop_edit.u_axis[0]
+                      + dy*s_loop_edit.u_axis[1]
+                      + dz*s_loop_edit.u_axis[2];
+        pts2d[i*2+1] = dx*s_loop_edit.v_axis[0]
+                      + dy*s_loop_edit.v_axis[1]
+                      + dz*s_loop_edit.v_axis[2];
+    }
+
+    /* Reload into 2D editor */
+    DC_BezierEditor *editor = get_editor();
+    if (editor) {
+        DC_ProfileMeta meta = {0};
+        meta.active = 1;
+        dc_bezier_editor_load_profile(editor, pts2d, n, 0, &meta);
+        dc_bezier_editor_set_point_changed_cb(editor, on_2d_point_changed, NULL);
+    }
+    free(pts2d);
+}
+
 /* bezier_mesh_edit_loop — open selected loop in 2D editor with live sync */
 static char *cmd_bezier_mesh_edit_loop(void) {
     if (!s_bezier_mesh) return strdup("{\"error\":\"no bezier mesh\"}\n");
@@ -2506,46 +2620,13 @@ static char *cmd_bezier_mesh_edit_loop(void) {
     s_loop_edit.loop_type = s_selected_loop_type;
     s_loop_edit.loop_index = s_selected_loop_index;
 
-    /* Fit best plane via PCA */
-    fit_plane_pca(pts3d, n_pts,
-                   s_loop_edit.origin,
-                   s_loop_edit.u_axis,
-                   s_loop_edit.v_axis,
-                   s_loop_edit.normal);
-
-    /* Project 3D CPs to 2D on the plane.
-     * The CPs form quadratic bezier segments: for n_pts CPs,
-     * there are (n_pts-1)/2 quadratic segments if n_pts is odd,
-     * or we treat them as a polyline of quadratic curves.
-     * The 2D editor expects points as [x,y] pairs with alternating
-     * on-curve (even) and off-curve (odd) points. */
-    double *pts2d = (double *)malloc((size_t)n_pts * 2 * sizeof(double));
-    for (int i = 0; i < n_pts; i++) {
-        double dx = pts3d[i*3]   - s_loop_edit.origin[0];
-        double dy = pts3d[i*3+1] - s_loop_edit.origin[1];
-        double dz = pts3d[i*3+2] - s_loop_edit.origin[2];
-        pts2d[i*2]   = dx * s_loop_edit.u_axis[0]
-                      + dy * s_loop_edit.u_axis[1]
-                      + dz * s_loop_edit.u_axis[2];
-        pts2d[i*2+1] = dx * s_loop_edit.v_axis[0]
-                      + dy * s_loop_edit.v_axis[1]
-                      + dz * s_loop_edit.v_axis[2];
-    }
-
-    /* Load into 2D editor as an open profile.
-     * The existing load_profile expects alternating on-curve/off-curve points,
-     * which matches our quadratic CP grid (even = on-curve, odd = off-curve). */
-    DC_ProfileMeta meta = {0};
-    meta.active = 1;
-    dc_bezier_editor_load_profile(editor, pts2d, n_pts, 0, &meta);
-
+    /* Stash the 3D points for re-projection when switching view modes */
+    s_loop_edit.pts3d = pts3d;  /* ownership transferred */
     s_loop_edit.active = 1;
+    s_loop_edit.proj_mode = LOOP_PROJ_AUTO;
 
-    /* Register live-sync callback: 2D drag → 3D mesh update */
-    dc_bezier_editor_set_point_changed_cb(editor, on_2d_point_changed, NULL);
-
-    free(pts3d);
-    free(pts2d);
+    /* Project to 2D via PCA (default) and load into editor */
+    loop_edit_set_projection(LOOP_PROJ_AUTO);
 
     char *resp = malloc(256);
     snprintf(resp, 256,
@@ -2669,10 +2750,39 @@ static void apply_cubeiform_bmesh(const char *src) {
             case DC_BMESH_OP_VIEW:
                 s_bezier_view = (DC_BezierViewMode)bop->view_mode;
                 break;
+            case DC_BMESH_OP_PROJECTION:
+                /* Applied after mesh refresh below */
+                break;
         }
     }
     if (bm_count > 0 && s_bezier_mesh) {
         bezier_mesh_refresh();
+    }
+
+    /* Apply projection mode if specified (must happen after mesh + loop exist) */
+    for (size_t i = 0; i < bm_count; i++) {
+        const DC_BMeshOp *bop = dc_cubeiform_eda_get_bmesh_op(eda, i);
+        if (bop && bop->type == DC_BMESH_OP_PROJECTION && s_loop_edit.active) {
+            LoopProjectionMode proj = LOOP_PROJ_AUTO;
+            switch (bop->view_mode) {
+                case 1: proj = LOOP_PROJ_XY; break;
+                case 2: proj = LOOP_PROJ_XZ; break;
+                case 3: proj = LOOP_PROJ_YZ; break;
+                case 4: proj = LOOP_PROJ_TANGENT; break;
+                default: proj = LOOP_PROJ_AUTO; break;
+            }
+            /* Re-read 3D positions and re-project */
+            for (int j = 0; j < s_loop_edit.cp_count; j++) {
+                int cr = s_loop_edit.cp_indices[j*2];
+                int cc = s_loop_edit.cp_indices[j*2+1];
+                ts_vec3 cp = ts_bezier_mesh_get_cp(s_bezier_mesh, cr, cc);
+                s_loop_edit.pts3d[j*3]   = cp.v[0];
+                s_loop_edit.pts3d[j*3+1] = cp.v[1];
+                s_loop_edit.pts3d[j*3+2] = cp.v[2];
+            }
+            loop_edit_set_projection(proj);
+            break;
+        }
     }
     dc_cubeiform_eda_free(eda);
 }
@@ -3035,6 +3145,85 @@ dispatch(const char *cmd)
     if (strcmp(name, "bezier_mesh_state")       == 0) return cmd_bezier_mesh_state();
     if (strcmp(name, "bezier_mesh_view")        == 0) return cmd_bezier_mesh_view(args);
     if (strcmp(name, "bezier_mesh_resolution")  == 0) return cmd_bezier_mesh_resolution(args);
+    if (strcmp(name, "bezier_2d_capture") == 0) {
+        /* Capture the 2D bezier canvas to a PNG file */
+        if (!args || !*args)
+            return strdup("{\"error\":\"usage: bezier_2d_capture <path.png>\"}\n");
+        DC_BezierEditor *ed = get_editor();
+        if (!ed) return strdup("{\"error\":\"no bezier editor\"}\n");
+        GtkWidget *canvas_w = dc_bezier_editor_widget(ed);
+        if (!canvas_w) return strdup("{\"error\":\"no canvas widget\"}\n");
+
+        /* Use GtkWidgetPaintable to render the widget tree to a PNG */
+        GdkPaintable *paintable = GDK_PAINTABLE(
+            gtk_widget_paintable_new(canvas_w));
+        int w = gdk_paintable_get_intrinsic_width(paintable);
+        int h = gdk_paintable_get_intrinsic_height(paintable);
+        if (w <= 0 || h <= 0) {
+            w = gtk_widget_get_width(canvas_w);
+            h = gtk_widget_get_height(canvas_w);
+        }
+        if (w <= 0) w = 400;
+        if (h <= 0) h = 400;
+
+        GtkSnapshot *snapshot = gtk_snapshot_new();
+        gdk_paintable_snapshot(paintable, snapshot, (double)w, (double)h);
+        GskRenderNode *node = gtk_snapshot_free_to_node(snapshot);
+
+        char *resp = malloc(512);
+        if (node) {
+            cairo_surface_t *surface = cairo_image_surface_create(
+                CAIRO_FORMAT_ARGB32, w, h);
+            cairo_t *cr = cairo_create(surface);
+            GskRenderer *renderer = gsk_cairo_renderer_new();
+            gsk_renderer_realize(renderer, NULL, NULL);
+            gsk_renderer_render(renderer, node, NULL);
+            gsk_render_node_draw(node, cr);
+            cairo_destroy(cr);
+            cairo_surface_write_to_png(surface, args);
+            cairo_surface_destroy(surface);
+            gsk_render_node_unref(node);
+            gsk_renderer_unrealize(renderer);
+            g_object_unref(renderer);
+            snprintf(resp, 512,
+                     "{\"ok\":true,\"path\":\"%s\",\"width\":%d,\"height\":%d}\n",
+                     args, w, h);
+        } else {
+            snprintf(resp, 512, "{\"error\":\"snapshot failed\"}\n");
+        }
+        g_object_unref(paintable);
+        return resp;
+    }
+    if (strcmp(name, "bezier_2d_projection") == 0) {
+        /* Set 2D editor projection mode: auto|xy|xz|yz|tangent */
+        if (!s_loop_edit.active)
+            return strdup("{\"error\":\"no loop edit active\"}\n");
+        if (!args || !*args)
+            return strdup("{\"error\":\"usage: bezier_2d_projection auto|xy|xz|yz|tangent\"}\n");
+        LoopProjectionMode mode = LOOP_PROJ_AUTO;
+        if (strcmp(args, "xy") == 0)           mode = LOOP_PROJ_XY;
+        else if (strcmp(args, "xz") == 0)      mode = LOOP_PROJ_XZ;
+        else if (strcmp(args, "yz") == 0)      mode = LOOP_PROJ_YZ;
+        else if (strcmp(args, "tangent") == 0)  mode = LOOP_PROJ_TANGENT;
+        else if (strcmp(args, "auto") == 0)     mode = LOOP_PROJ_AUTO;
+        else return strdup("{\"error\":\"unknown mode — use auto|xy|xz|yz|tangent\"}\n");
+
+        /* Re-read 3D positions from the mesh (may have been edited) */
+        for (int i = 0; i < s_loop_edit.cp_count; i++) {
+            int cr = s_loop_edit.cp_indices[i*2];
+            int cc = s_loop_edit.cp_indices[i*2+1];
+            ts_vec3 cp = ts_bezier_mesh_get_cp(s_bezier_mesh, cr, cc);
+            s_loop_edit.pts3d[i*3]   = cp.v[0];
+            s_loop_edit.pts3d[i*3+1] = cp.v[1];
+            s_loop_edit.pts3d[i*3+2] = cp.v[2];
+        }
+        loop_edit_set_projection(mode);
+
+        static const char *mode_names[] = {"auto","xy","xz","yz","tangent"};
+        char *resp = malloc(128);
+        snprintf(resp, 128, "{\"ok\":true,\"projection\":\"%s\"}\n", mode_names[mode]);
+        return resp;
+    }
     if (strcmp(name, "bezier_2d_move_point") == 0) {
         /* Move a 2D editor point and fire the live-sync callback.
          * Usage: bezier_2d_move_point <index> <x2d> <y2d> */
@@ -3187,6 +3376,38 @@ on_bez_curve_selected(int loop_type, int loop_index, void *userdata)
            loop_type, loop_index);
 }
 
+/* 2D editor projection button clicked → switch view axis */
+static void
+on_2d_projection_changed(int mode, void *userdata)
+{
+    (void)userdata;
+    if (!s_loop_edit.active || !s_bezier_mesh) return;
+
+    /* Re-read 3D positions from mesh (may have been edited) */
+    for (int i = 0; i < s_loop_edit.cp_count; i++) {
+        int cr = s_loop_edit.cp_indices[i*2];
+        int cc = s_loop_edit.cp_indices[i*2+1];
+        ts_vec3 cp = ts_bezier_mesh_get_cp(s_bezier_mesh, cr, cc);
+        s_loop_edit.pts3d[i*3]   = cp.v[0];
+        s_loop_edit.pts3d[i*3+1] = cp.v[1];
+        s_loop_edit.pts3d[i*3+2] = cp.v[2];
+    }
+
+    LoopProjectionMode proj = LOOP_PROJ_AUTO;
+    switch (mode) {
+        case 1: proj = LOOP_PROJ_XY; break;
+        case 2: proj = LOOP_PROJ_XZ; break;
+        case 3: proj = LOOP_PROJ_YZ; break;
+        case 4: proj = LOOP_PROJ_TANGENT; break;
+        default: proj = LOOP_PROJ_AUTO; break;
+    }
+    loop_edit_set_projection(proj);
+
+    static const char *names[] = {"auto","xy","xz","yz","tangent"};
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "2D projection changed to %s", names[proj]);
+}
+
 /* 2D editor point changed → un-project to 3D and update mesh + viewport live */
 static void
 on_2d_point_changed(int index, double u2d, double v2d, void *userdata)
@@ -3289,6 +3510,13 @@ dc_inspect_start(GtkWidget *window)
             on_bez_curve_selected, NULL);
         dc_gl_viewport_set_bez_cp_move_callback(vp,
             on_bez_cp_moved, NULL);
+    }
+
+    /* Register projection mode callback on the bezier editor */
+    DC_BezierEditor *be = get_editor();
+    if (be) {
+        dc_bezier_editor_set_projection_changed_cb(be,
+            on_2d_projection_changed, NULL);
     }
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
