@@ -55,4 +55,13 @@ int dc_scad_preview_is_rendering(DC_ScadPreview *pv);
 void dc_scad_preview_set_voxel_resolution(DC_ScadPreview *pv, int resolution);
 int  dc_scad_preview_get_voxel_resolution(DC_ScadPreview *pv);
 
+/* Tricanvas: render mode — which output this preview accepts.
+ * 0 = all (legacy), 1 = solid only (voxel grid), 2 = mesh only (bezier mesh).
+ * Set sibling so F5 triggers both previews. */
+#define DC_RENDER_ALL   0
+#define DC_RENDER_SOLID 1
+#define DC_RENDER_MESH  2
+void dc_scad_preview_set_render_mode(DC_ScadPreview *pv, int mode);
+void dc_scad_preview_set_sibling(DC_ScadPreview *pv, DC_ScadPreview *sibling);
+
 #endif /* DC_SCAD_PREVIEW_H */

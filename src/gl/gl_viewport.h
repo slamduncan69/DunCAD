@@ -182,6 +182,15 @@ void dc_gl_viewport_set_voxel_grid(DC_GlViewport *vp,
 void dc_gl_viewport_set_voxel_blocky(DC_GlViewport *vp, int blocky);
 int  dc_gl_viewport_get_voxel_blocky(DC_GlViewport *vp);
 
+/* ---- Canvas type (controls which selection modes are available) ---- */
+
+typedef enum {
+    DC_CANVAS_SOLID   = 0,  /* Object/Face/Edge selection */
+    DC_CANVAS_MESH    = 1,  /* BezCurve/BezCP selection */
+} DC_CanvasType;
+
+void dc_gl_viewport_set_canvas_type(DC_GlViewport *vp, DC_CanvasType type);
+
 /* ---- Selection modes ---- */
 
 typedef enum {

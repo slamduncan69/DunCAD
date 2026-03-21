@@ -527,6 +527,9 @@ dc_gl_voxel_buf_draw(const DC_GlVoxelBuf *b,
         /* --- Smooth: SDF raymarching --- */
         if (!b->ray_prog) return;
 
+        /* Disable depth test — the fullscreen quad does its own ray marching */
+        glDisable(GL_DEPTH_TEST);
+
         glUseProgram(b->ray_prog);
         glUniformMatrix4fv(glGetUniformLocation(b->ray_prog, "uInvVP"), 1, GL_FALSE, view_proj_inv);
         glUniform3fv(glGetUniformLocation(b->ray_prog, "uEye"), 1, eye);
@@ -551,6 +554,8 @@ dc_gl_voxel_buf_draw(const DC_GlVoxelBuf *b,
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_3D, 0);
         glUseProgram(0);
+
+        glEnable(GL_DEPTH_TEST);
     }
 }
 

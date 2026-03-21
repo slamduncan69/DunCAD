@@ -260,7 +260,8 @@ struct DC_GlViewport {
     int          obj_count;
     int          selected_obj;   /* -1 = none */
 
-    /* Selection mode */
+    /* Canvas type and selection mode */
+    DC_CanvasType canvas_type;  /* DC_CANVAS_SOLID or DC_CANVAS_MESH */
     DC_SelectMode sel_mode;     /* DC_SEL_OBJECT / FACE / EDGE */
     int          selected_face; /* face group index in selected obj (-1 = none) */
     int          selected_edge; /* edge group index in selected obj (-1 = none) */
@@ -314,6 +315,7 @@ struct DC_GlViewport {
     DC_GlVoxelBuf *voxel_buf;     /* NULL if no voxels loaded */
     int             voxel_pending; /* 1 if grid needs upload on next frame */
     const DC_VoxelGrid *voxel_grid_pending; /* grid to upload */
+    int             voxel_blocky_default; /* stored for when buf is created */
 
     /* Bezier patch mesh wireframe */
     ts_bezier_mesh  *bezier_mesh;       /* owned copy, NULL if none */
@@ -862,6 +864,15 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         /* Rebuild wireframe if dirty */
         if (vp->bezier_wire_dirty || !vp->bezier_wire.built) {
             dc_gl_bezier_wire_build(&vp->bezier_wire, vp->bezier_mesh, 4, 16);
+            /* Rebuild loop highlight too — keeps cyan on the moved curve */
+            if (vp->bezier_loop_type >= 0) {
+                dc_gl_bezier_wire_build_loop(&vp->bezier_loop_vao,
+                                              &vp->bezier_loop_vbo,
+                                              &vp->bezier_loop_vert_count,
+                                              vp->bezier_mesh,
+                                              vp->bezier_loop_type,
+                                              vp->bezier_loop_index, 16);
+            }
             vp->bezier_wire_dirty = 0;
         }
 
@@ -1011,8 +1022,11 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
 
     /* --- Voxel rendering --- */
     if (vp->voxel_pending && vp->voxel_grid_pending) {
-        if (!vp->voxel_buf)
+        if (!vp->voxel_buf) {
             vp->voxel_buf = dc_gl_voxel_buf_new();
+            if (vp->voxel_buf)
+                dc_gl_voxel_buf_set_blocky(vp->voxel_buf, vp->voxel_blocky_default);
+        }
         if (vp->voxel_buf) {
             dc_gl_voxel_buf_upload(vp->voxel_buf, vp->voxel_grid_pending);
             dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
@@ -2818,6 +2832,7 @@ void
 dc_gl_viewport_set_voxel_blocky(DC_GlViewport *vp, int blocky)
 {
     if (!vp) return;
+    vp->voxel_blocky_default = blocky;
     if (vp->voxel_buf)
         dc_gl_voxel_buf_set_blocky(vp->voxel_buf, blocky);
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
@@ -3001,11 +3016,34 @@ void
 dc_gl_viewport_cycle_select_mode(DC_GlViewport *vp)
 {
     if (!vp) return;
-    /* Cycle: Object → Face → Edge → BezCurve → BezCP → Object
-     * But only include bezier modes if a bezier mesh is loaded */
-    int max_mode = vp->bezier_mesh ? 5 : 3;
-    DC_SelectMode next = (DC_SelectMode)((vp->sel_mode + 1) % max_mode);
-    dc_gl_viewport_set_select_mode(vp, next);
+
+    if (vp->canvas_type == DC_CANVAS_MESH) {
+        /* Mesh canvas: BezCurve ↔ BezCP only */
+        DC_SelectMode next = (vp->sel_mode == DC_SEL_BEZ_CP)
+            ? DC_SEL_BEZ_CURVE : DC_SEL_BEZ_CP;
+        dc_gl_viewport_set_select_mode(vp, next);
+    } else {
+        /* Solid canvas: Object → Face → Edge → Object */
+        DC_SelectMode next;
+        switch (vp->sel_mode) {
+        case DC_SEL_OBJECT: next = DC_SEL_FACE; break;
+        case DC_SEL_FACE:   next = DC_SEL_EDGE; break;
+        default:            next = DC_SEL_OBJECT; break;
+        }
+        dc_gl_viewport_set_select_mode(vp, next);
+    }
+}
+
+void
+dc_gl_viewport_set_canvas_type(DC_GlViewport *vp, DC_CanvasType type)
+{
+    if (!vp) return;
+    vp->canvas_type = type;
+    /* Set default selection mode for this canvas type */
+    if (type == DC_CANVAS_MESH)
+        dc_gl_viewport_set_select_mode(vp, DC_SEL_BEZ_CURVE);
+    else
+        dc_gl_viewport_set_select_mode(vp, DC_SEL_OBJECT);
 }
 
 int

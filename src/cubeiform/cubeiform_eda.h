@@ -179,6 +179,7 @@ int dc_cubeiform_execute_full(const char *dcad_src,
                                 DC_ESchematic *sch,
                                 DC_EPcb *pcb,
                                 DC_VoxelGrid **vox_out,
+                                void **bmesh_out,  /* ts_bezier_mesh* — caller owns, may be NULL */
                                 DC_ELibrary *lib,
                                 DC_Error *err);
 

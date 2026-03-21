@@ -748,13 +748,80 @@ on_redo_activate(GSimpleAction *action, GVariant *param, gpointer data)
 }
 
 /* -------------------------------------------------------------------------
+ * Tricanvas swap — swap canvases between foreground (center) and background
+ * (right column). Uses reparenting with ref/unref to preserve widgets.
+ * After swap, re-push GL data to force re-upload on next render.
+ *
+ * Layout rule: the focused canvas goes to center. Of the remaining two,
+ * 2D prefers top-right, Mesh prefers bottom-right, Solid takes whatever's free.
+ * ---------------------------------------------------------------------- */
+static void
+tricanvas_swap(GtkWidget *window, int target)
+{
+    GtkWidget *solid  = g_object_get_data(G_OBJECT(window), "dc-solid-canvas");
+    GtkWidget *c2d    = g_object_get_data(G_OBJECT(window), "dc-canvas-2d");
+    GtkWidget *mesh   = g_object_get_data(G_OBJECT(window), "dc-mesh-canvas");
+    GtkWidget *center = g_object_get_data(G_OBJECT(window), "dc-center-slot");
+    GtkWidget *bg_top = g_object_get_data(G_OBJECT(window), "dc-bg-top-slot");
+    GtkWidget *bg_bot = g_object_get_data(G_OBJECT(window), "dc-bg-bottom-slot");
+
+    if (!solid || !c2d || !mesh || !center || !bg_top || !bg_bot) return;
+
+    int current = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(window), "dc-active-canvas"));
+    if (current == target) return;
+
+    /* Hold references so widgets survive unparenting */
+    g_object_ref(solid);
+    g_object_ref(c2d);
+    g_object_ref(mesh);
+
+    /* Unparent all three */
+    GtkWidget *p;
+    p = gtk_widget_get_parent(solid); if (p) gtk_box_remove(GTK_BOX(p), solid);
+    p = gtk_widget_get_parent(c2d);   if (p) gtk_box_remove(GTK_BOX(p), c2d);
+    p = gtk_widget_get_parent(mesh);  if (p) gtk_box_remove(GTK_BOX(p), mesh);
+
+    /* Place: focused → center. Others → right column.
+     * 2D prefers top, Mesh prefers bottom, Solid takes what's left. */
+    GtkWidget *fg, *bg1, *bg2;
+    switch (target) {
+    case 1: fg = solid; bg1 = c2d;   bg2 = mesh;  break; /* top=2D, bot=Mesh */
+    case 2: fg = c2d;   bg1 = solid; bg2 = mesh;  break; /* top=Solid, bot=Mesh */
+    case 3: fg = mesh;  bg1 = c2d;   bg2 = solid; break; /* top=2D, bot=Solid */
+    default: g_object_unref(solid); g_object_unref(c2d); g_object_unref(mesh); return;
+    }
+
+    gtk_box_append(GTK_BOX(center), fg);
+    gtk_box_append(GTK_BOX(bg_top), bg1);
+    gtk_box_append(GTK_BOX(bg_bot), bg2);
+
+    g_object_unref(solid);
+    g_object_unref(c2d);
+    g_object_unref(mesh);
+
+    /* Re-push GL data: voxel grids and bezier meshes need re-upload
+     * after GL context recreation from reparenting */
+    DC_ScadPreview *solid_pv = g_object_get_data(G_OBJECT(window), "dc-scad-preview");
+    DC_ScadPreview *mesh_pv  = g_object_get_data(G_OBJECT(window), "dc-mesh-preview");
+    if (solid_pv) dc_scad_preview_render(solid_pv);
+    if (mesh_pv)  dc_scad_preview_render(mesh_pv);
+
+    g_object_set_data(G_OBJECT(window), "dc-active-canvas",
+                      GINT_TO_POINTER(target));
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "tricanvas: swapped to canvas %d (%s)",
+           target, target == 1 ? "solid" : target == 2 ? "2d" : "mesh");
+}
+
+/* -------------------------------------------------------------------------
  * Key handler for window-level shortcuts
  * ---------------------------------------------------------------------- */
 static gboolean
 on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
                guint keycode, GdkModifierType mods, gpointer data)
 {
-    (void)ctrl; (void)keycode; (void)mods;
+    (void)ctrl; (void)keycode;
     GtkWidget *window = data;
 
     if (keyval == GDK_KEY_F5) {
@@ -762,6 +829,13 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
                                                 "dc-scad-preview-ref");
         if (pv) dc_scad_preview_render_refit(pv);
         return TRUE;
+    }
+
+    /* Alt+1/2/3: Tricanvas swap — swap canvases between foreground and background */
+    if (mods & GDK_ALT_MASK) {
+        if (keyval == GDK_KEY_1) { tricanvas_swap(window, 1); return TRUE; }
+        if (keyval == GDK_KEY_2) { tricanvas_swap(window, 2); return TRUE; }
+        if (keyval == GDK_KEY_3) { tricanvas_swap(window, 3); return TRUE; }
     }
 
     return FALSE;
@@ -833,57 +907,95 @@ dc_app_window_create(GtkApplication *app)
     GtkWidget *outer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_window_set_child(GTK_WINDOW(window), outer_box);
 
-    /* --- Three-pane layout using nested GtkPaned --- */
+    /* --- TRICANVAS LAYOUT --- */
     /*
-     * Structure:
+     * Structure (Triclaude's Three Canvases):
      *   outer_paned (horizontal)
-     *     ├─ left: code editor (~400px)
-     *     └─ inner_paned (horizontal)
-     *         ├─ center: OpenSCAD 3D preview (flexible)
-     *         └─ right_paned (vertical, ~400px)
-     *             ├─ top: bezier curve editor (square-ish)
-     *             └─ bottom: placeholder (future properties)
+     *     ├─ left: code editor (~350px)
+     *     └─ inner_paned (horizontal, draggable)
+     *         ├─ center: solid canvas (main viewport)
+     *         └─ right_paned (vertical, draggable)
+     *             ├─ top: 2D canvas (bezier curves)
+     *             ├─ middle: mesh canvas (TSBPM wireframe)
+     *             └─ bottom: terminal
+     *
+     * All panes are resizable by dragging the dividers.
+     * Alt+1/2/3 maximizes a canvas by adjusting pane positions.
      */
 
     /* Create the panels */
     DC_CodeEditor *code_ed = dc_code_editor_new();
-    GtkWidget *left_panel = dc_code_editor_widget(code_ed);
-
-    DC_ScadPreview *preview = dc_scad_preview_new();
-    dc_scad_preview_set_code_editor(preview, code_ed);
-    GtkWidget *center_panel = dc_scad_preview_widget(preview);
-
-    DC_BezierEditor *editor = dc_bezier_editor_new();
-    GtkWidget *bezier_widget = dc_bezier_editor_widget(editor);
+    GtkWidget *code_widget = dc_code_editor_widget(code_ed);
 
     DC_TerminalPanel *terminal = dc_terminal_panel_new();
     GtkWidget *terminal_widget = dc_terminal_panel_widget(terminal);
 
-    /* Right pane: vertical split — bezier (top) + terminal (bottom) */
+    /* Canvas 1: Solid (SDF/voxel) — main viewport, always center */
+    DC_ScadPreview *preview = dc_scad_preview_new();
+    dc_scad_preview_set_code_editor(preview, code_ed);
+    GtkWidget *solid_canvas = dc_scad_preview_widget(preview);
+
+    /* Canvas 2: 2D (bezier curves) */
+    DC_BezierEditor *editor = dc_bezier_editor_new();
+    GtkWidget *canvas_2d = dc_bezier_editor_widget(editor);
+
+    /* Canvas 3: Mesh (TSBPM wireframe) — second ScadPreview instance */
+    DC_ScadPreview *mesh_preview = dc_scad_preview_new();
+    dc_scad_preview_set_code_editor(mesh_preview, code_ed);
+    GtkWidget *mesh_canvas = dc_scad_preview_widget(mesh_preview);
+
+    /* Canvas slot containers — canvases live inside these boxes
+     * so they can be reparented for Alt+N swapping */
+    GtkWidget *center_slot = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_vexpand(center_slot, TRUE);
+    gtk_widget_set_hexpand(center_slot, TRUE);
+    gtk_box_append(GTK_BOX(center_slot), solid_canvas);
+
+    GtkWidget *bg_top_slot = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_vexpand(bg_top_slot, TRUE);
+    gtk_widget_set_hexpand(bg_top_slot, TRUE);
+    gtk_box_append(GTK_BOX(bg_top_slot), canvas_2d);
+
+    GtkWidget *bg_bot_slot = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_vexpand(bg_bot_slot, TRUE);
+    gtk_widget_set_hexpand(bg_bot_slot, TRUE);
+    gtk_box_append(GTK_BOX(bg_bot_slot), mesh_canvas);
+
+    /* Right column: bg_top (top) + bg_bot (middle) + terminal (bottom)
+     * Two nested vertical panes for three-way split */
+    GtkWidget *right_upper_paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
+    gtk_paned_set_start_child(GTK_PANED(right_upper_paned), bg_top_slot);
+    gtk_paned_set_end_child(GTK_PANED(right_upper_paned), bg_bot_slot);
+    gtk_paned_set_position(GTK_PANED(right_upper_paned), 280);
+    gtk_paned_set_resize_start_child(GTK_PANED(right_upper_paned), TRUE);
+    gtk_paned_set_resize_end_child(GTK_PANED(right_upper_paned), TRUE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(right_upper_paned), FALSE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(right_upper_paned), FALSE);
+
     GtkWidget *right_paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
-    gtk_paned_set_start_child(GTK_PANED(right_paned), bezier_widget);
+    gtk_paned_set_start_child(GTK_PANED(right_paned), right_upper_paned);
     gtk_paned_set_end_child(GTK_PANED(right_paned), terminal_widget);
-    gtk_paned_set_position(GTK_PANED(right_paned), 400);
+    gtk_paned_set_position(GTK_PANED(right_paned), 560);
     gtk_paned_set_resize_start_child(GTK_PANED(right_paned), TRUE);
     gtk_paned_set_resize_end_child(GTK_PANED(right_paned), TRUE);
     gtk_paned_set_shrink_start_child(GTK_PANED(right_paned), FALSE);
     gtk_paned_set_shrink_end_child(GTK_PANED(right_paned), FALSE);
 
-    /* Inner pane: center preview + right panel */
+    /* Inner pane: center canvas slot + right column */
     GtkWidget *inner_paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_paned_set_start_child(GTK_PANED(inner_paned), center_panel);
+    gtk_paned_set_start_child(GTK_PANED(inner_paned), center_slot);
     gtk_paned_set_end_child(GTK_PANED(inner_paned), right_paned);
-    gtk_paned_set_position(GTK_PANED(inner_paned), 600);
+    gtk_paned_set_position(GTK_PANED(inner_paned), 700);
     gtk_paned_set_resize_start_child(GTK_PANED(inner_paned), TRUE);
-    gtk_paned_set_resize_end_child(GTK_PANED(inner_paned), FALSE);
+    gtk_paned_set_resize_end_child(GTK_PANED(inner_paned), TRUE);
     gtk_paned_set_shrink_start_child(GTK_PANED(inner_paned), FALSE);
     gtk_paned_set_shrink_end_child(GTK_PANED(inner_paned), FALSE);
 
-    /* Outer pane: left code editor + inner */
+    /* Outer pane: code editor (left) + inner */
     GtkWidget *outer_paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_paned_set_start_child(GTK_PANED(outer_paned), left_panel);
+    gtk_paned_set_start_child(GTK_PANED(outer_paned), code_widget);
     gtk_paned_set_end_child(GTK_PANED(outer_paned), inner_paned);
-    gtk_paned_set_position(GTK_PANED(outer_paned), 400);
+    gtk_paned_set_position(GTK_PANED(outer_paned), 350);
     gtk_paned_set_resize_start_child(GTK_PANED(outer_paned), FALSE);
     gtk_paned_set_resize_end_child(GTK_PANED(outer_paned), TRUE);
     gtk_paned_set_shrink_start_child(GTK_PANED(outer_paned), FALSE);
@@ -891,6 +1003,16 @@ dc_app_window_create(GtkApplication *app)
 
     gtk_widget_set_vexpand(outer_paned, TRUE);
     gtk_widget_set_hexpand(outer_paned, TRUE);
+
+    /* Store tricanvas state for Alt+N swapping */
+    g_object_set_data(G_OBJECT(window), "dc-solid-canvas", solid_canvas);
+    g_object_set_data(G_OBJECT(window), "dc-canvas-2d", canvas_2d);
+    g_object_set_data(G_OBJECT(window), "dc-mesh-canvas", mesh_canvas);
+    g_object_set_data(G_OBJECT(window), "dc-center-slot", center_slot);
+    g_object_set_data(G_OBJECT(window), "dc-bg-top-slot", bg_top_slot);
+    g_object_set_data(G_OBJECT(window), "dc-bg-bottom-slot", bg_bot_slot);
+    g_object_set_data(G_OBJECT(window), "dc-active-canvas",
+                      GINT_TO_POINTER(1)); /* 1=solid, 2=2d, 3=mesh */
 
     /* --- Tab system: GtkStack wrapping 3D CAD, EDA, Assembly --- */
     GtkWidget *stack = gtk_stack_new();
@@ -977,8 +1099,20 @@ dc_app_window_create(GtkApplication *app)
     g_object_set_data_full(G_OBJECT(window), "dc-code-editor", code_ed,
                            (GDestroyNotify)dc_code_editor_free);
 
-    /* Wire the SCAD preview to the window */
+    /* Wire the SCAD previews to the window */
+    dc_scad_preview_set_render_mode(preview, DC_RENDER_SOLID);
+    dc_scad_preview_set_render_mode(mesh_preview, DC_RENDER_MESH);
+    dc_scad_preview_set_sibling(preview, mesh_preview);
+    dc_scad_preview_set_sibling(mesh_preview, preview);
+
+    /* Set canvas types — controls selection modes */
+    DC_GlViewport *solid_vp = dc_scad_preview_get_viewport(preview);
+    DC_GlViewport *mesh_vp = dc_scad_preview_get_viewport(mesh_preview);
+    if (solid_vp) dc_gl_viewport_set_canvas_type(solid_vp, DC_CANVAS_SOLID);
+    if (mesh_vp)  dc_gl_viewport_set_canvas_type(mesh_vp, DC_CANVAS_MESH);
     g_object_set_data_full(G_OBJECT(window), "dc-scad-preview", preview,
+                           (GDestroyNotify)dc_scad_preview_free);
+    g_object_set_data_full(G_OBJECT(window), "dc-mesh-preview", mesh_preview,
                            (GDestroyNotify)dc_scad_preview_free);
 
     /* Wire the terminal panel with AI chat */
@@ -1137,6 +1271,13 @@ dc_app_window_get_scad_preview(GtkWidget *window)
 {
     if (!window) return NULL;
     return g_object_get_data(G_OBJECT(window), "dc-scad-preview-ref");
+}
+
+struct DC_ScadPreview *
+dc_app_window_get_mesh_preview(GtkWidget *window)
+{
+    if (!window) return NULL;
+    return g_object_get_data(G_OBJECT(window), "dc-mesh-preview");
 }
 
 struct DC_EdaView *

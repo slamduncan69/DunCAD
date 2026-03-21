@@ -12,6 +12,7 @@
 
 /* Trinity Site — native OpenSCAD interpreter (replaces OpenSCAD subprocess) */
 #include "ts_eval.h"
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_mesh.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +56,10 @@ struct DC_ScadPreview {
     /* Voxel rendering — THE PURE PATH */
     int             voxel_resolution; /* cells per longest axis (default 64) */
     DC_VoxelGrid   *voxel_grid;      /* owned — last voxelized scene */
+
+    /* Tricanvas: render mode and sibling */
+    int             render_mode;     /* 0=all (legacy), 1=solid only, 2=mesh only */
+    DC_ScadPreview *sibling;         /* the other preview to trigger on F5 */
 };
 
 /* -------------------------------------------------------------------------
@@ -576,10 +581,61 @@ do_render(DC_ScadPreview *pv)
 
         DC_Error err = {0};
         DC_VoxelGrid *grid = NULL;
-        dc_cubeiform_execute_full(full_src, NULL, NULL, &grid, NULL, &err);
+        void *bmesh = NULL;
+        dc_cubeiform_execute_full(full_src, NULL, NULL, &grid, &bmesh, NULL, &err);
         free(full_src);
 
-        if (grid) {
+        int got_something = 0;
+
+        /* --- MESH MODE: accept bezier mesh, ignore voxels --- */
+        if (bmesh && pv->render_mode != DC_RENDER_SOLID) {
+            ts_bezier_mesh *m = (ts_bezier_mesh *)bmesh;
+            dc_gl_viewport_clear_objects(pv->viewport);
+            dc_gl_viewport_clear_mesh(pv->viewport);
+            dc_gl_viewport_set_bezier_mesh(pv->viewport, m);
+            dc_gl_viewport_set_bezier_view(pv->viewport, DC_BEZIER_VIEW_WIREFRAME);
+
+            /* Fit camera to mesh CP bounding box */
+            if (!pv->camera_fitted && m->cps && m->cp_rows > 0 && m->cp_cols > 0) {
+                int total = m->cp_rows * m->cp_cols;
+                float bmin[3] = {1e18f, 1e18f, 1e18f};
+                float bmax[3] = {-1e18f, -1e18f, -1e18f};
+                for (int j = 0; j < total; j++) {
+                    for (int a = 0; a < 3; a++) {
+                        float v = (float)m->cps[j].v[a];
+                        if (v < bmin[a]) bmin[a] = v;
+                        if (v > bmax[a]) bmax[a] = v;
+                    }
+                }
+                float cx = (bmin[0]+bmax[0])*0.5f;
+                float cy = (bmin[1]+bmax[1])*0.5f;
+                float cz = (bmin[2]+bmax[2])*0.5f;
+                float dx = bmax[0]-bmin[0], dy = bmax[1]-bmin[1], dz = bmax[2]-bmin[2];
+                float diag = sqrtf(dx*dx + dy*dy + dz*dz);
+                dc_gl_viewport_set_camera_center(pv->viewport, cx, cy, cz);
+                dc_gl_viewport_set_camera_dist(pv->viewport, diag * 1.5f);
+                pv->camera_fitted = 1;
+            }
+
+            char status[192];
+            snprintf(status, sizeof(status),
+                     "Bezier mesh: %dx%d patches (%dx%d CPs)",
+                     m->rows, m->cols, m->cp_rows, m->cp_cols);
+            gtk_label_set_text(GTK_LABEL(pv->status_label), status);
+            log_append(pv, status);
+            got_something = 1;
+
+            ts_bezier_mesh_free(m);
+            free(m);
+        } else if (bmesh) {
+            /* Solid mode — discard mesh output */
+            ts_bezier_mesh *m = (ts_bezier_mesh *)bmesh;
+            ts_bezier_mesh_free(m);
+            free(m);
+        }
+
+        /* --- SOLID MODE: accept voxel grid, ignore bezier mesh --- */
+        if (grid && pv->render_mode != DC_RENDER_MESH) {
             dc_gl_viewport_clear_objects(pv->viewport);
             dc_gl_viewport_clear_mesh(pv->viewport);
             dc_voxel_grid_free(pv->voxel_grid);
@@ -612,17 +668,42 @@ do_render(DC_ScadPreview *pv)
                      active, gx, gy, gz);
             gtk_label_set_text(GTK_LABEL(pv->status_label), status);
             log_append(pv, status);
+            got_something = 1;
 
             dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
                    "SDF RENDER: %zu active, grid %dx%dx%d", active, gx, gy, gz);
-        } else {
+        } else if (grid) {
+            /* Mesh mode — discard voxel output */
+            dc_voxel_grid_free(grid);
+        }
+
+        if (!got_something) {
+            /* Clear viewport when there's nothing for this canvas */
+            if (pv->render_mode == DC_RENDER_SOLID) {
+                dc_gl_viewport_clear_objects(pv->viewport);
+                dc_gl_viewport_clear_mesh(pv->viewport);
+                dc_gl_viewport_set_voxel_grid(pv->viewport, NULL);
+                dc_voxel_grid_free(pv->voxel_grid);
+                pv->voxel_grid = NULL;
+            } else if (pv->render_mode == DC_RENDER_MESH) {
+                dc_gl_viewport_set_bezier_mesh(pv->viewport, NULL);
+            }
             const char *msg = err.message[0]
                 ? err.message
-                : "No renderable geometry";
+                : (pv->render_mode == DC_RENDER_MESH
+                   ? "No bezier_mesh{} geometry"
+                   : pv->render_mode == DC_RENDER_SOLID
+                   ? "No solid geometry"
+                   : "No renderable geometry");
             gtk_label_set_text(GTK_LABEL(pv->status_label), msg);
-            char log_msg[1024];
-            snprintf(log_msg, sizeof(log_msg), "Error: %s", msg);
-            log_append(pv, log_msg);
+        }
+
+        /* Trigger sibling render (the other canvas) */
+        if (pv->sibling) {
+            DC_ScadPreview *sib = pv->sibling;
+            pv->sibling = NULL; /* prevent infinite recursion */
+            dc_scad_preview_render(sib);
+            pv->sibling = sib;
         }
     }
 }
@@ -798,7 +879,9 @@ dc_scad_preview_new(void)
     gtk_box_append(GTK_BOX(toolbar), sep);
 
     /* Blocky/Smooth toggle */
-    pv->blocky_btn = gtk_button_new_with_label("Smooth");
+    pv->blocky_btn = gtk_button_new_with_label("Blocky");
+    /* Default to blocky (voxel materialization) mode */
+    dc_gl_viewport_set_voxel_blocky(pv->viewport, 1);
     gtk_widget_set_focusable(pv->blocky_btn, FALSE);
     g_signal_connect(pv->blocky_btn, "clicked", G_CALLBACK(on_blocky_clicked), pv);
     gtk_box_append(GTK_BOX(toolbar), pv->blocky_btn);
@@ -962,4 +1045,16 @@ int
 dc_scad_preview_get_voxel_resolution(DC_ScadPreview *pv)
 {
     return pv ? pv->voxel_resolution : 64;
+}
+
+void
+dc_scad_preview_set_render_mode(DC_ScadPreview *pv, int mode)
+{
+    if (pv) pv->render_mode = mode;
+}
+
+void
+dc_scad_preview_set_sibling(DC_ScadPreview *pv, DC_ScadPreview *sibling)
+{
+    if (pv) pv->sibling = sibling;
 }

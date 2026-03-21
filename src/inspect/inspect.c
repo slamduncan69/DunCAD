@@ -1030,7 +1030,7 @@ static char *cmd_cubeiform_exec(const char *args) {
 
     DC_Error err = {0};
     DC_VoxelGrid *vox_grid = NULL;
-    int rc = dc_cubeiform_execute_full(args, sch, NULL, &vox_grid, NULL, &err);
+    int rc = dc_cubeiform_execute_full(args, sch, NULL, &vox_grid, NULL, NULL, &err);
     if (rc != 0) {
         DC_StringBuilder *sb = dc_sb_new();
         dc_sb_appendf(sb, "{\"error\":\"%s\"}\n", err.message);
@@ -3503,13 +3503,23 @@ dc_inspect_start(GtkWidget *window)
                      G_CALLBACK(on_incoming), NULL);
     g_socket_service_start(s_service);
 
-    /* Register bezier callbacks on the viewport */
+    /* Register bezier callbacks on both viewports (solid + mesh) */
     DC_GlViewport *vp = get_viewport();
     if (vp) {
         dc_gl_viewport_set_bez_curve_callback(vp,
             on_bez_curve_selected, NULL);
         dc_gl_viewport_set_bez_cp_move_callback(vp,
             on_bez_cp_moved, NULL);
+    }
+    {
+        DC_ScadPreview *mesh_pv = dc_app_window_get_mesh_preview(s_window);
+        DC_GlViewport *mesh_vp = mesh_pv ? dc_scad_preview_get_viewport(mesh_pv) : NULL;
+        if (mesh_vp) {
+            dc_gl_viewport_set_bez_curve_callback(mesh_vp,
+                on_bez_curve_selected, NULL);
+            dc_gl_viewport_set_bez_cp_move_callback(mesh_vp,
+                on_bez_cp_moved, NULL);
+        }
     }
 
     /* Register projection mode callback on the bezier editor */

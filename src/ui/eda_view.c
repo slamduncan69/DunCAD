@@ -173,7 +173,7 @@ dc_eda_view_execute_cubeiform(DC_EdaView *v)
     DC_EPcb *pcb = dc_pcb_editor_get_pcb(v->pcb_editor);
     DC_VoxelGrid *vox_grid = NULL;
 
-    int rc = dc_cubeiform_execute_full(src, sch, pcb, &vox_grid, NULL, &err);
+    int rc = dc_cubeiform_execute_full(src, sch, pcb, &vox_grid, NULL, NULL, &err);
     free(src);
 
     if (rc != 0) {

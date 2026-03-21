@@ -378,7 +378,7 @@ TEST(test_voxel_translate_sphere)
     DC_Error err = {0};
     const char *src = "sphere(5) >> move(10, 10, 10);";
     DC_VoxelGrid *grid = NULL;
-    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, NULL, &err);
     ASSERT(rc == 0);
     ASSERT(grid != NULL);
 
@@ -423,7 +423,7 @@ TEST(test_voxel_nested_transforms)
     DC_Error err = {0};
     const char *src = "sphere(3) >> scale(2, 2, 2) >> move(10, 0, 0);";
     DC_VoxelGrid *grid = NULL;
-    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, NULL, &err);
     ASSERT(rc == 0);
     ASSERT(grid != NULL);
 
@@ -467,7 +467,7 @@ TEST(test_voxel_csg_difference)
     DC_Error err = {0};
     const char *src = "cube(10) - sphere(r=7);";
     DC_VoxelGrid *grid = NULL;
-    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, NULL, &err);
     ASSERT(rc == 0);
     ASSERT(grid != NULL);
 
@@ -499,7 +499,7 @@ TEST(test_voxel_csg_with_pipe)
     DC_Error err = {0};
     const char *src = "cube(10) - cylinder(h=12, r=3) >> move(5, 5, -1);";
     DC_VoxelGrid *grid = NULL;
-    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, NULL, &err);
     ASSERT(rc == 0);
     ASSERT(grid != NULL);
 
@@ -517,7 +517,7 @@ TEST(test_voxel_variable)
         "hole = sphere(7);\n"
         "body - hole;\n";
     DC_VoxelGrid *grid = NULL;
-    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, NULL, &err);
     ASSERT(rc == 0);
     ASSERT(grid != NULL);
 
@@ -560,7 +560,7 @@ TEST(test_voxel_for_loop)
     DC_Error err = {0};
     const char *src = "for i in [0:3] { cube(3) >> move(i*5, 0, 0); }";
     DC_VoxelGrid *grid = NULL;
-    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, &err);
+    int rc = dc_cubeiform_execute_full(src, NULL, NULL, &grid, NULL, NULL, &err);
     ASSERT(rc == 0);
     ASSERT(grid != NULL);
 

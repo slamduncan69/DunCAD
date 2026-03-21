@@ -69,6 +69,7 @@ struct DC_CodeEditor *dc_app_window_get_code_editor(GtkWidget *window);
  * Returns: borrowed DC_ScadPreview*, or NULL if not found.
  * ---------------------------------------------------------------------- */
 struct DC_ScadPreview *dc_app_window_get_scad_preview(GtkWidget *window);
+struct DC_ScadPreview *dc_app_window_get_mesh_preview(GtkWidget *window);
 
 /* -------------------------------------------------------------------------
  * dc_app_window_get_eda_view — retrieve the EDA view attached to window.

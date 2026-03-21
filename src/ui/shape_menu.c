@@ -43,7 +43,7 @@ insert_shape(ShapeMenuCtx *ctx, const char *scad)
 
     /* Build new text: existing + newline + shape */
     size_t shape_len = strlen(scad);
-    char *buf = malloc(old_len + shape_len + 3);
+    char *buf = malloc(old_len + shape_len + 5);
     if (!buf) { free(text); return; }
 
     if (text && old_len > 0) {

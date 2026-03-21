@@ -9,6 +9,9 @@
 #include "eda/eda_pcb.h"
 #include "eda/eda_library.h"
 
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_primitives.h"
+#include "voxel/voxelize_bezier.h"
+
 #include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
@@ -23,6 +26,8 @@ struct DC_CubeiformEda {
     DC_Array *pcb_ops;   /* DC_PcbOp elements */
     DC_Array *vox_ops;   /* DC_VoxOp elements */
     DC_Array *bmesh_ops; /* DC_BMeshOp elements */
+    int       to_solid;  /* 1 if bmesh wrapped in to_solid() — voxelize result */
+    int       to_solid_resolution; /* voxel resolution for to_solid conversion */
 };
 
 /* =========================================================================
@@ -172,7 +177,7 @@ static void next_token(EParser *p)
         int start = p->pos;
         while (p->pos < p->len) {
             char ch = p->src[p->pos];
-            if (isalnum((unsigned char)ch) || ch == '_') {
+            if (isalnum((unsigned char)ch) || ch == '_' || ch == '$') {
                 p->pos++;
             } else if (ch == '.' && p->pos + 1 < p->len &&
                        isalpha((unsigned char)p->src[p->pos + 1])) {
@@ -1567,9 +1572,21 @@ static void parse_bezier_mesh_block(EParser *p, DC_Array *bmesh_ops)
             expect(p, ETOK_LPAREN);
             DC_BMeshOp op = { .type = DC_BMESH_OP_SPHERE };
             op.radius = 5.0;
-            if (p->cur.type == ETOK_NUMBER) {
-                op.radius = p->cur.num_val;
-                next_token(p);
+            /* Parse args: sphere(5) or sphere(r=5) or sphere(radius=5) */
+            while (p->cur.type != ETOK_RPAREN && p->cur.type != ETOK_EOF && !p->has_error) {
+                if (p->cur.type == ETOK_NUMBER) {
+                    op.radius = p->cur.num_val;
+                    next_token(p);
+                } else if (p->cur.type == ETOK_IDENT) {
+                    /* named arg: skip name and = */
+                    next_token(p);
+                    eat(p, ETOK_EQ);
+                    if (p->cur.type == ETOK_NUMBER) {
+                        op.radius = p->cur.num_val;
+                        next_token(p);
+                    }
+                }
+                if (p->cur.type == ETOK_COMMA) next_token(p);
             }
             expect(p, ETOK_RPAREN);
             if (p->cur.type == ETOK_SEMI) next_token(p);
@@ -1768,6 +1785,23 @@ static void find_and_parse_blocks(EParser *p, DC_Array *sch_ops, DC_Array *pcb_o
         } else if (ident_eq(&p->cur, "voxel")) {
             next_token(p);
             parse_voxel_block(p, vox_ops);
+        } else if (ident_eq(&p->cur, "to_solid")) {
+            /* to_solid( bezier_mesh { ... } ) — parse inner mesh, flag for voxelization */
+            next_token(p); /* skip to_solid */
+            eat(p, ETOK_LPAREN);
+            if (ident_eq(&p->cur, "bezier_mesh")) {
+                next_token(p);
+                parse_bezier_mesh_block(p, bmesh_ops);
+            }
+            eat(p, ETOK_RPAREN);
+            if (p->cur.type == ETOK_SEMI) next_token(p);
+            /* Signal: bmesh should be voxelized into vox output.
+             * We store this as a special BMeshOp at the end. */
+            {
+                DC_BMeshOp op = { .type = DC_BMESH_OP_RESOLUTION };
+                op.resolution = -1; /* sentinel: means to_solid */
+                dc_array_push(bmesh_ops, &op);
+            }
         } else if (ident_eq(&p->cur, "bezier_mesh")) {
             next_token(p);
             parse_bezier_mesh_block(p, bmesh_ops);
@@ -2135,11 +2169,96 @@ dc_cubeiform_execute(const char *dcad_src,
     return 0;
 }
 
+/* =========================================================================
+ * Apply — bezier mesh operations → ts_bezier_mesh
+ * ========================================================================= */
+static ts_bezier_mesh *
+dc_cubeiform_eda_apply_bmesh(DC_CubeiformEda *eda, DC_Error *err)
+{
+    if (!eda || !eda->bmesh_ops || dc_array_length(eda->bmesh_ops) == 0)
+        return NULL;
+
+    ts_bezier_mesh *mesh = NULL;
+    size_t n = dc_array_length(eda->bmesh_ops);
+
+    for (size_t i = 0; i < n; i++) {
+        DC_BMeshOp *op = dc_array_get(eda->bmesh_ops, i);
+        switch (op->type) {
+        case DC_BMESH_OP_SPHERE: {
+            double r = op->radius > 0 ? op->radius : 5.0;
+            ts_bezier_sphere s = { .center = ts_vec3_make(0, 0, 0), .radius = r };
+            if (mesh) { ts_bezier_mesh_free(mesh); free(mesh); }
+            mesh = malloc(sizeof(ts_bezier_mesh));
+            *mesh = ts_bezier_mesh_from_sphere(&s);
+            break;
+        }
+        case DC_BMESH_OP_TORUS: {
+            double R = op->radius > 0 ? op->radius : 5.0;
+            double r2 = op->radius2 > 0 ? op->radius2 : 1.5;
+            int trows = op->rows > 0 ? op->rows : 4;
+            int tcols = op->cols > 0 ? op->cols : 6;
+            ts_bezier_torus t = ts_bezier_torus_new(
+                ts_vec3_make(0, 0, 0), R, r2, trows, tcols);
+            if (mesh) { ts_bezier_mesh_free(mesh); free(mesh); }
+            mesh = malloc(sizeof(ts_bezier_mesh));
+            *mesh = ts_bezier_mesh_from_torus(&t);
+            ts_bezier_torus_free(&t);
+            break;
+        }
+        case DC_BMESH_OP_BOX: {
+            double sx = op->x > 0 ? op->x : 5.0;
+            double sy = op->y > 0 ? op->y : 5.0;
+            double sz = op->z > 0 ? op->z : 5.0;
+            ts_vec3 mn = ts_vec3_make(-sx/2, -sy/2, -sz/2);
+            ts_vec3 mx = ts_vec3_make(sx/2, sy/2, sz/2);
+            if (mesh) { ts_bezier_mesh_free(mesh); free(mesh); }
+            mesh = malloc(sizeof(ts_bezier_mesh));
+            *mesh = ts_bezier_mesh_from_box(mn, mx);
+            break;
+        }
+        case DC_BMESH_OP_CYLINDER: {
+            double r = op->radius > 0 ? op->radius : 3.0;
+            double h = op->y > 0 ? op->y : 10.0;
+            int segs = op->cols > 0 ? op->cols : 4;
+            if (mesh) { ts_bezier_mesh_free(mesh); free(mesh); }
+            mesh = malloc(sizeof(ts_bezier_mesh));
+            *mesh = ts_bezier_mesh_from_cylinder(r, 0.0, h, segs);
+            break;
+        }
+        case DC_BMESH_OP_GRID: {
+            int rows = op->rows > 0 ? op->rows : 2;
+            int cols = op->cols > 0 ? op->cols : 2;
+            if (mesh) { ts_bezier_mesh_free(mesh); free(mesh); }
+            mesh = malloc(sizeof(ts_bezier_mesh));
+            *mesh = ts_bezier_mesh_new(rows, cols);
+            break;
+        }
+        case DC_BMESH_OP_SET_CP: {
+            if (mesh) {
+                int cr = op->rows, cc = op->cols;
+                ts_bezier_mesh_set_cp(mesh, cr, cc,
+                                       ts_vec3_make(op->x, op->y, op->z));
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    if (!mesh) {
+        DC_SET_ERROR(err, DC_ERROR_EDA_PARSE, "bezier_mesh block has no geometry");
+    }
+
+    return mesh;
+}
+
 int
 dc_cubeiform_execute_full(const char *dcad_src,
                             DC_ESchematic *sch,
                             DC_EPcb *pcb,
                             DC_VoxelGrid **vox_out,
+                            void **bmesh_out,
                             DC_ELibrary *lib,
                             DC_Error *err)
 {
@@ -2160,6 +2279,42 @@ dc_cubeiform_execute_full(const char *dcad_src,
 
     if (vox_out && eda->vox_ops && dc_array_length(eda->vox_ops) > 0) {
         *vox_out = dc_cubeiform_eda_apply_voxel(eda, err);
+    }
+
+    if (eda->bmesh_ops && dc_array_length(eda->bmesh_ops) > 0) {
+        /* Check for to_solid sentinel: last bmesh_op with resolution == -1 */
+        int want_to_solid = 0;
+        {
+            size_t n = dc_array_length(eda->bmesh_ops);
+            if (n > 0) {
+                DC_BMeshOp *last = dc_array_get(eda->bmesh_ops, n - 1);
+                if (last->type == DC_BMESH_OP_RESOLUTION && last->resolution == -1) {
+                    want_to_solid = 1;
+                    last->resolution = 0; /* neutralize sentinel — apply_bmesh will skip it */
+                }
+            }
+        }
+
+        ts_bezier_mesh *mesh = dc_cubeiform_eda_apply_bmesh(eda, err);
+        if (mesh && want_to_solid && vox_out) {
+            /* Voxelize the mesh into a solid — sends to solid canvas */
+            int res = 64;
+            /* Check if bmesh_ops had a resolution setting */
+            size_t n = dc_array_length(eda->bmesh_ops);
+            for (size_t i = 0; i < n; i++) {
+                DC_BMeshOp *op = dc_array_get(eda->bmesh_ops, i);
+                if (op->type == DC_BMESH_OP_RESOLUTION && op->resolution > 0)
+                    res = op->resolution;
+            }
+            *vox_out = dc_voxelize_bezier(mesh, res, 3, 8, err);
+            ts_bezier_mesh_free(mesh);
+            free(mesh);
+        } else if (mesh && bmesh_out) {
+            *bmesh_out = mesh;
+        } else if (mesh) {
+            ts_bezier_mesh_free(mesh);
+            free(mesh);
+        }
     }
 
     dc_cubeiform_eda_free(eda);
