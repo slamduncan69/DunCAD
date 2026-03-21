@@ -1713,9 +1713,17 @@ static void parse_bezier_mesh_block(EParser *p, DC_Array *bmesh_ops)
                 next_token(p);
             }
             expect(p, ETOK_RBRACKET);
+            /* Support both = (absolute) and += (relative) */
+            int is_relative = 0;
+            if (p->cur.type == ETOK_PLUS) {
+                is_relative = 1;
+                next_token(p); /* skip + */
+            }
             expect(p, ETOK_EQ);
+            if (is_relative) op.type = DC_BMESH_OP_SET_CP; /* still SET_CP, but flagged */
             expect(p, ETOK_LBRACKET);
             op.x = op.y = op.z = 0.0;
+            op.resolution = is_relative; /* reuse resolution field as relative flag */
             if (p->cur.type == ETOK_NUMBER || p->cur.type == ETOK_MINUS) {
                 int sign = 1;
                 if (p->cur.type == ETOK_MINUS) { sign = -1; next_token(p); }
@@ -2241,8 +2249,16 @@ dc_cubeiform_eda_apply_bmesh(DC_CubeiformEda *eda, DC_Error *err)
         case DC_BMESH_OP_SET_CP: {
             if (mesh) {
                 int cr = op->rows, cc = op->cols;
-                ts_bezier_mesh_set_cp(mesh, cr, cc,
-                                       ts_vec3_make(op->x, op->y, op->z));
+                if (op->resolution) {
+                    /* Relative: += adds to existing CP position */
+                    ts_vec3 cur = ts_bezier_mesh_get_cp(mesh, cr, cc);
+                    ts_bezier_mesh_set_cp(mesh, cr, cc,
+                        ts_vec3_add(cur, ts_vec3_make(op->x, op->y, op->z)));
+                } else {
+                    /* Absolute: = sets CP position directly */
+                    ts_bezier_mesh_set_cp(mesh, cr, cc,
+                                           ts_vec3_make(op->x, op->y, op->z));
+                }
             }
             break;
         }
