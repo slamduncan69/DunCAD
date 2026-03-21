@@ -45,7 +45,8 @@ dc_voxelize_bezier(const void *mesh_ptr, int resolution,
         if (err) DC_SET_ERROR(err, DC_ERROR_INVALID_ARG, "resolution must be >= 4");
         return NULL;
     }
-    if (band_cells < 1) band_cells = 2;
+    if (band_cells < 1) band_cells = 1;
+    if (band_cells > 2) band_cells = 2; /* larger bands leak into interior */
     if (newton_iters < 1) newton_iters = 15;
 
     /* Compute mesh bounding box */
@@ -91,68 +92,46 @@ dc_voxelize_bezier(const void *mesh_ptr, int resolution,
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
            "voxelizing bezier mesh (%dx%d patches) → %dx%dx%d grid (cell=%.4f)",
            mesh->rows, mesh->cols, sx, sy, sz, cell_size);
-    /* Print first surface sample for debugging */
-    {
-        ts_bezier_patch p0 = ts_bezier_mesh_get_patch(mesh, 0, 0);
-        ts_vec3 s00 = ts_bezier_patch_eval(&p0, 0, 0);
-        ts_vec3 s55 = ts_bezier_patch_eval(&p0, 0.5, 0.5);
-        float wx0, wy0, wz0;
-        dc_voxel_grid_cell_center(grid, sx/2, sy/2, sz/2, &wx0, &wy0, &wz0);
-        dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-               "  patch(0,0) eval(0,0)=(%.3f,%.3f,%.3f) eval(0.5,0.5)=(%.3f,%.3f,%.3f) grid_center=(%.3f,%.3f,%.3f)",
-               s00.v[0], s00.v[1], s00.v[2], s55.v[0], s55.v[1], s55.v[2],
-               (double)wx0, (double)wy0, (double)wz0);
-    }
+    if (newton_iters < 1) newton_iters = 15;
 
-    (void)newton_iters; /* unused in dense sampling approach */
+    double band = band_cells * (double)cell_size;
 
-    /* Dense surface sampling approach:
-     * Sample each patch at a grid of (u,v) points. For each sample,
-     * update nearby voxels with the distance to that surface point.
-     * This avoids Newton solver issues and guarantees coverage. */
-    /* UV samples per patch. Must be dense enough that the spacing between
-     * adjacent surface samples is less than cell_size, ensuring watertight
-     * surface coverage. For a patch spanning ~max_extent/patches cells,
-     * we need samples >= extent_cells to guarantee sub-cell spacing. */
-    int uv_samples = resolution;
-    if (uv_samples < 32) uv_samples = 32;
-    if (uv_samples > 256) uv_samples = 256;
+    /* For each patch: narrow-band unsigned distance evaluation.
+     * Use the mesh's closest-point function which tests ALL patches and
+     * returns the globally closest point. This avoids the grid topology
+     * issue where adjacent patches create false internal surfaces. */
+    for (int iz = 0; iz < sz; iz++) {
+        for (int iy = 0; iy < sy; iy++) {
+            for (int ix = 0; ix < sx; ix++) {
+                float wx, wy, wz;
+                dc_voxel_grid_cell_center(grid, ix, iy, iz, &wx, &wy, &wz);
+                ts_vec3 query = ts_vec3_make(wx, wy, wz);
 
-    for (int pr = 0; pr < mesh->rows; pr++) {
-        for (int pc = 0; pc < mesh->cols; pc++) {
-            ts_bezier_patch patch = ts_bezier_mesh_get_patch(mesh, pr, pc);
+                /* Find closest point on ANY patch in the mesh */
+                double best_dist = 1e30;
+                for (int pr = 0; pr < mesh->rows; pr++) {
+                    for (int pc = 0; pc < mesh->cols; pc++) {
+                        ts_bezier_patch patch = ts_bezier_mesh_get_patch(mesh, pr, pc);
 
-            for (int ui = 0; ui <= uv_samples; ui++) {
-                double u = (double)ui / (double)uv_samples;
-                for (int vi = 0; vi <= uv_samples; vi++) {
-                    double v = (double)vi / (double)uv_samples;
+                        /* Quick AABB rejection */
+                        ts_vec3 pmin, pmax;
+                        ts_bezier_patch_bbox(&patch, &pmin, &pmax);
+                        double dx2 = fmax(pmin.v[0]-wx, fmax(0, wx-pmax.v[0]));
+                        double dy2 = fmax(pmin.v[1]-wy, fmax(0, wy-pmax.v[1]));
+                        double dz2 = fmax(pmin.v[2]-wz, fmax(0, wz-pmax.v[2]));
+                        if (sqrt(dx2*dx2+dy2*dy2+dz2*dz2) > best_dist + band) continue;
 
-                    ts_vec3 sp = ts_bezier_patch_eval(&patch, u, v);
-
-                    /* Update voxels in a small neighborhood around this surface point */
-                    int cx = (int)floor((sp.v[0] - ox) / cell_size);
-                    int cy = (int)floor((sp.v[1] - oy) / cell_size);
-                    int cz = (int)floor((sp.v[2] - oz) / cell_size);
-
-                    for (int dz = -band_cells; dz <= band_cells; dz++)
-                    for (int dy = -band_cells; dy <= band_cells; dy++)
-                    for (int dx = -band_cells; dx <= band_cells; dx++) {
-                        int ix = cx + dx, iy = cy + dy, iz = cz + dz;
-                        if (ix < 0 || iy < 0 || iz < 0 ||
-                            ix >= sx || iy >= sy || iz >= sz) continue;
-
-                        float wx, wy, wz;
-                        dc_voxel_grid_cell_center(grid, ix, iy, iz, &wx, &wy, &wz);
-                        float ddx = wx - (float)sp.v[0];
-                        float ddy = wy - (float)sp.v[1];
-                        float ddz = wz - (float)sp.v[2];
-                        float dist = sqrtf(ddx*ddx + ddy*ddy + ddz*ddz);
-
-                        DC_Voxel *vx = dc_voxel_grid_get(grid, ix, iy, iz);
-                        if (vx && dist < fabsf(vx->distance)) {
-                            vx->distance = dist;
-                        }
+                        double u, v;
+                        ts_bezier_patch_closest_uv(&patch, query, &u, &v, newton_iters);
+                        ts_vec3 closest = ts_bezier_patch_eval(&patch, u, v);
+                        double dist = ts_vec3_distance(closest, query);
+                        if (dist < best_dist) best_dist = dist;
                     }
+                }
+
+                DC_Voxel *vx = dc_voxel_grid_get(grid, ix, iy, iz);
+                if (vx && (float)best_dist < fabsf(vx->distance)) {
+                    vx->distance = (float)best_dist;
                 }
             }
         }

@@ -1645,25 +1645,30 @@ static void parse_bezier_mesh_block(EParser *p, DC_Array *bmesh_ops)
             expect(p, ETOK_LPAREN);
             DC_BMeshOp op = { .type = DC_BMESH_OP_CYLINDER };
             op.radius = 5.0;   /* radius */
-            op.radius2 = 10.0; /* height */
+            op.y = 10.0;       /* height (stored in .y for apply_bmesh) */
             op.cols = 8;       /* segments */
-            if (p->cur.type == ETOK_NUMBER) {
-                op.radius = p->cur.num_val;
-                next_token(p);
-                if (p->cur.type == ETOK_COMMA) {
+            /* Parse args: cylinder(r,h) or cylinder(r=3, h=10) */
+            while (p->cur.type != ETOK_RPAREN && p->cur.type != ETOK_EOF && !p->has_error) {
+                if (p->cur.type == ETOK_NUMBER) {
+                    /* positional: first=radius, second=height */
+                    if (op.radius == 5.0) op.radius = p->cur.num_val;
+                    else op.y = p->cur.num_val;
                     next_token(p);
+                } else if (p->cur.type == ETOK_IDENT) {
+                    /* named arg */
+                    int is_r = ident_eq(&p->cur, "r") || ident_eq(&p->cur, "radius");
+                    int is_h = ident_eq(&p->cur, "h") || ident_eq(&p->cur, "height");
+                    int is_s = ident_eq(&p->cur, "segments");
+                    next_token(p);
+                    eat(p, ETOK_EQ);
                     if (p->cur.type == ETOK_NUMBER) {
-                        op.radius2 = p->cur.num_val;
+                        if (is_r) op.radius = p->cur.num_val;
+                        else if (is_h) op.y = p->cur.num_val;
+                        else if (is_s) op.cols = (int)p->cur.num_val;
                         next_token(p);
-                    }
-                    if (p->cur.type == ETOK_COMMA) {
-                        next_token(p);
-                        if (p->cur.type == ETOK_NUMBER) {
-                            op.cols = (int)p->cur.num_val;
-                            next_token(p);
-                        }
                     }
                 }
+                if (p->cur.type == ETOK_COMMA) next_token(p);
             }
             expect(p, ETOK_RPAREN);
             if (p->cur.type == ETOK_SEMI) next_token(p);
@@ -2295,18 +2300,72 @@ dc_cubeiform_execute_full(const char *dcad_src,
             }
         }
 
-        ts_bezier_mesh *mesh = dc_cubeiform_eda_apply_bmesh(eda, err);
+        /* For to_solid: if the mesh is a pristine primitive (no CP edits),
+         * use analytical SDF via apply_voxel instead of mesh voxelization.
+         * This gives perfect results for known shapes. */
+        int used_analytical = 0;
+        if (want_to_solid && vox_out) {
+            size_t n = dc_array_length(eda->bmesh_ops);
+            int has_cp_edits = 0;
+            DC_BMeshOp *prim_op = NULL;
+            for (size_t i = 0; i < n; i++) {
+                DC_BMeshOp *op = dc_array_get(eda->bmesh_ops, i);
+                if (op->type == DC_BMESH_OP_SET_CP) has_cp_edits = 1;
+                if (op->type == DC_BMESH_OP_SPHERE || op->type == DC_BMESH_OP_BOX ||
+                    op->type == DC_BMESH_OP_CYLINDER || op->type == DC_BMESH_OP_TORUS)
+                    prim_op = op;
+            }
+            if (prim_op && !has_cp_edits) {
+                /* Convert to VoxOps and use apply_voxel for analytical SDF */
+                DC_VoxOp vop = {0};
+                vop.r = 180; vop.g = 180; vop.b = 180;
+                switch (prim_op->type) {
+                case DC_BMESH_OP_SPHERE:
+                    vop.type = DC_VOX_OP_SPHERE;
+                    vop.radius = prim_op->radius > 0 ? prim_op->radius : 5.0;
+                    break;
+                case DC_BMESH_OP_BOX: {
+                    vop.type = DC_VOX_OP_BOX;
+                    double hx = (prim_op->x > 0 ? prim_op->x : 10.0) * 0.5;
+                    double hy = (prim_op->y > 0 ? prim_op->y : 10.0) * 0.5;
+                    double hz = (prim_op->z > 0 ? prim_op->z : 10.0) * 0.5;
+                    vop.x = -hx; vop.y = -hy; vop.z = -hz;
+                    vop.x2 = hx; vop.y2 = hy; vop.z2 = hz;
+                    break;
+                }
+                case DC_BMESH_OP_CYLINDER:
+                    vop.type = DC_VOX_OP_CYLINDER;
+                    vop.radius = prim_op->radius > 0 ? prim_op->radius : 3.0;
+                    vop.z = 0;
+                    vop.radius2 = prim_op->y > 0 ? prim_op->y : 10.0;
+                    break;
+                case DC_BMESH_OP_TORUS:
+                    vop.type = DC_VOX_OP_TORUS;
+                    vop.radius = prim_op->radius > 0 ? prim_op->radius : 5.0;
+                    vop.radius2 = prim_op->radius2 > 0 ? prim_op->radius2 : 1.5;
+                    break;
+                default: break;
+                }
+                if (vop.type != 0) {
+                    /* Build a temporary vox_ops array and use apply_voxel */
+                    dc_array_push(eda->vox_ops, &vop);
+                    *vox_out = dc_cubeiform_eda_apply_voxel(eda, err);
+                    used_analytical = 1;
+                }
+            }
+        }
+
+        ts_bezier_mesh *mesh = used_analytical ? NULL : dc_cubeiform_eda_apply_bmesh(eda, err);
         if (mesh && want_to_solid && vox_out) {
-            /* Voxelize the mesh into a solid — sends to solid canvas */
+            /* Fallback: voxelize the edited mesh (no known primitive) */
             int res = 64;
-            /* Check if bmesh_ops had a resolution setting */
             size_t n = dc_array_length(eda->bmesh_ops);
             for (size_t i = 0; i < n; i++) {
                 DC_BMeshOp *op = dc_array_get(eda->bmesh_ops, i);
                 if (op->type == DC_BMESH_OP_RESOLUTION && op->resolution > 0)
                     res = op->resolution;
             }
-            *vox_out = dc_voxelize_bezier(mesh, res, 3, 8, err);
+            *vox_out = dc_voxelize_bezier(mesh, res, 2, 15, err);
             ts_bezier_mesh_free(mesh);
             free(mesh);
         } else if (mesh && bmesh_out) {
