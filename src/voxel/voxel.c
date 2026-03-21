@@ -178,9 +178,9 @@ dc_voxel_grid_cell_center(const DC_VoxelGrid *g,
 {
     if (!g) return;
     float half = g->cell_size * 0.5f;
-    if (wx) *wx = g->origin[0] + ix * g->cell_size + half;
-    if (wy) *wy = g->origin[1] + iy * g->cell_size + half;
-    if (wz) *wz = g->origin[2] + iz * g->cell_size + half;
+    if (wx) *wx = ix * g->cell_size + half;
+    if (wy) *wy = iy * g->cell_size + half;
+    if (wz) *wz = iz * g->cell_size + half;
 }
 
 /* =========================================================================

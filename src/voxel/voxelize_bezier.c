@@ -104,7 +104,10 @@ dc_voxelize_bezier(const void *mesh_ptr, int resolution,
         for (int iy = 0; iy < sy; iy++) {
             for (int ix = 0; ix < sx; ix++) {
                 float wx, wy, wz;
-                dc_voxel_grid_cell_center(grid, ix, iy, iz, &wx, &wy, &wz);
+                /* Compute world position manually — cell_center doesn't include origin */
+                wx = ox + ((float)ix + 0.5f) * cell_size;
+                wy = oy + ((float)iy + 0.5f) * cell_size;
+                wz = oz + ((float)iz + 0.5f) * cell_size;
                 ts_vec3 query = ts_vec3_make(wx, wy, wz);
 
                 /* Find closest point on ANY patch in the mesh */
