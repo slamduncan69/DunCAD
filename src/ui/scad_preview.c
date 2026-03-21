@@ -10,6 +10,7 @@
 #include "cubeiform/cubeiform.h"
 #include "cubeiform/cubeiform_eda.h"
 #include "gl/gl_sdf_analytical.h"
+#include "voxel/voxelize_gpu.h"
 
 /* Trinity Site — native OpenSCAD interpreter (replaces OpenSCAD subprocess) */
 #include "ts_eval.h"
@@ -539,6 +540,47 @@ launch_hq_render(DC_ScadPreview *pv, const char *source)
            pv->render_gen);
 }
 
+/* Callback for async coarse-to-fine voxelization.
+ * Called on the main thread for each resolution pass. */
+static void
+on_async_voxelize_done(DC_VoxelGrid *grid, void *userdata)
+{
+    DC_ScadPreview *pv = userdata;
+    if (!pv || !grid) return;
+
+    dc_gl_viewport_clear_objects(pv->viewport);
+    dc_gl_viewport_clear_mesh(pv->viewport);
+    dc_voxel_grid_free(pv->voxel_grid);
+    pv->voxel_grid = grid;
+    dc_gl_viewport_set_voxel_grid(pv->viewport, grid);
+
+    size_t active = dc_voxel_grid_active_count(grid);
+    int gx = dc_voxel_grid_size_x(grid);
+    int gy = dc_voxel_grid_size_y(grid);
+    int gz = dc_voxel_grid_size_z(grid);
+
+    char status[192];
+    snprintf(status, sizeof(status),
+             "Rendered: %zu active (%dx%dx%d)",
+             active, gx, gy, gz);
+    gtk_label_set_text(GTK_LABEL(pv->status_label), status);
+
+    /* Fit camera on first pass */
+    if (!pv->camera_fitted) {
+        float vmin[3] = {0}, vmax[3] = {0};
+        dc_voxel_grid_bounds(grid, &vmin[0], &vmin[1], &vmin[2],
+                                   &vmax[0], &vmax[1], &vmax[2]);
+        float cx = (vmin[0]+vmax[0])*0.5f;
+        float cy = (vmin[1]+vmax[1])*0.5f;
+        float cz = (vmin[2]+vmax[2])*0.5f;
+        float dx = vmax[0]-vmin[0], dy = vmax[1]-vmin[1], dz = vmax[2]-vmin[2];
+        float diag = sqrtf(dx*dx + dy*dy + dz*dz);
+        dc_gl_viewport_set_camera_center(pv->viewport, cx, cy, cz);
+        dc_gl_viewport_set_camera_dist(pv->viewport, diag * 1.5f);
+        pv->camera_fitted = 1;
+    }
+}
+
 static void
 do_render(DC_ScadPreview *pv)
 {
@@ -646,8 +688,15 @@ do_render(DC_ScadPreview *pv)
 
             ts_bezier_mesh_free(m);
             free(m);
+        } else if (bmesh && pv->render_mode == DC_RENDER_SOLID) {
+            /* Solid mode received a mesh — this is to_solid with an edited mesh.
+             * Voxelize asynchronously with coarse-to-fine progressive rendering. */
+            gtk_label_set_text(GTK_LABEL(pv->status_label), "Converting mesh to solid...");
+            dc_voxelize_async(bmesh, 64, on_async_voxelize_done, pv, NULL);
+            /* mesh ownership transferred to async worker */
+            got_something = 1;
         } else if (bmesh) {
-            /* Solid mode — discard mesh output */
+            /* Other mode — discard */
             ts_bezier_mesh *m = (ts_bezier_mesh *)bmesh;
             ts_bezier_mesh_free(m);
             free(m);

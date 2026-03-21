@@ -85,14 +85,18 @@ add_library(dc_core STATIC
     src/voxel/sdf.c
     src/voxel/voxelize_stl.c
     src/voxel/voxelize_bezier.c
+    src/voxel/voxelize_gpu.c
     src/voxel/marching_cubes.c
     src/voxel/sdf_to_bezier.c
 )
 target_include_directories(dc_core PUBLIC "${CMAKE_SOURCE_DIR}/src")
+pkg_check_modules(GIO REQUIRED gio-2.0)
+target_include_directories(dc_core PRIVATE ${GIO_INCLUDE_DIRS})
 target_link_libraries(dc_core
     PUBLIC m
     PRIVATE dc_compiler_flags
     PRIVATE dc_asan_flags
+    PRIVATE ${GIO_LIBRARIES}
 )
 
 # ---------------------------------------------------------------------------
