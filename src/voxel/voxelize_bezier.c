@@ -89,20 +89,8 @@ dc_voxelize_bezier(const void *mesh_ptr, int resolution,
     dc_voxel_grid_set_origin(grid, ox, oy, oz);
 
     dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-           "voxelizing bezier mesh (%dx%d patches, %dx%d CPs, cps=%p) → %dx%dx%d grid (cell=%.4f)",
-           mesh->rows, mesh->cols, mesh->cp_rows, mesh->cp_cols, (void*)mesh->cps,
-           sx, sy, sz, cell_size);
-    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-           "  bbox=(%.3f,%.3f,%.3f)-(%.3f,%.3f,%.3f) origin=(%.3f,%.3f,%.3f)",
-           bmin.v[0], bmin.v[1], bmin.v[2], bmax.v[0], bmax.v[1], bmax.v[2],
-           (double)ox, (double)oy, (double)oz);
-    /* Sanity: check first CP */
-    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-           "  CP[0]=(%.3f,%.3f,%.3f) CP[last]=(%.3f,%.3f,%.3f)",
-           mesh->cps[0].v[0], mesh->cps[0].v[1], mesh->cps[0].v[2],
-           mesh->cps[mesh->cp_rows*mesh->cp_cols-1].v[0],
-           mesh->cps[mesh->cp_rows*mesh->cp_cols-1].v[1],
-           mesh->cps[mesh->cp_rows*mesh->cp_cols-1].v[2]);
+           "voxelizing bezier mesh (%dx%d patches) → %dx%dx%d grid (cell=%.4f)",
+           mesh->rows, mesh->cols, sx, sy, sz, cell_size);
     /* Print first surface sample for debugging */
     {
         ts_bezier_patch p0 = ts_bezier_mesh_get_patch(mesh, 0, 0);
@@ -122,9 +110,13 @@ dc_voxelize_bezier(const void *mesh_ptr, int resolution,
      * Sample each patch at a grid of (u,v) points. For each sample,
      * update nearby voxels with the distance to that surface point.
      * This avoids Newton solver issues and guarantees coverage. */
-    int uv_samples = resolution / 2;
-    if (uv_samples < 16) uv_samples = 16;
-    if (uv_samples > 128) uv_samples = 128;
+    /* UV samples per patch. Must be dense enough that the spacing between
+     * adjacent surface samples is less than cell_size, ensuring watertight
+     * surface coverage. For a patch spanning ~max_extent/patches cells,
+     * we need samples >= extent_cells to guarantee sub-cell spacing. */
+    int uv_samples = resolution;
+    if (uv_samples < 32) uv_samples = 32;
+    if (uv_samples > 256) uv_samples = 256;
 
     for (int pr = 0; pr < mesh->rows; pr++) {
         for (int pc = 0; pc < mesh->cols; pc++) {
@@ -136,10 +128,6 @@ dc_voxelize_bezier(const void *mesh_ptr, int resolution,
                     double v = (double)vi / (double)uv_samples;
 
                     ts_vec3 sp = ts_bezier_patch_eval(&patch, u, v);
-                    if (pr == 0 && pc == 0 && ui == 0 && vi == 0) {
-                        fprintf(stderr, "SAMPLE: patch(%d,%d) uv=(%d,%d) → (%.3f,%.3f,%.3f)\n",
-                                pr, pc, ui, vi, sp.v[0], sp.v[1], sp.v[2]);
-                    }
 
                     /* Update voxels in a small neighborhood around this surface point */
                     int cx = (int)floor((sp.v[0] - ox) / cell_size);
@@ -161,10 +149,6 @@ dc_voxelize_bezier(const void *mesh_ptr, int resolution,
                         float dist = sqrtf(ddx*ddx + ddy*ddy + ddz*ddz);
 
                         DC_Voxel *vx = dc_voxel_grid_get(grid, ix, iy, iz);
-                        if (pr == 0 && pc == 0 && ui == 0 && vi == 0 && dx == 0 && dy == 0 && dz == 0) {
-                            fprintf(stderr, "INNER: ix=%d iy=%d iz=%d wx=%.3f wy=%.3f wz=%.3f dist=%.3f cur=%.3f vx=%p\n",
-                                    ix, iy, iz, wx, wy, wz, dist, vx ? vx->distance : -1.0f, (void*)vx);
-                        }
                         if (vx && dist < fabsf(vx->distance)) {
                             vx->distance = dist;
                         }
@@ -174,28 +158,48 @@ dc_voxelize_bezier(const void *mesh_ptr, int resolution,
         }
     }
 
-    fprintf(stderr, "DENSE: sampled %d patches, %d uv_samples\n",
-            mesh->rows * mesh->cols, uv_samples);
-
-    /* Debug: count voxels by distance range */
+    /* --- Gap-closing pass ---
+     * At mesh edges/corners, the surface sampling may leave single-cell
+     * gaps where no surface sample was close enough. Close these gaps by
+     * propagating distances: if a voxel has large distance but a neighbor
+     * has small distance, the voxel is likely a gap in the surface shell.
+     * Set its distance to neighbor + cell_size to seal the gap. */
     {
-        int near = 0, mid = 0, far = 0;
-        float min_d = 1e18f, max_d = 0;
-        for (int iz2 = 0; iz2 < sz; iz2++)
-        for (int iy2 = 0; iy2 < sy; iy2++)
-        for (int ix2 = 0; ix2 < sx; ix2++) {
-            DC_Voxel *vx = dc_voxel_grid_get(grid, ix2, iy2, iz2);
-            if (!vx) continue;
-            float d = fabsf(vx->distance);
-            if (d < cell_size) near++;
-            else if (d < cell_size * 3) mid++;
-            else far++;
-            if (d < min_d) min_d = d;
-            if (d > max_d && d < 1e10f) max_d = d;
+        int closed = 0;
+        for (int pass = 0; pass < 3; pass++) { /* multiple passes for wider gaps */
+            for (int iz2 = 0; iz2 < sz; iz2++)
+            for (int iy2 = 0; iy2 < sy; iy2++)
+            for (int ix2 = 0; ix2 < sx; ix2++) {
+                DC_Voxel *vx = dc_voxel_grid_get(grid, ix2, iy2, iz2);
+                if (!vx) continue;
+                if (vx->distance <= cell_size * 1.5f) continue; /* already near surface */
+
+                /* Check 6-connected neighbors for surface proximity */
+                static const int ddx[] = {-1,1,0,0,0,0};
+                static const int ddy[] = {0,0,-1,1,0,0};
+                static const int ddz[] = {0,0,0,0,-1,1};
+                for (int d = 0; d < 6; d++) {
+                    int nx = ix2+ddx[d], ny = iy2+ddy[d], nz = iz2+ddz[d];
+                    if (nx < 0 || ny < 0 || nz < 0 ||
+                        nx >= sx || ny >= sy || nz >= sz) continue;
+                    DC_Voxel *nv = dc_voxel_grid_get(grid, nx, ny, nz);
+                    if (nv && nv->distance < cell_size) {
+                        /* This voxel is next to a surface voxel but has large distance.
+                         * It's a gap. Set its distance to propagate the surface shell. */
+                        float prop = nv->distance + cell_size;
+                        if (prop < vx->distance) {
+                            vx->distance = prop;
+                            closed++;
+                        }
+                        break;
+                    }
+                }
+            }
         }
-        dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
-               "voxelize_bezier distance stats: near=%d mid=%d far=%d min=%.6f max=%.4f cs=%.4f",
-               near, mid, far, min_d, max_d, cell_size);
+        if (closed > 0) {
+            dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+                   "voxelize_bezier: closed %d surface gaps", closed);
+        }
     }
 
     /* --- Flood-fill sign determination ---
