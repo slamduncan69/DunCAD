@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gl/gl_viewport.h"
 #include "gl/gl_voxel.h"
+#include "gl/gl_sdf_analytical.h"
 #include "gl/gl_bezier_wire.h"
 #include "voxel/voxel.h"
 #include "gl/stl_loader.h"
@@ -316,6 +317,10 @@ struct DC_GlViewport {
     int             voxel_pending; /* 1 if grid needs upload on next frame */
     const DC_VoxelGrid *voxel_grid_pending; /* grid to upload */
     int             voxel_blocky_default; /* stored for when buf is created */
+
+    /* Analytical SDF rendering (the Infinite Surface) */
+    void           *sdf_scene;    /* DC_GlSdfScene* — borrowed, caller owns */
+    int             analytical;    /* 1 = use analytical, 0 = use voxel */
 
     /* Bezier patch mesh wireframe */
     ts_bezier_mesh  *bezier_mesh;       /* owned copy, NULL if none */
@@ -1036,9 +1041,19 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         vp->voxel_pending = 0;
         vp->voxel_grid_pending = NULL;
     }
-    /* Only draw voxels if no bezier mesh, or bezier mode includes VOXEL */
-    if ((!vp->bezier_mesh || (vp->bezier_view_mode & DC_BEZIER_VIEW_VOXEL))
+    /* Draw SDF: analytical (infinite surface) or voxel (materialization) */
+    if (vp->analytical && vp->sdf_scene) {
+        DC_GlSdfScene *scene = (DC_GlSdfScene *)vp->sdf_scene;
+        if (scene->count > 0) {
+            /* Analytical SDF — the Infinite Surface */
+            float inv_vp[16];
+            if (mat4_invert(inv_vp, vp_mat) == 0) {
+                dc_gl_sdf_draw(scene, inv_vp, eye, light_dir);
+            }
+        }
+    } else if ((!vp->bezier_mesh || (vp->bezier_view_mode & DC_BEZIER_VIEW_VOXEL))
         && vp->voxel_buf && dc_gl_voxel_buf_instance_count(vp->voxel_buf) > 0) {
+        /* Voxel rendering — the materialization */
         float inv_vp[16];
         if (mat4_invert(inv_vp, vp_mat) == 0) {
             dc_gl_voxel_buf_draw(vp->voxel_buf, inv_vp, eye, light_dir, w, h);
@@ -3486,4 +3501,30 @@ dc_gl_viewport_set_bezier_loop(DC_GlViewport *vp, int loop_type, int loop_index)
     }
 
     gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+/* =========================================================================
+ * Analytical SDF rendering
+ * ========================================================================= */
+
+void
+dc_gl_viewport_set_sdf_scene(DC_GlViewport *vp, void *scene)
+{
+    if (!vp) return;
+    vp->sdf_scene = scene;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+void
+dc_gl_viewport_set_analytical(DC_GlViewport *vp, int on)
+{
+    if (!vp) return;
+    vp->analytical = on ? 1 : 0;
+    gtk_gl_area_queue_render(GTK_GL_AREA(vp->gl_area));
+}
+
+int
+dc_gl_viewport_get_analytical(DC_GlViewport *vp)
+{
+    return vp ? vp->analytical : 0;
 }

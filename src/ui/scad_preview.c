@@ -9,10 +9,12 @@
 #include "core/log.h"
 #include "cubeiform/cubeiform.h"
 #include "cubeiform/cubeiform_eda.h"
+#include "gl/gl_sdf_analytical.h"
 
 /* Trinity Site — native OpenSCAD interpreter (replaces OpenSCAD subprocess) */
 #include "ts_eval.h"
 #include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_mesh.h"
+#include "voxel/voxelize_bezier.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,6 +62,9 @@ struct DC_ScadPreview {
     /* Tricanvas: render mode and sibling */
     int             render_mode;     /* 0=all (legacy), 1=solid only, 2=mesh only */
     DC_ScadPreview *sibling;         /* the other preview to trigger on F5 */
+
+    /* Analytical SDF scene (the Infinite Surface) */
+    DC_GlSdfScene   sdf_scene;      /* built from Cubeiform VoxOps */
 };
 
 /* -------------------------------------------------------------------------
@@ -595,6 +600,20 @@ do_render(DC_ScadPreview *pv)
             dc_gl_viewport_set_bezier_mesh(pv->viewport, m);
             dc_gl_viewport_set_bezier_view(pv->viewport, DC_BEZIER_VIEW_WIREFRAME);
 
+            /* Also voxelize the mesh so solid/both views are available */
+            {
+                int res = pv->voxel_resolution > 0 ? pv->voxel_resolution : 3;
+                /* Convert $vd (voxels/mm) to grid resolution based on mesh size */
+                DC_Error vox_err = {0};
+                DC_VoxelGrid *mesh_grid = dc_voxelize_bezier(m, 64, 3, 8, &vox_err);
+                if (mesh_grid) {
+                    dc_voxel_grid_free(pv->voxel_grid);
+                    pv->voxel_grid = mesh_grid;
+                    dc_gl_viewport_set_voxel_grid(pv->viewport, mesh_grid);
+                }
+                (void)res;
+            }
+
             /* Fit camera to mesh CP bounding box */
             if (!pv->camera_fitted && m->cps && m->cp_rows > 0 && m->cp_cols > 0) {
                 int total = m->cp_rows * m->cp_cols;
@@ -632,6 +651,76 @@ do_render(DC_ScadPreview *pv)
             ts_bezier_mesh *m = (ts_bezier_mesh *)bmesh;
             ts_bezier_mesh_free(m);
             free(m);
+        }
+
+        /* --- Build analytical SDF scene from Cubeiform for infinite surface view --- */
+        if (pv->render_mode != DC_RENDER_MESH) {
+            DC_Error parse_err = {0};
+            DC_CubeiformEda *eda = dc_cubeiform_parse_eda(
+                dc_code_editor_get_text(pv->code_ed), &parse_err);
+            if (eda) {
+                dc_gl_sdf_scene_clear(&pv->sdf_scene);
+                size_t nops = dc_cubeiform_eda_vox_op_count(eda);
+                float cr = 0.7f, cg = 0.7f, cb = 0.7f; /* default grey */
+                int pending_csg = DC_SDF_UNION; /* CSG op for next primitive */
+                for (size_t oi = 0; oi < nops; oi++) {
+                    const DC_VoxOp *op = dc_cubeiform_eda_get_vox_op(eda, oi);
+                    if (!op) continue;
+                    /* Track current color from COLOR ops */
+                    if (op->type == DC_VOX_OP_COLOR) {
+                        cr = op->r/255.0f; cg = op->g/255.0f; cb = op->b/255.0f;
+                        continue;
+                    }
+                    /* CSG ops set pending state for the next primitive */
+                    if (op->type == DC_VOX_OP_SUBTRACT)  { pending_csg = DC_SDF_SUBTRACT;  continue; }
+                    if (op->type == DC_VOX_OP_INTERSECT) { pending_csg = DC_SDF_INTERSECT; continue; }
+                    if (op->type == DC_VOX_OP_UNION)     { pending_csg = DC_SDF_UNION;     continue; }
+                    /* Skip group markers */
+                    if (op->type == DC_VOX_OP_GROUP_BEGIN || op->type == DC_VOX_OP_GROUP_END) continue;
+                    /* Use op color if set, otherwise use current color */
+                    float pr = (op->r || op->g || op->b) ? op->r/255.0f : cr;
+                    float pg = (op->r || op->g || op->b) ? op->g/255.0f : cg;
+                    float pb = (op->r || op->g || op->b) ? op->b/255.0f : cb;
+                    switch (op->type) {
+                    case DC_VOX_OP_SPHERE:
+                        dc_gl_sdf_scene_add_sphere(&pv->sdf_scene,
+                            (float)op->x, (float)op->y, (float)op->z,
+                            (float)op->radius, pr, pg, pb);
+                        break;
+                    case DC_VOX_OP_BOX:
+                        dc_gl_sdf_scene_add_box(&pv->sdf_scene,
+                            (float)(op->x + op->x2) * 0.5f,
+                            (float)(op->y + op->y2) * 0.5f,
+                            (float)(op->z + op->z2) * 0.5f,
+                            (float)(op->x2 - op->x) * 0.5f,
+                            (float)(op->y2 - op->y) * 0.5f,
+                            (float)(op->z2 - op->z) * 0.5f,
+                            pr, pg, pb);
+                        break;
+                    case DC_VOX_OP_CYLINDER:
+                        dc_gl_sdf_scene_add_cylinder(&pv->sdf_scene,
+                            (float)op->x, (float)(op->z + op->radius2) * 0.5f, (float)op->y,
+                            (float)op->radius, (float)(op->radius2 - op->z),
+                            pr, pg, pb);
+                        break;
+                    case DC_VOX_OP_TORUS:
+                        dc_gl_sdf_scene_add_torus(&pv->sdf_scene,
+                            (float)op->x, (float)op->y, (float)op->z,
+                            (float)op->radius, (float)op->radius2,
+                            pr, pg, pb);
+                        break;
+                    default: break;
+                    }
+                    /* Apply pending CSG to the just-added primitive */
+                    if (pending_csg != DC_SDF_UNION) {
+                        dc_gl_sdf_scene_set_csg(&pv->sdf_scene, pending_csg);
+                        pending_csg = DC_SDF_UNION;
+                    }
+                }
+                dc_gl_sdf_scene_compute_bbox(&pv->sdf_scene);
+                dc_gl_viewport_set_sdf_scene(pv->viewport, &pv->sdf_scene);
+                dc_cubeiform_eda_free(eda);
+            }
         }
 
         /* --- SOLID MODE: accept voxel grid, ignore bezier mesh --- */
@@ -797,10 +886,39 @@ static void on_blocky_clicked(GtkButton *b, gpointer d)
 {
     (void)b;
     DC_ScadPreview *pv = d;
-    int cur = dc_gl_viewport_get_voxel_blocky(pv->viewport);
-    int next = !cur;
-    dc_gl_viewport_set_voxel_blocky(pv->viewport, next);
-    gtk_button_set_label(GTK_BUTTON(pv->blocky_btn), next ? "Blocky" : "Smooth");
+
+    if (pv->render_mode == DC_RENDER_MESH) {
+        /* Mesh canvas: cycle wireframe → solid → both → wireframe */
+        DC_BezierViewMode cur = dc_gl_viewport_get_bezier_view(pv->viewport);
+        DC_BezierViewMode next;
+        const char *label;
+        switch (cur) {
+        case DC_BEZIER_VIEW_WIREFRAME: next = DC_BEZIER_VIEW_VOXEL;  label = "Solid";     break;
+        case DC_BEZIER_VIEW_VOXEL:     next = DC_BEZIER_VIEW_BOTH;   label = "Both";      break;
+        default:                       next = DC_BEZIER_VIEW_WIREFRAME; label = "Wireframe"; break;
+        }
+        dc_gl_viewport_set_bezier_view(pv->viewport, next);
+        gtk_button_set_label(GTK_BUTTON(pv->blocky_btn), label);
+    } else {
+        /* Solid canvas: cycle Blocky → Smooth → Surface → Blocky */
+        int blocky = dc_gl_viewport_get_voxel_blocky(pv->viewport);
+        int analytical = dc_gl_viewport_get_analytical(pv->viewport);
+        if (blocky) {
+            /* Blocky → Smooth */
+            dc_gl_viewport_set_voxel_blocky(pv->viewport, 0);
+            dc_gl_viewport_set_analytical(pv->viewport, 0);
+            gtk_button_set_label(GTK_BUTTON(pv->blocky_btn), "Smooth");
+        } else if (!analytical) {
+            /* Smooth → Surface (analytical) */
+            dc_gl_viewport_set_analytical(pv->viewport, 1);
+            gtk_button_set_label(GTK_BUTTON(pv->blocky_btn), "Surface");
+        } else {
+            /* Surface → Blocky */
+            dc_gl_viewport_set_analytical(pv->viewport, 0);
+            dc_gl_viewport_set_voxel_blocky(pv->viewport, 1);
+            gtk_button_set_label(GTK_BUTTON(pv->blocky_btn), "Blocky");
+        }
+    }
 }
 
 /* Density entry: user types a number, hits Enter.
@@ -880,8 +998,6 @@ dc_scad_preview_new(void)
 
     /* Blocky/Smooth toggle */
     pv->blocky_btn = gtk_button_new_with_label("Blocky");
-    /* Default to blocky (voxel materialization) mode */
-    dc_gl_viewport_set_voxel_blocky(pv->viewport, 1);
     gtk_widget_set_focusable(pv->blocky_btn, FALSE);
     g_signal_connect(pv->blocky_btn, "clicked", G_CALLBACK(on_blocky_clicked), pv);
     gtk_box_append(GTK_BOX(toolbar), pv->blocky_btn);

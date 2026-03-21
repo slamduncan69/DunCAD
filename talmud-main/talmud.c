@@ -5988,6 +5988,50 @@ static const char HELP_MEMORY_ACTIVE_SESSION_S024[] =
 "  Phase 3: Mesh/solid view toggle\n"
 "  Phase 4: Bidirectional mesh-solid sync\n";
 
+static const char HELP_MEMORY_ACTIVE_SESSION_S025[] =
+"Session s025 (Tricanvas + Analytical SDF + View Modes)\n"
+"\n"
+"DATE: 2026-03-20\n"
+"\n"
+"THE INFINITE SURFACE IS BORN.\n"
+"\n"
+"ANALYTICAL SDF RENDERER (gl_sdf_analytical.c/.h):\n"
+"  New rendering mode: evaluates SDF math directly in the\n"
+"  fragment shader. No voxel grid, no texture, no artifacts.\n"
+"  Perfect sharp edges on cubes, perfect smooth spheres.\n"
+"  Supports: sphere, box, cylinder, torus, CSG subtract.\n"
+"  Toggle: Blocky -> Smooth -> Surface (3-way cycle).\n"
+"  Inspect: gl_surface (toggles analytical mode).\n"
+"  Primitives passed as shader uniform arrays.\n"
+"\n"
+"TRICANVAS LAYOUT:\n"
+"  Three canvases: Solid (center), 2D (right-top),\n"
+"  Mesh (right-middle), Terminal (right-bottom).\n"
+"  Alt+1/2/3 swaps canvases via reparenting with ref/unref.\n"
+"  Both ScadPreviews share one code editor.\n"
+"  Solid preview: DC_RENDER_SOLID (voxels only).\n"
+"  Mesh preview: DC_RENDER_MESH (bezier only).\n"
+"  Sibling link: F5 triggers both previews.\n"
+"\n"
+"RENDER SPLIT:\n"
+"  execute_full now has bmesh_out parameter.\n"
+"  Solid ignores bezier mesh output, mesh ignores voxels.\n"
+"  Solid canvas clears when only mesh content exists.\n"
+"  Mesh canvas voxelizes bezier mesh for solid/both view.\n"
+"\n"
+"BUG FIXES:\n"
+"  - Smooth->blocky depth test (glDisable/glEnable)\n"
+"  - Shape menu insert buffer overflow (+5 instead of +3)\n"
+"  - Canvas type controls selection mode cycling\n"
+"  - Lighting: reduced specular (64 exp, 0.1 intensity)\n"
+"\n"
+"REMAINING WORK:\n"
+"  - Analytical: transforms (translate/rotate/scale)\n"
+"  - Analytical: cylinder/torus coordinate mapping\n"
+"  - Bidirectional code<->GUI selection\n"
+"  - Cubeiform mesh editing (cp[], loop ops)\n"
+"  - Phase 4: bidirectional mesh-solid sync\n";
+
 static const char HELP_REFERENCE_DOCTRINE_VOXEL_PRIMACY[] =
 "The Doctrine of Voxel Primacy\n"
 "\n"
@@ -6328,6 +6372,7 @@ static const struct help_node TREE[] = {
     { "memory.active.session-s023", HELP_MEMORY_ACTIVE_SESSION_S023 },
     { "memory.active.session-s023-bugs", HELP_MEMORY_ACTIVE_SESSION_S023_BUGS },
     { "memory.active.session-s024", HELP_MEMORY_ACTIVE_SESSION_S024 },
+    { "memory.active.session-s025", HELP_MEMORY_ACTIVE_SESSION_S025 },
     { "memory.active.session-e5", HELP_MEMORY_ACTIVE_SESSION_E5 },
     { "memory.active.session-v1", HELP_MEMORY_ACTIVE_SESSION_V1 },
     { "memory.active.session-v1-6", HELP_MEMORY_ACTIVE_SESSION_V1_6 },

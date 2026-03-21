@@ -3057,6 +3057,16 @@ dispatch(const char *cmd)
     if (strcmp(name, "gl_select_mode") == 0) return cmd_gl_select_mode(args);
     if (strcmp(name, "gl_wireframe") == 0) return cmd_gl_wireframe();
     if (strcmp(name, "gl_blocky") == 0) return cmd_gl_blocky();
+    if (strcmp(name, "gl_surface") == 0) {
+        DC_GlViewport *vp = get_viewport();
+        if (!vp) return strdup("{\"error\":\"no gl viewport\"}\n");
+        int cur = dc_gl_viewport_get_analytical(vp);
+        dc_gl_viewport_set_analytical(vp, !cur);
+        int on = dc_gl_viewport_get_analytical(vp);
+        char *buf = malloc(64);
+        snprintf(buf, 64, "{\"ok\":true,\"analytical\":%s}\n", on ? "true" : "false");
+        return buf;
+    }
     if (strcmp(name, "gl_topo")   == 0) return cmd_gl_topo(args);
     if (strcmp(name, "gl_load")   == 0) return cmd_gl_load(args);
     if (strcmp(name, "gl_clear")  == 0) return cmd_gl_clear();

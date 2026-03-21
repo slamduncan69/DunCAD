@@ -53,11 +53,11 @@ static const char *BLOCKY_FRAG_SRC =
     "    vec3 N = normalize(vNormal);\n"
     "    vec3 L = normalize(uLightDir);\n"
     "    float diff = max(dot(N, L), 0.0);\n"
-    "    float diff2 = max(dot(N, -L), 0.0) * 0.25;\n"
-    "    float ambient = 0.18;\n"
+    "    float diff2 = max(dot(N, -L), 0.0) * 0.2;\n"
+    "    float ambient = 0.15;\n"
     "    vec3 V = normalize(uEye - vWorldPos);\n"
     "    vec3 H = normalize(L + V);\n"
-    "    float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.2;\n"
+    "    float spec = pow(max(dot(N, H), 0.0), 64.0) * 0.1;\n"
     "    vec3 result = vColor * (ambient + diff + diff2) + vec3(spec);\n"
     "    FragColor = vec4(result, 1.0);\n"
     "}\n";
@@ -142,9 +142,9 @@ static const char *RAYMARCH_FRAG_SRC =
     "    vec3 N = calcNormal(hu);\n"
     "    vec3 col = texture(uColor, hu).rgb;\n"
     "    vec3 L = normalize(uLightDir);\n"
-    "    float df = max(dot(N,L),0.0), d2 = max(dot(N,-L),0.0)*0.25;\n"
+    "    float df = max(dot(N,L),0.0), d2 = max(dot(N,-L),0.0)*0.2;\n"
     "    vec3 V = normalize(uEye-hp), H = normalize(L+V);\n"
-    "    float sp = pow(max(dot(N,H),0.0),48.0)*0.3;\n"
+    "    float sp = pow(max(dot(N,H),0.0),64.0)*0.1;\n"
     "    FragColor = vec4(col*(0.15+df+d2)+vec3(sp), 1.0);\n"
     "}\n";
 

@@ -169,6 +169,18 @@ void dc_gl_viewport_update_bezier_cp(DC_GlViewport *vp,
 /* Set/get the selected loop highlight. type: 0=row, 1=col, -1=none. */
 void dc_gl_viewport_set_bezier_loop(DC_GlViewport *vp, int loop_type, int loop_index);
 
+/* ---- Analytical SDF rendering (the Infinite Surface) ---- */
+
+/* Set an analytical SDF scene for rendering. Pass NULL to clear.
+ * The scene data is borrowed — caller must keep it alive.
+ * scene_ptr is a DC_GlSdfScene* (from gl_sdf_analytical.h). */
+void dc_gl_viewport_set_sdf_scene(DC_GlViewport *vp, void *scene_ptr);
+
+/* Toggle analytical SDF rendering on/off. When on, analytical takes
+ * priority over voxel rendering for the infinite surface view. */
+void dc_gl_viewport_set_analytical(DC_GlViewport *vp, int on);
+int  dc_gl_viewport_get_analytical(DC_GlViewport *vp);
+
 /* ---- Voxel rendering ---- */
 
 struct DC_VoxelGrid;
