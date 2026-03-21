@@ -540,6 +540,76 @@ launch_hq_render(DC_ScadPreview *pv, const char *source)
            pv->render_gen);
 }
 
+/* ---- Convert buttons: wrap code for cross-editor transfer ---- */
+
+static void on_to_mesh_clicked(GtkButton *b, gpointer d)
+{
+    (void)b;
+    DC_ScadPreview *pv = d;
+    if (!pv->code_ed) return;
+
+    char *text = dc_code_editor_get_text(pv->code_ed);
+    if (!text || !*text) { free(text); return; }
+
+    /* Strip $vd line if present — mesh editor doesn't need it */
+    char *clean = text;
+    char *vd = strstr(text, "$vd");
+    if (vd) {
+        char *ls = vd;
+        while (ls > text && *(ls-1) != '\n') ls--;
+        char *le = strchr(vd, '\n');
+        if (!le) le = vd + strlen(vd); else le++;
+        size_t before = (size_t)(ls - text);
+        size_t after = strlen(le);
+        clean = malloc(before + after + 1);
+        memcpy(clean, text, before);
+        memcpy(clean + before, le, after + 1);
+        free(text);
+    }
+
+    /* Wrap in bezier_mesh{} */
+    size_t clen = strlen(clean);
+    char *wrapped = malloc(clen + 32);
+    snprintf(wrapped, clen + 32, "bezier_mesh{ %s }", clean);
+    if (clean != text) free(clean);
+
+    dc_code_editor_set_text(pv->code_ed, wrapped);
+    free(wrapped);
+
+    /* Re-render — F5 triggers both canvases via sibling link */
+    pv->camera_fitted = 0;
+    dc_scad_preview_render_refit(pv);
+}
+
+static void on_to_solid_clicked(GtkButton *b, gpointer d)
+{
+    (void)b;
+    DC_ScadPreview *pv = d;
+    if (!pv->code_ed) return;
+
+    char *text = dc_code_editor_get_text(pv->code_ed);
+    if (!text || !*text) { free(text); return; }
+
+    /* If text already has bezier_mesh{}, wrap in to_solid().
+     * If it's plain solid code, wrap in to_solid(bezier_mesh{}). */
+    size_t tlen = strlen(text);
+    char *wrapped;
+    if (strstr(text, "bezier_mesh")) {
+        wrapped = malloc(tlen + 32);
+        snprintf(wrapped, tlen + 32, "to_solid(%s);", text);
+    } else {
+        wrapped = malloc(tlen + 48);
+        snprintf(wrapped, tlen + 48, "to_solid(bezier_mesh{ %s });", text);
+    }
+    free(text);
+
+    dc_code_editor_set_text(pv->code_ed, wrapped);
+    free(wrapped);
+
+    pv->camera_fitted = 0;
+    dc_scad_preview_render_refit(pv);
+}
+
 /* Callback for async coarse-to-fine voxelization.
  * Called on the main thread for each resolution pass. */
 static void
@@ -642,19 +712,7 @@ do_render(DC_ScadPreview *pv)
             dc_gl_viewport_set_bezier_mesh(pv->viewport, m);
             dc_gl_viewport_set_bezier_view(pv->viewport, DC_BEZIER_VIEW_WIREFRAME);
 
-            /* Also voxelize the mesh so solid/both views are available */
-            {
-                int res = pv->voxel_resolution > 0 ? pv->voxel_resolution : 3;
-                /* Convert $vd (voxels/mm) to grid resolution based on mesh size */
-                DC_Error vox_err = {0};
-                DC_VoxelGrid *mesh_grid = dc_voxelize_bezier(m, 64, 3, 8, &vox_err);
-                if (mesh_grid) {
-                    dc_voxel_grid_free(pv->voxel_grid);
-                    pv->voxel_grid = mesh_grid;
-                    dc_gl_viewport_set_voxel_grid(pv->viewport, mesh_grid);
-                }
-                (void)res;
-            }
+            /* Voxelization for solid/both views done lazily when toggled */
 
             /* Fit camera to mesh CP bounding box */
             if (!pv->camera_fitted && m->cps && m->cp_rows > 0 && m->cp_cols > 0) {
@@ -1067,6 +1125,22 @@ dc_scad_preview_new(void)
 
     GtkWidget *sep2 = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
     gtk_box_append(GTK_BOX(toolbar), sep2);
+
+    /* Convert buttons — wraps code in bezier_mesh{} or to_solid() */
+    GtkWidget *to_mesh_btn = gtk_button_new_with_label("→ Mesh");
+    gtk_widget_set_focusable(to_mesh_btn, FALSE);
+    gtk_widget_set_tooltip_text(to_mesh_btn, "Wrap in bezier_mesh{} and send to mesh editor");
+    g_signal_connect(to_mesh_btn, "clicked", G_CALLBACK(on_to_mesh_clicked), pv);
+    gtk_box_append(GTK_BOX(toolbar), to_mesh_btn);
+
+    GtkWidget *to_solid_btn = gtk_button_new_with_label("→ Solid");
+    gtk_widget_set_focusable(to_solid_btn, FALSE);
+    gtk_widget_set_tooltip_text(to_solid_btn, "Wrap in to_solid(bezier_mesh{}) and send to solid editor");
+    g_signal_connect(to_solid_btn, "clicked", G_CALLBACK(on_to_solid_clicked), pv);
+    gtk_box_append(GTK_BOX(toolbar), to_solid_btn);
+
+    GtkWidget *sep3 = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+    gtk_box_append(GTK_BOX(toolbar), sep3);
 
     pv->status_label = gtk_label_new("Ready — click Render");
     gtk_label_set_xalign(GTK_LABEL(pv->status_label), 0.0f);

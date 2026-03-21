@@ -799,12 +799,7 @@ tricanvas_swap(GtkWidget *window, int target)
     g_object_unref(c2d);
     g_object_unref(mesh);
 
-    /* Re-push GL data: voxel grids and bezier meshes need re-upload
-     * after GL context recreation from reparenting */
-    DC_ScadPreview *solid_pv = g_object_get_data(G_OBJECT(window), "dc-scad-preview");
-    DC_ScadPreview *mesh_pv  = g_object_get_data(G_OBJECT(window), "dc-mesh-preview");
-    if (solid_pv) dc_scad_preview_render(solid_pv);
-    if (mesh_pv)  dc_scad_preview_render(mesh_pv);
+    /* GL data survives reparenting via ref/unref — no re-render needed */
 
     g_object_set_data(G_OBJECT(window), "dc-active-canvas",
                       GINT_TO_POINTER(target));
