@@ -11,6 +11,7 @@
 #include "cubeiform/cubeiform_eda.h"
 #include "gl/gl_sdf_analytical.h"
 #include "voxel/voxelize_gpu.h"
+#include "inspect/inspect.h"
 
 /* Trinity Site — native OpenSCAD interpreter (replaces OpenSCAD subprocess) */
 #include "ts_eval.h"
@@ -712,7 +713,8 @@ do_render(DC_ScadPreview *pv)
             dc_gl_viewport_set_bezier_mesh(pv->viewport, m);
             dc_gl_viewport_set_bezier_view(pv->viewport, DC_BEZIER_VIEW_WIREFRAME);
 
-            /* Voxelization for solid/both views done lazily when toggled */
+            /* Sync mesh to inspect so 2D editor can access it */
+            dc_inspect_set_bezier_mesh(m);
 
             /* Fit camera to mesh CP bounding box */
             if (!pv->camera_fitted && m->cps && m->cp_rows > 0 && m->cp_cols > 0) {

@@ -31,4 +31,8 @@ void dc_inspect_stop(void);
  * Returns a malloc'd response string (caller must free). */
 char *dc_inspect_dispatch(const char *cmd);
 
+/* Set the active bezier mesh for 2D editor interaction.
+ * mesh_ptr is a const ts_bezier_mesh* — borrowed, must stay alive. */
+void dc_inspect_set_bezier_mesh(const void *mesh_ptr);
+
 #endif /* DC_INSPECT_H */

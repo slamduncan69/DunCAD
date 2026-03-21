@@ -1898,6 +1898,26 @@ static char *cmd_bezier_triclaude(const char *args) {
 
 static ts_bezier_mesh *s_bezier_mesh = NULL;
 static int s_bezier_resolution = 64;
+
+void
+dc_inspect_set_bezier_mesh(const void *mesh_ptr)
+{
+    const ts_bezier_mesh *m = (const ts_bezier_mesh *)mesh_ptr;
+    /* Deep copy the mesh so inspect owns it */
+    if (s_bezier_mesh) {
+        ts_bezier_mesh_free(s_bezier_mesh);
+        free(s_bezier_mesh);
+        s_bezier_mesh = NULL;
+    }
+    if (m && m->cps) {
+        s_bezier_mesh = malloc(sizeof(ts_bezier_mesh));
+        if (s_bezier_mesh) {
+            *s_bezier_mesh = ts_bezier_mesh_new(m->rows, m->cols);
+            int total = s_bezier_mesh->cp_rows * s_bezier_mesh->cp_cols;
+            memcpy(s_bezier_mesh->cps, m->cps, (size_t)total * sizeof(ts_vec3));
+        }
+    }
+}
 static DC_BezierViewMode s_bezier_view = DC_BEZIER_VIEW_WIREFRAME;
 static int s_selected_loop_type = -1;  /* -1=none, 0=row, 1=col */
 static int s_selected_loop_index = 0;
