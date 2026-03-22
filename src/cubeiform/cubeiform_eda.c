@@ -2373,17 +2373,12 @@ dc_cubeiform_execute_full(const char *dcad_src,
         }
 
         ts_bezier_mesh *mesh = used_analytical ? NULL : dc_cubeiform_eda_apply_bmesh(eda, err);
-        if (mesh && want_to_solid && !used_analytical) {
-            /* Edited mesh to_solid: pass mesh out via bmesh_out.
-             * The caller (do_render) handles async voxelization. */
-            if (bmesh_out) {
-                *bmesh_out = mesh;
-            } else {
-                /* No bmesh_out — must voxelize synchronously */
-                *vox_out = dc_voxelize_bezier(mesh, 64, 2, 15, err);
-                ts_bezier_mesh_free(mesh);
-                free(mesh);
-            }
+        if (mesh && want_to_solid && !used_analytical && vox_out) {
+            /* Edited mesh to_solid: voxelize synchronously.
+             * TODO: make this async for large meshes. */
+            *vox_out = dc_voxelize_bezier(mesh, 64, 2, 15, err);
+            ts_bezier_mesh_free(mesh);
+            free(mesh);
         } else if (mesh && bmesh_out) {
             *bmesh_out = mesh;
         } else if (mesh) {
