@@ -57,25 +57,21 @@ static const char *FRAG_SRC =
     "    return (p - uBBoxMin) / (uBBoxMax - uBBoxMin);\n"
     "}\n"
     "float sdf(vec3 uvw) { return texture(uSDF, uvw).r; }\n"
+    /* Smooth-mode normals: SDF gradient via central differences */
     "vec3 calcNormal(vec3 uvw) {\n"
-    "    if (uBlocky != 0) {\n"
-    /* Blocky: compute SDF gradient then snap to nearest axis.
-     * This gives flat voxel faces without moiré artifacts. */
-    "        vec3 e = 1.0 / vec3(textureSize(uSDF, 0));\n"
-    "        float gx = texture(uSDF, uvw+vec3(e.x,0,0)).r - texture(uSDF, uvw-vec3(e.x,0,0)).r;\n"
-    "        float gy = texture(uSDF, uvw+vec3(0,e.y,0)).r - texture(uSDF, uvw-vec3(0,e.y,0)).r;\n"
-    "        float gz = texture(uSDF, uvw+vec3(0,0,e.z)).r - texture(uSDF, uvw-vec3(0,0,e.z)).r;\n"
-    "        vec3 ag = abs(vec3(gx,gy,gz));\n"
-    "        if (ag.x > ag.y && ag.x > ag.z) return vec3(sign(gx), 0.0, 0.0);\n"
-    "        if (ag.y > ag.z) return vec3(0.0, sign(gy), 0.0);\n"
-    "        return vec3(0.0, 0.0, sign(gz));\n"
-    "    }\n"
-    /* Smooth: gradient-based normals from SDF central differences */
     "    vec3 e = 3.0 / vec3(textureSize(uSDF, 0));\n"
     "    float dx = sdf(uvw+vec3(e.x,0,0)) - sdf(uvw-vec3(e.x,0,0));\n"
     "    float dy = sdf(uvw+vec3(0,e.y,0)) - sdf(uvw-vec3(0,e.y,0));\n"
     "    float dz = sdf(uvw+vec3(0,0,e.z)) - sdf(uvw-vec3(0,0,e.z));\n"
     "    return normalize(vec3(dx,dy,dz) / (uBBoxMax - uBBoxMin));\n"
+    "}\n"
+    /* Shared lighting function */
+    "vec4 shade(vec3 N, vec3 col, vec3 hp) {\n"
+    "    vec3 L = normalize(uLightDir);\n"
+    "    float df = max(dot(N,L),0.0), d2 = max(dot(N,-L),0.0)*0.2;\n"
+    "    vec3 V = normalize(uEye-hp), H = normalize(L+V);\n"
+    "    float sp = pow(max(dot(N,H),0.0),64.0)*0.1;\n"
+    "    return vec4(col*(0.15+df+d2)+vec3(sp), 1.0);\n"
     "}\n"
     "void main() {\n"
     "    vec4 nn = uInvVP * vec4(vUV*2.0-1.0,-1,1);\n"
@@ -84,33 +80,87 @@ static const char *FRAG_SRC =
     "    vec3 ro = uEye, rd = normalize(ff.xyz - nn.xyz);\n"
     "    vec2 th = intersectAABB(ro, rd, uBBoxMin, uBBoxMax);\n"
     "    if (th.x > th.y) discard;\n"
-    "    float t = max(th.x, 0.0), tF = th.y;\n"
-    "    float stp = uCellSize*0.5, mn = uCellSize*0.2, mx = uCellSize*2.0;\n"
-    "    vec3 hp, hu; bool hit = false;\n"
-    "    for (int i = 0; i < 512; i++) {\n"
-    "        if (t > tF) break;\n"
-    "        vec3 p = ro + rd*t;\n"
-    "        vec3 u = worldToUV(p);\n"
-    "        if (any(lessThan(u,vec3(0)))||any(greaterThan(u,vec3(1)))) { t+=stp; continue; }\n"
-    "        float d = sdf(u);\n"
-    "        if (d <= 0.0) {\n"
-    "            float lo=t-stp, hi=t;\n"
-    "            for (int j=0;j<6;j++) {\n"
-    "                float mid=(lo+hi)*0.5;\n"
-    "                if (sdf(worldToUV(ro+rd*mid))<=0.0) hi=mid; else lo=mid;\n"
-    "            }\n"
-    "            t=(lo+hi)*0.5; hp=ro+rd*t; hu=worldToUV(hp); hit=true; break;\n"
+    "\n"
+    "    if (uBlocky != 0) {\n";
+/* Second part of fragment shader — split for C99 4095-char limit */
+static const char *FRAG_SRC2 =
+    /* ===== DDA VOXEL TRAVERSAL — exact cell boundaries, perfect normals ===== */
+    "        vec3 gs = vec3(textureSize(uSDF, 0));\n"
+    "        vec3 bsz = uBBoxMax - uBBoxMin;\n"
+    /* Entry point in grid coordinates */
+    "        float tEntry = max(th.x, 0.0) + 0.001;\n"
+    "        vec3 entry = ro + rd * tEntry;\n"
+    "        vec3 gp = (entry - uBBoxMin) / bsz * gs;\n"
+    /* Starting cell */
+    "        ivec3 cell = ivec3(floor(gp));\n"
+    "        cell = clamp(cell, ivec3(0), ivec3(gs) - 1);\n"
+    /* Step direction per axis */
+    "        ivec3 stp = ivec3(sign(rd));\n"
+    /* tDelta: ray t to cross one cell in each axis */
+    "        vec3 cellWorld = bsz / gs;\n"
+    "        vec3 tDel = abs(cellWorld / rd);\n"
+    /* tMax: ray t to reach next cell boundary per axis */
+    "        vec3 tMx;\n"
+    "        for (int a = 0; a < 3; a++) {\n"
+    "            float boundary = (rd[a] > 0.0)\n"
+    "                ? (float(cell[a] + 1) / gs[a]) * bsz[a] + uBBoxMin[a]\n"
+    "                : (float(cell[a])     / gs[a]) * bsz[a] + uBBoxMin[a];\n"
+    "            tMx[a] = (boundary - ro[a]) / rd[a];\n"
     "        }\n"
-    "        stp=clamp(d,mn,mx); t+=stp;\n"
+    /* DDA march */
+    "        int face = 0;\n"
+    "        bool hit = false;\n"
+    "        for (int i = 0; i < 1024; i++) {\n"
+    "            if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, ivec3(gs)))) break;\n"
+    "            if (texelFetch(uSDF, cell, 0).r <= 0.0) { hit = true; break; }\n"
+    "            if (tMx.x < tMx.y && tMx.x < tMx.z) {\n"
+    "                face = stp.x > 0 ? 0 : 1;\n"
+    "                cell.x += stp.x; tMx.x += tDel.x;\n"
+    "            } else if (tMx.y < tMx.z) {\n"
+    "                face = stp.y > 0 ? 2 : 3;\n"
+    "                cell.y += stp.y; tMx.y += tDel.y;\n"
+    "            } else {\n"
+    "                face = stp.z > 0 ? 4 : 5;\n"
+    "                cell.z += stp.z; tMx.z += tDel.z;\n"
+    "            }\n"
+    "        }\n"
+    "        if (!hit) discard;\n"
+    /* Face normal from DDA step axis */
+    "        vec3 N;\n"
+    "        if (face==0) N=vec3(-1,0,0); else if (face==1) N=vec3(1,0,0);\n"
+    "        else if (face==2) N=vec3(0,-1,0); else if (face==3) N=vec3(0,1,0);\n"
+    "        else if (face==4) N=vec3(0,0,-1); else N=vec3(0,0,1);\n"
+    /* Color and hit position */
+    "        vec3 col = texelFetch(uColor, cell, 0).rgb;\n"
+    "        vec3 hp = uBBoxMin + (vec3(cell) + 0.5) / gs * bsz;\n"
+    "        FragColor = shade(N, col, hp);\n"
+    "\n"
+    "    } else {\n"
+    /* ===== SDF SPHERE TRACING — smooth interpolated surfaces ===== */
+    "        float t = max(th.x, 0.0), tF = th.y;\n"
+    "        float stp2 = uCellSize*0.5, mn2 = uCellSize*0.2, mx2 = uCellSize*2.0;\n"
+    "        vec3 hp, hu; bool hit = false;\n"
+    "        for (int i = 0; i < 512; i++) {\n"
+    "            if (t > tF) break;\n"
+    "            vec3 p = ro + rd*t;\n"
+    "            vec3 u = worldToUV(p);\n"
+    "            if (any(lessThan(u,vec3(0)))||any(greaterThan(u,vec3(1)))) { t+=stp2; continue; }\n"
+    "            float d = sdf(u);\n"
+    "            if (d <= 0.0) {\n"
+    "                float lo=t-stp2, hi=t;\n"
+    "                for (int j=0;j<6;j++) {\n"
+    "                    float mid2=(lo+hi)*0.5;\n"
+    "                    if (sdf(worldToUV(ro+rd*mid2))<=0.0) hi=mid2; else lo=mid2;\n"
+    "                }\n"
+    "                t=(lo+hi)*0.5; hp=ro+rd*t; hu=worldToUV(hp); hit=true; break;\n"
+    "            }\n"
+    "            stp2=clamp(d,mn2,mx2); t+=stp2;\n"
+    "        }\n"
+    "        if (!hit) discard;\n"
+    "        vec3 N = calcNormal(hu);\n"
+    "        vec3 col = texture(uColor, hu).rgb;\n"
+    "        FragColor = shade(N, col, hp);\n"
     "    }\n"
-    "    if (!hit) discard;\n"
-    "    vec3 N = calcNormal(hu);\n"
-    "    vec3 col = texture(uColor, hu).rgb;\n"
-    "    vec3 L = normalize(uLightDir);\n"
-    "    float df = max(dot(N,L),0.0), d2 = max(dot(N,-L),0.0)*0.2;\n"
-    "    vec3 V = normalize(uEye-hp), H = normalize(L+V);\n"
-    "    float sp = pow(max(dot(N,H),0.0),64.0)*0.1;\n"
-    "    FragColor = vec4(col*(0.15+df+d2)+vec3(sp), 1.0);\n"
     "}\n";
 
 /* =========================================================================
@@ -277,7 +327,13 @@ dc_gl_voxel_buf_upload(DC_GlVoxelBuf *b, const DC_VoxelGrid *grid)
 
     if (!b->ray_prog) {
         GLuint vs = compile_sh(GL_VERTEX_SHADER, VERT_SRC);
-        GLuint fs = compile_sh(GL_FRAGMENT_SHADER, FRAG_SRC);
+        /* Concatenate two-part fragment shader */
+        size_t l1 = strlen(FRAG_SRC), l2 = strlen(FRAG_SRC2);
+        char *frag_full = malloc(l1 + l2 + 1);
+        memcpy(frag_full, FRAG_SRC, l1);
+        memcpy(frag_full + l1, FRAG_SRC2, l2 + 1);
+        GLuint fs = compile_sh(GL_FRAGMENT_SHADER, frag_full);
+        free(frag_full);
         b->ray_prog = link_program(vs, fs);
     }
 
