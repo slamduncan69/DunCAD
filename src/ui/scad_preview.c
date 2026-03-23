@@ -577,8 +577,9 @@ static void on_to_mesh_clicked(GtkButton *b, gpointer d)
     dc_code_editor_set_text(pv->code_ed, wrapped);
     free(wrapped);
 
-    /* Re-render — F5 triggers both canvases via sibling link */
+    /* Refit both canvases */
     pv->camera_fitted = 0;
+    if (pv->sibling) pv->sibling->camera_fitted = 0;
     dc_scad_preview_render_refit(pv);
 }
 
@@ -591,23 +592,42 @@ static void on_to_solid_clicked(GtkButton *b, gpointer d)
     char *text = dc_code_editor_get_text(pv->code_ed);
     if (!text || !*text) { free(text); return; }
 
-    /* If text already has bezier_mesh{}, wrap in to_solid().
-     * If it's plain solid code, wrap in to_solid(bezier_mesh{}). */
-    size_t tlen = strlen(text);
-    char *wrapped;
-    if (strstr(text, "bezier_mesh")) {
-        wrapped = malloc(tlen + 32);
-        snprintf(wrapped, tlen + 32, "to_solid(%s);", text);
-    } else {
-        wrapped = malloc(tlen + 48);
-        snprintf(wrapped, tlen + 48, "to_solid(bezier_mesh{ %s });", text);
+    /* Strip $vd line before wrapping — it will be re-prepended by do_render */
+    char *clean = text;
+    char *vd = strstr(text, "$vd");
+    if (vd) {
+        char *ls = vd;
+        while (ls > text && *(ls-1) != '\n') ls--;
+        char *le = strchr(vd, '\n');
+        if (!le) le = vd + strlen(vd); else le++;
+        /* Skip blank lines after $vd */
+        while (*le == '\n') le++;
+        size_t before = (size_t)(ls - text);
+        size_t after = strlen(le);
+        clean = malloc(before + after + 1);
+        memcpy(clean, text, before);
+        memcpy(clean + before, le, after + 1);
+        free(text);
     }
-    free(text);
+
+    /* Wrap in to_solid */
+    size_t clen = strlen(clean);
+    char *wrapped;
+    if (strstr(clean, "bezier_mesh")) {
+        wrapped = malloc(clen + 32);
+        snprintf(wrapped, clen + 32, "to_solid(%s);", clean);
+    } else {
+        wrapped = malloc(clen + 48);
+        snprintf(wrapped, clen + 48, "to_solid(bezier_mesh{ %s });", clean);
+    }
+    if (clean != text) free(clean);
 
     dc_code_editor_set_text(pv->code_ed, wrapped);
     free(wrapped);
 
+    /* Refit BOTH canvases — the solid canvas needs to fit the new voxels */
     pv->camera_fitted = 0;
+    if (pv->sibling) pv->sibling->camera_fitted = 0;
     dc_scad_preview_render_refit(pv);
 }
 
