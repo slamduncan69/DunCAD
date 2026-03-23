@@ -73,6 +73,13 @@ get_viewport(void)
     return pv ? dc_scad_preview_get_viewport(pv) : NULL;
 }
 
+static DC_GlViewport *
+get_mesh_viewport(void)
+{
+    DC_ScadPreview *pv = dc_app_window_get_mesh_preview(s_window);
+    return pv ? dc_scad_preview_get_viewport(pv) : NULL;
+}
+
 static DC_TransformPanel *
 get_transform(void)
 {
@@ -1924,7 +1931,8 @@ static int s_selected_loop_index = 0;
 
 /* Refresh viewport wireframe + re-voxelize if mode includes voxels */
 static void bezier_mesh_refresh(void) {
-    DC_GlViewport *vp = get_viewport();
+    DC_GlViewport *vp = get_mesh_viewport();
+    if (!vp) vp = get_viewport(); /* fallback to solid viewport */
     if (!vp || !s_bezier_mesh) return;
 
     dc_gl_viewport_set_bezier_mesh(vp, s_bezier_mesh);
@@ -3469,10 +3477,10 @@ on_2d_point_changed(int index, double u2d, double v2d, void *userdata)
     ts_bezier_mesh_set_cp(s_bezier_mesh, cp_r, cp_c,
                            ts_vec3_make(x, y, z));
 
-    /* Update viewport's mesh copy directly (avoid full deep copy) */
-    DC_GlViewport *vp = get_viewport();
-    if (vp) {
-        dc_gl_viewport_update_bezier_cp(vp, cp_r, cp_c,
+    /* Update the MESH canvas viewport's mesh copy (not the solid canvas) */
+    DC_GlViewport *mvp = get_mesh_viewport();
+    if (mvp) {
+        dc_gl_viewport_update_bezier_cp(mvp, cp_r, cp_c,
                                          (float)x, (float)y, (float)z);
     }
 }
