@@ -88,6 +88,63 @@ get_transform(void)
 }
 
 /* -------------------------------------------------------------------------
+ * GUI writes code — insert/update cp[r][c] = [x,y,z]; in bezier_mesh block
+ * ---------------------------------------------------------------------- */
+static void
+write_cp_to_code(int row, int col, float x, float y, float z)
+{
+    DC_CodeEditor *ed = get_code_ed();
+    if (!ed) return;
+    char *text = dc_code_editor_get_text(ed);
+    if (!text) return;
+
+    /* Build the cp line: "    cp[R][C] = [X, Y, Z];\n" */
+    char cp_line[128];
+    snprintf(cp_line, sizeof(cp_line), "    cp[%d][%d] = [%.4f, %.4f, %.4f];", row, col, x, y, z);
+
+    /* Build search pattern: "cp[R][C]" */
+    char pattern[32];
+    snprintf(pattern, sizeof(pattern), "cp[%d][%d]", row, col);
+
+    /* Find existing cp[r][c] line */
+    char *existing = strstr(text, pattern);
+    if (existing) {
+        /* Find start and end of this line */
+        char *ls = existing;
+        while (ls > text && *(ls-1) != '\n') ls--;
+        char *le = strchr(existing, '\n');
+        if (!le) le = existing + strlen(existing);
+
+        /* Replace the line */
+        size_t before = (size_t)(ls - text);
+        size_t after = strlen(le);
+        size_t new_len = before + strlen(cp_line) + after + 1;
+        char *updated = malloc(new_len);
+        memcpy(updated, text, before);
+        memcpy(updated + before, cp_line, strlen(cp_line));
+        memcpy(updated + before + strlen(cp_line), le, after + 1);
+        dc_code_editor_set_text(ed, updated);
+        free(updated);
+    } else {
+        /* Insert before the closing } of bezier_mesh block */
+        char *closing = strrchr(text, '}');
+        if (closing) {
+            size_t before = (size_t)(closing - text);
+            size_t cplen = strlen(cp_line);
+            size_t after = strlen(closing);
+            char *updated = malloc(before + cplen + 1 + after + 1);
+            memcpy(updated, text, before);
+            memcpy(updated + before, cp_line, cplen);
+            updated[before + cplen] = '\n';
+            memcpy(updated + before + cplen + 1, closing, after + 1);
+            dc_code_editor_set_text(ed, updated);
+            free(updated);
+        }
+    }
+    free(text);
+}
+
+/* -------------------------------------------------------------------------
  * JSON string escape helper
  * ---------------------------------------------------------------------- */
 static void
@@ -3483,6 +3540,9 @@ on_2d_point_changed(int index, double u2d, double v2d, void *userdata)
         dc_gl_viewport_update_bezier_cp(mvp, cp_r, cp_c,
                                          (float)x, (float)y, (float)z);
     }
+
+    /* Write to code — GUI changes become Cubeiform */
+    write_cp_to_code(cp_r, cp_c, (float)x, (float)y, (float)z);
 }
 
 static void
@@ -3504,6 +3564,9 @@ on_bez_cp_moved(int cp_row, int cp_col, int phase,
                "bezier CP moved: [%d,%d] → (%.3f, %.3f, %.3f)",
                cp_row, cp_col, x, y, z);
         bezier_mesh_refresh();
+
+        /* Write to code — GUI changes become Cubeiform */
+        write_cp_to_code(cp_row, cp_col, x, y, z);
     }
 }
 
