@@ -934,10 +934,10 @@ inject_vd_param(DC_ScadPreview *pv, int vd)
         free(text);
     }
 
-    /* Prepend $vd = N; */
+    /* Prepend $vd = N; with a blank line separating it from the code */
     size_t clen = strlen(clean);
     char *full = malloc(clen + 32);
-    int hlen = snprintf(full, 32, "$vd = %d;\n", vd);
+    int hlen = snprintf(full, 32, "$vd = %d;\n\n", vd);
     memcpy(full + hlen, clean, clen + 1);
     dc_code_editor_set_text(pv->code_ed, full);
     free(full);
@@ -983,17 +983,17 @@ static void on_blocky_clicked(GtkButton *b, gpointer d)
     }
 }
 
-/* Density entry: user types a number, hits Enter.
- * Injects $vd = N; into the code editor and re-renders. */
-static void on_density_changed(GtkEntry *entry, gpointer d)
+/* Apply density from the entry widget */
+static void apply_density(DC_ScadPreview *pv)
 {
-    DC_ScadPreview *pv = d;
-    if (!pv->code_ed) return; /* not connected yet */
-    const char *text = gtk_editable_get_text(GTK_EDITABLE(entry));
+    if (!pv->code_ed || !pv->density_combo) return;
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(pv->density_combo));
     if (!text || !*text) return;
     int val = atoi(text);
     if (val < 1) val = 1;
     if (val > 100) val = 100;
+
+    if (val == pv->voxel_resolution) return; /* no change */
 
     pv->voxel_resolution = val;
     inject_vd_param(pv, val);
@@ -1003,6 +1003,20 @@ static void on_density_changed(GtkEntry *entry, gpointer d)
     log_append(pv, msg);
 
     dc_scad_preview_render(pv);
+}
+
+/* Density entry: user types a number, hits Enter. */
+static void on_density_changed(GtkEntry *entry, gpointer d)
+{
+    (void)entry;
+    apply_density((DC_ScadPreview *)d);
+}
+
+/* Focus left density entry — apply the value */
+static void on_density_focus_leave(GtkEventControllerFocus *ctrl, gpointer d)
+{
+    (void)ctrl;
+    apply_density((DC_ScadPreview *)d);
 }
 
 /* -------------------------------------------------------------------------
@@ -1070,8 +1084,14 @@ dc_scad_preview_new(void)
     gtk_entry_set_placeholder_text(GTK_ENTRY(pv->density_combo), "$vd");
     gtk_editable_set_text(GTK_EDITABLE(pv->density_combo), "3");
     gtk_widget_set_size_request(pv->density_combo, 45, -1);
-    gtk_widget_set_tooltip_text(pv->density_combo, "Voxel density — voxels/mm (Enter to apply)");
+    gtk_widget_set_tooltip_text(pv->density_combo, "Voxel density — voxels/mm (Enter or click away to apply)");
     g_signal_connect(pv->density_combo, "activate", G_CALLBACK(on_density_changed), pv);
+    /* Also apply when clicking away from the entry */
+    {
+        GtkEventController *focus = gtk_event_controller_focus_new();
+        g_signal_connect(focus, "leave", G_CALLBACK(on_density_focus_leave), pv);
+        gtk_widget_add_controller(pv->density_combo, focus);
+    }
     gtk_box_append(GTK_BOX(toolbar), pv->density_combo);
 
     GtkWidget *vd_label = gtk_label_new("v/mm");
