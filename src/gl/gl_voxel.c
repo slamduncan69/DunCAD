@@ -43,6 +43,7 @@ static const char *FRAG_SRC =
     "uniform vec3 uLightDir;\n"
     "uniform mat4 uInvVP;\n"
     "uniform float uCellSize;\n"
+    "uniform int uBlocky;\n"
     "\n"
     "vec2 intersectAABB(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {\n"
     "    vec3 inv = 1.0 / rd;\n"
@@ -57,6 +58,19 @@ static const char *FRAG_SRC =
     "}\n"
     "float sdf(vec3 uvw) { return texture(uSDF, uvw).r; }\n"
     "vec3 calcNormal(vec3 uvw) {\n"
+    "    if (uBlocky != 0) {\n"
+    /* Blocky: compute SDF gradient then snap to nearest axis.
+     * This gives flat voxel faces without moiré artifacts. */
+    "        vec3 e = 1.0 / vec3(textureSize(uSDF, 0));\n"
+    "        float gx = texture(uSDF, uvw+vec3(e.x,0,0)).r - texture(uSDF, uvw-vec3(e.x,0,0)).r;\n"
+    "        float gy = texture(uSDF, uvw+vec3(0,e.y,0)).r - texture(uSDF, uvw-vec3(0,e.y,0)).r;\n"
+    "        float gz = texture(uSDF, uvw+vec3(0,0,e.z)).r - texture(uSDF, uvw-vec3(0,0,e.z)).r;\n"
+    "        vec3 ag = abs(vec3(gx,gy,gz));\n"
+    "        if (ag.x > ag.y && ag.x > ag.z) return vec3(sign(gx), 0.0, 0.0);\n"
+    "        if (ag.y > ag.z) return vec3(0.0, sign(gy), 0.0);\n"
+    "        return vec3(0.0, 0.0, sign(gz));\n"
+    "    }\n"
+    /* Smooth: gradient-based normals from SDF central differences */
     "    vec3 e = 3.0 / vec3(textureSize(uSDF, 0));\n"
     "    float dx = sdf(uvw+vec3(e.x,0,0)) - sdf(uvw-vec3(e.x,0,0));\n"
     "    float dy = sdf(uvw+vec3(0,e.y,0)) - sdf(uvw-vec3(0,e.y,0));\n"
@@ -294,6 +308,7 @@ dc_gl_voxel_buf_draw(const DC_GlVoxelBuf *b,
     glUniform3fv(glGetUniformLocation(b->ray_prog, "uBBoxMin"), 1, b->bbox_min);
     glUniform3fv(glGetUniformLocation(b->ray_prog, "uBBoxMax"), 1, b->bbox_max);
     glUniform1f(glGetUniformLocation(b->ray_prog, "uCellSize"), b->cell_size);
+    glUniform1i(glGetUniformLocation(b->ray_prog, "uBlocky"), b->blocky);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_3D, b->color_tex);
