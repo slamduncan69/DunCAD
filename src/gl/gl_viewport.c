@@ -3,6 +3,7 @@
 #include "gl/gl_voxel.h"
 #include "gl/gl_sdf_analytical.h"
 #include "gl/gl_bezier_wire.h"
+#include "gl/gl_bezier_ray.h"
 #include "voxel/voxel.h"
 #include "gl/stl_loader.h"
 #include "gl/dc_topo.h"
@@ -321,6 +322,11 @@ struct DC_GlViewport {
     /* Analytical SDF rendering (the Infinite Surface) */
     void           *sdf_scene;    /* DC_GlSdfScene* — borrowed, caller owns */
     int             analytical;    /* 1 = use analytical, 0 = use voxel */
+
+    /* Direct bezier surface raytracer (smooth mode) */
+    DC_GlBezierRay  *bezier_ray;       /* NULL if none */
+    int              bezier_ray_pending; /* 1 = needs upload */
+    ts_bezier_mesh  *bezier_ray_mesh;   /* owned copy of mesh for deferred upload */
 
     /* Bezier patch mesh wireframe */
     ts_bezier_mesh  *bezier_mesh;       /* owned copy, NULL if none */
@@ -1041,6 +1047,17 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         vp->voxel_pending = 0;
         vp->voxel_grid_pending = NULL;
     }
+    /* Upload bezier ray mesh if pending */
+    if (vp->bezier_ray_pending && vp->bezier_ray_mesh) {
+        if (!vp->bezier_ray)
+            vp->bezier_ray = dc_gl_bezier_ray_new();
+        if (vp->bezier_ray)
+            dc_gl_bezier_ray_upload(vp->bezier_ray, vp->bezier_ray_mesh);
+        vp->bezier_ray_pending = 0;
+        /* Keep bezier_ray_mesh alive — it's our owned copy,
+         * freed in set_bezier_ray_mesh or viewport destroy */
+    }
+
     /* Draw SDF: analytical (infinite surface) or voxel (materialization) */
     if (vp->analytical && vp->sdf_scene) {
         DC_GlSdfScene *scene = (DC_GlSdfScene *)vp->sdf_scene;
@@ -1051,9 +1068,17 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
                 dc_gl_sdf_draw(scene, inv_vp, eye, light_dir);
             }
         }
+    } else if (vp->bezier_ray && dc_gl_bezier_ray_patch_count(vp->bezier_ray) > 0
+               && vp->voxel_buf && !dc_gl_voxel_buf_get_blocky(vp->voxel_buf)) {
+        /* Bezier surface raytracing — smooth mode with bezier data.
+         * Renders the infinite surface directly, no voxels involved. */
+        float inv_vp[16];
+        if (mat4_invert(inv_vp, vp_mat) == 0) {
+            dc_gl_bezier_ray_draw(vp->bezier_ray, inv_vp, eye, light_dir);
+        }
     } else if ((!vp->bezier_mesh || (vp->bezier_view_mode & DC_BEZIER_VIEW_VOXEL))
         && vp->voxel_buf && dc_gl_voxel_buf_instance_count(vp->voxel_buf) > 0) {
-        /* Voxel rendering — the materialization */
+        /* Voxel rendering — blocky mode or no bezier data */
         float inv_vp[16];
         if (mat4_invert(inv_vp, vp_mat) == 0) {
             dc_gl_voxel_buf_draw(vp->voxel_buf, inv_vp, eye, light_dir, w, h);
@@ -2840,6 +2865,35 @@ dc_gl_viewport_set_voxel_grid(DC_GlViewport *vp, const DC_VoxelGrid *grid)
     /* Defer upload to next GL render (must be in GL context) */
     vp->voxel_grid_pending = grid;
     vp->voxel_pending = 1;
+    gtk_widget_queue_draw(vp->gl_area);
+}
+
+void
+dc_gl_viewport_set_bezier_ray_mesh(DC_GlViewport *vp, const void *mesh_ptr)
+{
+    if (!vp) return;
+    /* Free previous copy */
+    if (vp->bezier_ray_mesh) {
+        ts_bezier_mesh_free(vp->bezier_ray_mesh);
+        free(vp->bezier_ray_mesh);
+        vp->bezier_ray_mesh = NULL;
+    }
+    if (!mesh_ptr) {
+        vp->bezier_ray_pending = 0;
+        return;
+    }
+    /* Deep copy the mesh so caller can free theirs */
+    const ts_bezier_mesh *src = (const ts_bezier_mesh *)mesh_ptr;
+    ts_bezier_mesh *copy = malloc(sizeof(*copy));
+    if (!copy) return;
+    *copy = ts_bezier_mesh_new(src->rows, src->cols);
+    if (copy->cps && src->cps) {
+        int total = src->cp_rows * src->cp_cols;
+        for (int i = 0; i < total; i++)
+            copy->cps[i] = src->cps[i];
+    }
+    vp->bezier_ray_mesh = copy;
+    vp->bezier_ray_pending = 1;
     gtk_widget_queue_draw(vp->gl_area);
 }
 

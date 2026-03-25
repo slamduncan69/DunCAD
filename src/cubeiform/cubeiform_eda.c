@@ -1614,7 +1614,7 @@ static void parse_bezier_mesh_block(EParser *p, DC_Array *bmesh_ops)
             if (p->cur.type == ETOK_SEMI) next_token(p);
             dc_array_push(bmesh_ops, &op);
 
-        } else if (ident_eq(&p->cur, "box")) {
+        } else if (ident_eq(&p->cur, "cube") || ident_eq(&p->cur, "box")) {
             next_token(p);
             expect(p, ETOK_LPAREN);
             DC_BMeshOp op = { .type = DC_BMESH_OP_BOX };
@@ -2377,8 +2377,13 @@ dc_cubeiform_execute_full(const char *dcad_src,
             /* Edited mesh to_solid: voxelize synchronously.
              * TODO: make this async for large meshes. */
             *vox_out = dc_voxelize_bezier(mesh, 64, 2, 15, err);
-            ts_bezier_mesh_free(mesh);
-            free(mesh);
+            /* Also return the source mesh for bezier surface raytracing */
+            if (bmesh_out) {
+                *bmesh_out = mesh;
+            } else {
+                ts_bezier_mesh_free(mesh);
+                free(mesh);
+            }
         } else if (mesh && bmesh_out) {
             *bmesh_out = mesh;
         } else if (mesh) {

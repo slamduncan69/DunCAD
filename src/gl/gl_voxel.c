@@ -56,14 +56,41 @@ static const char *FRAG_SRC =
     "vec3 worldToUV(vec3 p) {\n"
     "    return (p - uBBoxMin) / (uBBoxMax - uBBoxMin);\n"
     "}\n"
-    "float sdf(vec3 uvw) { return texture(uSDF, uvw).r; }\n"
-    /* Smooth-mode normals: SDF gradient via central differences */
+    /* Tricubic (smoothstep-weighted) SDF interpolation.
+     * Hardware texture() gives trilinear (C0) — visible terracing.
+     * Smoothstep weights give C1 continuity — smooth zero-crossing. */
+    "float sdf(vec3 uvw) {\n"
+    "    vec3 sz = vec3(textureSize(uSDF, 0));\n"
+    "    vec3 tc = uvw * sz - 0.5;\n"
+    "    vec3 f = fract(tc);\n"
+    "    vec3 w = f*f*(3.0-2.0*f);\n"  /* smoothstep */
+    "    ivec3 i0 = ivec3(floor(tc));\n"
+    "    ivec3 i1 = i0 + 1;\n"
+    "    i0 = clamp(i0, ivec3(0), ivec3(sz)-1);\n"
+    "    i1 = clamp(i1, ivec3(0), ivec3(sz)-1);\n"
+    "    float d00=mix(texelFetch(uSDF,ivec3(i0.x,i0.y,i0.z),0).r,"
+                      "texelFetch(uSDF,ivec3(i1.x,i0.y,i0.z),0).r,w.x);\n"
+    "    float d10=mix(texelFetch(uSDF,ivec3(i0.x,i1.y,i0.z),0).r,"
+                      "texelFetch(uSDF,ivec3(i1.x,i1.y,i0.z),0).r,w.x);\n"
+    "    float d01=mix(texelFetch(uSDF,ivec3(i0.x,i0.y,i1.z),0).r,"
+                      "texelFetch(uSDF,ivec3(i1.x,i0.y,i1.z),0).r,w.x);\n"
+    "    float d11=mix(texelFetch(uSDF,ivec3(i0.x,i1.y,i1.z),0).r,"
+                      "texelFetch(uSDF,ivec3(i1.x,i1.y,i1.z),0).r,w.x);\n"
+    "    return mix(mix(d00,d10,w.y), mix(d01,d11,w.y), w.z);\n"
+    "}\n"
+    /* Smooth-mode normals: multi-sample SDF gradient.
+     * Average gradients at two radii to suppress noise while
+     * preserving surface curvature. Uses trilinear texture(). */
     "vec3 calcNormal(vec3 uvw) {\n"
-    "    vec3 e = 3.0 / vec3(textureSize(uSDF, 0));\n"
-    "    float dx = sdf(uvw+vec3(e.x,0,0)) - sdf(uvw-vec3(e.x,0,0));\n"
-    "    float dy = sdf(uvw+vec3(0,e.y,0)) - sdf(uvw-vec3(0,e.y,0));\n"
-    "    float dz = sdf(uvw+vec3(0,0,e.z)) - sdf(uvw-vec3(0,0,e.z));\n"
-    "    return normalize(vec3(dx,dy,dz) / (uBBoxMax - uBBoxMin));\n"
+    "    vec3 isz = 1.0 / vec3(textureSize(uSDF, 0));\n"
+    "    vec3 n = vec3(0);\n"
+    "    for (float r = 2.0; r <= 4.0; r += 1.0) {\n"
+    "        vec3 e = r * isz;\n"
+    "        n.x += texture(uSDF,uvw+vec3(e.x,0,0)).r - texture(uSDF,uvw-vec3(e.x,0,0)).r;\n"
+    "        n.y += texture(uSDF,uvw+vec3(0,e.y,0)).r - texture(uSDF,uvw-vec3(0,e.y,0)).r;\n"
+    "        n.z += texture(uSDF,uvw+vec3(0,0,e.z)).r - texture(uSDF,uvw-vec3(0,0,e.z)).r;\n"
+    "    }\n"
+    "    return normalize(n / (uBBoxMax - uBBoxMin));\n"
     "}\n"
     /* Shared lighting function */
     "vec4 shade(vec3 N, vec3 col, vec3 hp) {\n"
@@ -148,7 +175,7 @@ static const char *FRAG_SRC2 =
     "            float d = sdf(u);\n"
     "            if (d <= 0.0) {\n"
     "                float lo=t-stp2, hi=t;\n"
-    "                for (int j=0;j<6;j++) {\n"
+    "                for (int j=0;j<10;j++) {\n"
     "                    float mid2=(lo+hi)*0.5;\n"
     "                    if (sdf(worldToUV(ro+rd*mid2))<=0.0) hi=mid2; else lo=mid2;\n"
     "                }\n"
@@ -158,7 +185,12 @@ static const char *FRAG_SRC2 =
     "        }\n"
     "        if (!hit) discard;\n"
     "        vec3 N = calcNormal(hu);\n"
-    "        vec3 col = texture(uColor, hu).rgb;\n"
+    "        vec3 sz2 = vec3(textureSize(uColor, 0));\n"
+    "        vec3 tc2 = hu * sz2 - 0.5;\n"
+    "        vec3 f2 = fract(tc2);\n"
+    "        vec3 w2 = f2*f2*(3.0-2.0*f2);\n"
+    "        vec3 uv2 = (floor(tc2) + 0.5 + w2) / sz2;\n"
+    "        vec3 col = texture(uColor, uv2).rgb;\n"
     "        FragColor = shade(N, col, hp);\n"
     "    }\n"
     "}\n";
@@ -291,6 +323,10 @@ dc_gl_voxel_buf_upload(DC_GlVoxelBuf *b, const DC_VoxelGrid *grid)
     /* Texture filter depends on blocky flag */
     GLenum filter = b->blocky ? GL_NEAREST : GL_LINEAR;
 
+    /* GL_RGB = 3 bytes/pixel, rows may not be 4-byte aligned.
+     * Default GL_UNPACK_ALIGNMENT=4 corrupts every row after the first. */
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
     if (!b->color_tex) glGenTextures(1, &b->color_tex);
     glBindTexture(GL_TEXTURE_3D, b->color_tex);
     glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB8, sx, sy, sz, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb);
@@ -309,6 +345,7 @@ dc_gl_voxel_buf_upload(DC_GlVoxelBuf *b, const DC_VoxelGrid *grid)
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4); /* restore default */
     glBindTexture(GL_TEXTURE_3D, 0);
     free(rgb);
     free(sdf);

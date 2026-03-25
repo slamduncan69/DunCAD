@@ -728,11 +728,12 @@ do_render(DC_ScadPreview *pv)
 
             ts_bezier_mesh_free(m);
             free(m);
-        } else if (bmesh) {
-            /* Other mode — discard */
+        } else if (bmesh && !grid) {
+            /* Mesh without grid (no to_solid) and wrong render mode — discard */
             ts_bezier_mesh *m = (ts_bezier_mesh *)bmesh;
             ts_bezier_mesh_free(m);
             free(m);
+            bmesh = NULL;
         }
 
         /* --- Build analytical SDF scene from Cubeiform for infinite surface view --- */
@@ -812,6 +813,16 @@ do_render(DC_ScadPreview *pv)
             dc_voxel_grid_free(pv->voxel_grid);
             pv->voxel_grid = grid;
             dc_gl_viewport_set_voxel_grid(pv->viewport, grid);
+
+            /* If source bezier mesh is available, set up direct
+             * surface raytracing for smooth mode. */
+            if (bmesh) {
+                dc_gl_viewport_set_bezier_ray_mesh(pv->viewport, bmesh);
+                ts_bezier_mesh *bm = (ts_bezier_mesh *)bmesh;
+                ts_bezier_mesh_free(bm);
+                free(bm);
+                bmesh = NULL;
+            }
 
             size_t active = dc_voxel_grid_active_count(grid);
             int gx = dc_voxel_grid_size_x(grid);

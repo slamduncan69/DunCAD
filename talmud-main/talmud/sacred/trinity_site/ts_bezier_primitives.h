@@ -17,105 +17,99 @@
 #include <math.h>
 
 /* =========================================================================
- * Sphere → Mesh (2×3 grid: equatorial belt, top pole, bottom pole)
+ * Sphere → Mesh (4×6 grid for minimal seam visibility)
  *
- * Layout: 2 rows × 3 columns = 6 patches.
- * Row 0: top hemisphere (equator to north pole), 3 patches at 120° each
- * Row 1: bottom hemisphere (south pole to equator), 3 patches at 120° each
+ * 24 patches covering 45° elevation × 60° azimuth each.
+ * Smaller arcs = less curvature mismatch at patch boundaries.
  *
- * CP grid is (5 rows × 7 cols).
- * Row 0 (cp_row=0): equator (shared between top and bottom hemispheres)
- * Row 2 (cp_row=2): mid-latitude (45° north)
- * Row 4 (cp_row=4): north pole (all CPs at pole)
- * Bottom half mirrors through equator.
+ * Elevation bands: 4 rows from north pole to south pole.
+ *   Row 0: 90°→45°N, Row 1: 45°N→0° (equator)
+ *   Row 2: 0°→45°S,  Row 3: 45°S→90°S
  *
- * CPs are projected onto the sphere surface. Middle CPs on circular arcs
- * are pushed outward by 1/cos(half_arc) to compensate for bezier droop.
+ * Azimuthal columns: 6 at 60° each.
+ *
+ * CP grid is (9 rows × 13 cols).
+ *
+ * Optimal quadratic bezier circle factor for arc of half-angle α:
+ *   mid_factor = 2 - cos(α)
+ * At 30° (half of 60°): 2 - cos(30°) = 2 - √3/2 ≈ 1.134
+ * At 22.5° (half of 45°): 2 - cos(22.5°) ≈ 1.076
  * ========================================================================= */
 static inline ts_bezier_mesh ts_bezier_mesh_from_sphere(const ts_bezier_sphere *s) {
-    ts_bezier_mesh m = ts_bezier_mesh_new(2, 3);
+    const int EROWS = 4, ECOLS = 6;
+    ts_bezier_mesh m = ts_bezier_mesh_new(EROWS, ECOLS);
     double r = s->radius;
     ts_vec3 c = s->center;
 
-    double dtheta = 2.0 * M_PI / 3.0; /* 120° per column */
-    double half_arc = dtheta * 0.5;   /* 60° */
-    /* Optimal quadratic bezier circle factor: places t=0.5 exactly on circle.
-     * For arc of half-angle α: mid_factor = 2 - cos(α).
-     * 120° arc (α=60°): 2 - cos(60°) = 2 - 0.5 = 1.5
-     * 90° arc (α=45°):  2 - cos(45°) = 2 - √2/2 ≈ 1.293 */
-    double mid_factor = 2.0 - cos(half_arc);
+    double az_arc = 2.0 * M_PI / (double)ECOLS;  /* 60° per column */
+    double az_half = az_arc * 0.5;                 /* 30° */
+    /* C1-continuous factor: 1/cos(α) ensures tangent continuity at
+     * patch boundaries for uniformly-spaced circular arcs.
+     * vs old 2-cos(α) which optimized circle fit but broke C1. */
+    double az_mid_f = 1.0 / cos(az_half);          /* ≈1.155 */
 
-    double elev_mid = M_PI / 4.0;   /* 45° — midpoint of pole↔equator arc */
-    double elev_mid_factor = 2.0 - cos(elev_mid);
+    /* Elevation boundaries: 90°, 45°, 0°, -45°, -90° (in elevation angle) */
+    double elev[5];
+    elev[0] = M_PI / 2.0;    /* north pole */
+    elev[1] = M_PI / 4.0;    /* 45° N */
+    elev[2] = 0.0;            /* equator */
+    elev[3] = -M_PI / 4.0;   /* 45° S */
+    elev[4] = -M_PI / 2.0;   /* south pole */
 
-    for (int pc = 0; pc < 3; pc++) {
-        double theta0 = dtheta * (double)pc;
-        double theta_mid = theta0 + half_arc;
-        double theta1 = theta0 + dtheta;
+    /* For each CP row, compute the elevation angle and the mid-factor
+     * for the elevation arc it belongs to. */
+    for (int pr = 0; pr < EROWS; pr++) {
+        double e0 = elev[pr], e1 = elev[pr + 1];
+        double e_half = (e0 - e1) * 0.5; /* half-angle of elevation arc */
+        double e_mid = (e0 + e1) * 0.5;  /* midpoint elevation */
+        double e_mid_f = 1.0 / cos(e_half); /* C1-continuous factor */
 
-        double c0t = cos(theta0),  s0t = sin(theta0);
-        double cmt = cos(theta_mid), smt = sin(theta_mid);
-        double c1t = cos(theta1), s1t = sin(theta1);
+        int br = 2 * pr; /* base CP row */
 
-        int bc = 2 * pc;
+        for (int pc = 0; pc < ECOLS; pc++) {
+            double a0 = az_arc * (double)pc;
+            double a_mid = a0 + az_half;
+            double a1 = a0 + az_arc;
+            int bc = 2 * pc; /* base CP col */
 
-        /* --- Equator (cp_row 0, shared between row 0 and row 1) --- */
-        /* These are actually cp_row 2 in the bottom hemisphere (row 1 goes: pole→mid→equator)
-         * Layout: row 1 bottom half goes from cp_row 2 to 4, but with
-         * row 1 patch starting at cp_row 2 (equator at cp_row 2, pole at cp_row 4) */
-        /* Actually, let's use:
-         *   cp_row 0: north pole
-         *   cp_row 1: mid-latitude (top)
-         *   cp_row 2: equator (SHARED between patch row 0 and 1)
-         *   cp_row 3: mid-latitude (bottom)
-         *   cp_row 4: south pole */
+            /* 3 elevation levels: e0 (top), e_mid, e1 (bottom) */
+            /* 3 azimuth levels: a0 (left), a_mid, a1 (right) */
+            double elevs[3] = { e0, e_mid, e1 };
+            double e_factors[3] = { 1.0, e_mid_f, 1.0 };
+            double azims[3] = { a0, a_mid, a1 };
+            double a_factors[3] = { 1.0, az_mid_f, 1.0 };
 
-        /* Edge CPs (on sphere surface at the azimuthal angles) */
-        /* Mid CPs pushed outward for circle approximation */
+            for (int j = 0; j < 3; j++) {
+                double phi = elevs[j];
+                double ef = e_factors[j];
+                double cos_phi = cos(phi);
+                double sin_phi = sin(phi);
+                /* xy-radius and z on sphere at this elevation */
+                double rxy = r * cos_phi;
+                double z   = r * sin_phi;
+                /* Push mid-elevation CPs outward */
+                double rxy_cp = rxy * ef;
+                double z_cp   = z * ef;
 
-        /* --- North pole (cp_row 0) --- */
-        ts_bezier_mesh_set_cp(&m, 0, bc,     ts_vec3_add(c, ts_vec3_make(0, 0, r)));
-        ts_bezier_mesh_set_cp(&m, 0, bc + 1, ts_vec3_add(c, ts_vec3_make(0, 0, r)));
-        ts_bezier_mesh_set_cp(&m, 0, bc + 2, ts_vec3_add(c, ts_vec3_make(0, 0, r)));
+                for (int i = 0; i < 3; i++) {
+                    double theta = azims[i];
+                    double af = a_factors[i];
+                    /* Push mid-azimuth CPs outward */
+                    double rxy_final = rxy_cp * af;
+                    ts_vec3 cp = ts_vec3_add(c, ts_vec3_make(
+                        rxy_final * cos(theta),
+                        rxy_final * sin(theta),
+                        z_cp));
 
-        /* --- Mid-latitude top (cp_row 1, ~45° north) --- */
-        /* Mid-latitude CPs are pushed outward from the sphere surface
-         * by elev_mid_factor so the bezier arc passes through the sphere
-         * at t=0.5. Factor = 2 - cos(45°) ≈ 1.293. */
-        double mz_on = r * sin(elev_mid);      /* z on sphere at 45° */
-        double mr_on = r * cos(elev_mid);       /* xy-radius on sphere at 45° */
-        double mr_cp = mr_on * elev_mid_factor;
-        double mz_cp = mz_on * elev_mid_factor;
-        /* Azimuthal mid CP also pushed for circle approximation */
-        double mr_mid_cp = mr_cp * mid_factor;
-        ts_bezier_mesh_set_cp(&m, 1, bc,
-            ts_vec3_add(c, ts_vec3_make(mr_cp * c0t, mr_cp * s0t, mz_cp)));
-        ts_bezier_mesh_set_cp(&m, 1, bc + 1,
-            ts_vec3_add(c, ts_vec3_make(mr_mid_cp * cmt, mr_mid_cp * smt, mz_cp)));
-        ts_bezier_mesh_set_cp(&m, 1, bc + 2,
-            ts_vec3_add(c, ts_vec3_make(mr_cp * c1t, mr_cp * s1t, mz_cp)));
+                    /* At poles (cos_phi ≈ 0), collapse all CPs to pole */
+                    if (fabs(cos_phi) < 1e-10) {
+                        cp = ts_vec3_add(c, ts_vec3_make(0, 0, z_cp));
+                    }
 
-        /* --- Equator (cp_row 2, shared) --- */
-        double eq_mid_r = r * mid_factor;
-        ts_bezier_mesh_set_cp(&m, 2, bc,
-            ts_vec3_add(c, ts_vec3_make(r * c0t, r * s0t, 0)));
-        ts_bezier_mesh_set_cp(&m, 2, bc + 1,
-            ts_vec3_add(c, ts_vec3_make(eq_mid_r * cmt, eq_mid_r * smt, 0)));
-        ts_bezier_mesh_set_cp(&m, 2, bc + 2,
-            ts_vec3_add(c, ts_vec3_make(r * c1t, r * s1t, 0)));
-
-        /* --- Mid-latitude bottom (cp_row 3, ~45° south) --- */
-        ts_bezier_mesh_set_cp(&m, 3, bc,
-            ts_vec3_add(c, ts_vec3_make(mr_cp * c0t, mr_cp * s0t, -mz_cp)));
-        ts_bezier_mesh_set_cp(&m, 3, bc + 1,
-            ts_vec3_add(c, ts_vec3_make(mr_mid_cp * cmt, mr_mid_cp * smt, -mz_cp)));
-        ts_bezier_mesh_set_cp(&m, 3, bc + 2,
-            ts_vec3_add(c, ts_vec3_make(mr_cp * c1t, mr_cp * s1t, -mz_cp)));
-
-        /* --- South pole (cp_row 4) --- */
-        ts_bezier_mesh_set_cp(&m, 4, bc,     ts_vec3_add(c, ts_vec3_make(0, 0, -r)));
-        ts_bezier_mesh_set_cp(&m, 4, bc + 1, ts_vec3_add(c, ts_vec3_make(0, 0, -r)));
-        ts_bezier_mesh_set_cp(&m, 4, bc + 2, ts_vec3_add(c, ts_vec3_make(0, 0, -r)));
+                    ts_bezier_mesh_set_cp(&m, br + j, bc + i, cp);
+                }
+            }
+        }
     }
 
     return m;

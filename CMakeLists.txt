@@ -131,6 +131,7 @@ add_executable(duncad
     src/gl/gl_voxel.c
     src/gl/gl_sdf_analytical.c
     src/gl/gl_bezier_wire.c
+    src/gl/gl_bezier_ray.c
     src/gl/stl_loader.c
     src/bezier/bezier_canvas.c
     src/bezier/bezier_editor.c
@@ -261,6 +262,7 @@ add_executable(test_bezier_canvas
     src/gl/gl_voxel.c
     src/gl/gl_sdf_analytical.c
     src/gl/gl_bezier_wire.c
+    src/gl/gl_bezier_ray.c
     src/gl/stl_loader.c
     src/inspect/inspect.c
     src/scad/scad_runner.c
@@ -304,6 +306,7 @@ add_executable(test_bezier_editor
     src/gl/gl_voxel.c
     src/gl/gl_sdf_analytical.c
     src/gl/gl_bezier_wire.c
+    src/gl/gl_bezier_ray.c
     src/gl/stl_loader.c
     src/inspect/inspect.c
     src/scad/scad_runner.c

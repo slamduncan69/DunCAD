@@ -255,6 +255,84 @@ dc_voxelize_bezier(const void *mesh_ptr, int resolution,
         }
     }
 
+    /* --- Distance propagation ---
+     * The Newton solver only computes distances within the narrow band.
+     * Voxels far from the surface have HUGE_VALF, which makes the smooth
+     * raymarcher's trilinear interpolation produce garbage.
+     * Propagate distances outward: each voxel's distance is min of its
+     * current distance and (neighbor distance + cell_size).
+     * This gives a proper distance field for the entire grid. */
+    {
+        int changed = 1;
+        for (int pass = 0; pass < 64 && changed; pass++) {
+            changed = 0;
+            for (int iz2 = 0; iz2 < sz; iz2++)
+            for (int iy2 = 0; iy2 < sy; iy2++)
+            for (int ix2 = 0; ix2 < sx; ix2++) {
+                DC_Voxel *vx = dc_voxel_grid_get(grid, ix2, iy2, iz2);
+                if (!vx) continue;
+                float cur = fabsf(vx->distance);
+                static const int ddx[] = {-1,1,0,0,0,0};
+                static const int ddy[] = {0,0,-1,1,0,0};
+                static const int ddz[] = {0,0,0,0,-1,1};
+                for (int d = 0; d < 6; d++) {
+                    int nx = ix2+ddx[d], ny = iy2+ddy[d], nz = iz2+ddz[d];
+                    if (nx < 0 || ny < 0 || nz < 0 ||
+                        nx >= sx || ny >= sy || nz >= sz) continue;
+                    DC_Voxel *nv = dc_voxel_grid_get(grid, nx, ny, nz);
+                    if (!nv) continue;
+                    float prop = fabsf(nv->distance) + cell_size;
+                    if (prop < cur) {
+                        cur = prop;
+                        float sign = vx->distance < 0 ? -1.0f : 1.0f;
+                        vx->distance = sign * cur;
+                        changed = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /* --- SDF smoothing (sign-preserving) ---
+     * The Newton solver uses a single starting point, causing
+     * inconsistent distances near patch boundaries (ring artifacts).
+     * Smooth the UNSIGNED distances with a 3x3x3 kernel, then
+     * re-apply the original sign. This prevents sign-flip destruction. */
+    {
+        size_t total = (size_t)sx * sy * sz;
+        float *tmp = malloc(total * sizeof(float));
+        if (tmp) {
+            for (int pass = 0; pass < 3; pass++) {
+                /* Read unsigned distances */
+                for (int iz2 = 0; iz2 < sz; iz2++)
+                for (int iy2 = 0; iy2 < sy; iy2++)
+                for (int ix2 = 0; ix2 < sx; ix2++) {
+                    size_t idx = (size_t)iz2 * sy * sx + (size_t)iy2 * sx + ix2;
+                    DC_Voxel *vx = dc_voxel_grid_get(grid, ix2, iy2, iz2);
+                    tmp[idx] = vx ? fabsf(vx->distance) : 1e6f;
+                }
+                /* Apply 6-connected weighted average on unsigned distances */
+                for (int iz2 = 1; iz2 < sz-1; iz2++)
+                for (int iy2 = 1; iy2 < sy-1; iy2++)
+                for (int ix2 = 1; ix2 < sx-1; ix2++) {
+                    size_t idx = (size_t)iz2 * sy * sx + (size_t)iy2 * sx + ix2;
+                    float c = tmp[idx];
+                    float sum = c * 6.0f;
+                    sum += tmp[idx-1] + tmp[idx+1];
+                    sum += tmp[idx-sx] + tmp[idx+sx];
+                    sum += tmp[idx-(size_t)sy*sx] + tmp[idx+(size_t)sy*sx];
+                    float smoothed = sum / 12.0f;
+                    DC_Voxel *vx = dc_voxel_grid_get(grid, ix2, iy2, iz2);
+                    if (vx) {
+                        float sign = vx->distance < 0 ? -1.0f : 1.0f;
+                        vx->distance = sign * smoothed;
+                    }
+                }
+            }
+            free(tmp);
+        }
+    }
+
     /* Set uniform grey color for active voxels */
     for (int iz2 = 0; iz2 < sz; iz2++)
     for (int iy2 = 0; iy2 < sy; iy2++)

@@ -190,6 +190,9 @@ struct DC_VoxelGrid;
 void dc_gl_viewport_set_voxel_grid(DC_GlViewport *vp,
                                      const struct DC_VoxelGrid *grid);
 
+/* Set bezier mesh for direct surface raytracing (smooth mode). */
+void dc_gl_viewport_set_bezier_ray_mesh(DC_GlViewport *vp, const void *mesh_ptr);
+
 /* Toggle blocky (nearest-neighbor) vs smooth (trilinear) voxel rendering. */
 void dc_gl_viewport_set_voxel_blocky(DC_GlViewport *vp, int blocky);
 int  dc_gl_viewport_get_voxel_blocky(DC_GlViewport *vp);
