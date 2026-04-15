@@ -17,6 +17,8 @@
 #include "ts_eval.h"
 #include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_mesh.h"
 #include "voxel/voxelize_bezier.h"
+#include "voxel/marching_cubes.h"
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_mesh.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -149,14 +151,22 @@ is_preamble(const char *stmt)
         !isalnum((unsigned char)p[8]) && p[8] != '_')
         return 1;
 
-    /* Variable assignment: identifier = expr; (but not ==) */
-    const char *eq = strchr(p, '=');
-    if (eq && eq > p && eq[1] != '=') {
-        const char *q = p;
-        while (q < eq && (isalnum((unsigned char)*q) || *q == '_' || *q == '$'))
-            q++;
-        while (q < eq && isspace((unsigned char)*q)) q++;
-        if (q == eq) return 1;
+    /* Variable assignment: identifier = expr; (but not ==)
+     * Only match '=' that appears before any '(' or '{', so that
+     * geometry like difference() { ... } is never misclassified. */
+    {
+        const char *eq = NULL;
+        for (const char *s = p; *s; s++) {
+            if (*s == '(' || *s == '{') break; /* stop at call/block */
+            if (*s == '=' && s[1] != '=') { eq = s; break; }
+        }
+        if (eq && eq > p) {
+            const char *q = p;
+            while (q < eq && (isalnum((unsigned char)*q) || *q == '_' || *q == '$'))
+                q++;
+            while (q < eq && isspace((unsigned char)*q)) q++;
+            if (q == eq) return 1;
+        }
     }
 
     return 0;
@@ -589,25 +599,32 @@ static void on_to_solid_clicked(GtkButton *b, gpointer d)
     DC_ScadPreview *pv = d;
     if (!pv->code_ed) return;
 
-    char *text = dc_code_editor_get_text(pv->code_ed);
-    if (!text || !*text) { free(text); return; }
+    /* Prefer the live edited mesh over stale code editor text */
+    char *mesh_src = dc_inspect_bezier_mesh_to_cubeiform();
+    char *clean = NULL;
 
-    /* Strip $vd line before wrapping — it will be re-prepended by do_render */
-    char *clean = text;
-    char *vd = strstr(text, "$vd");
-    if (vd) {
-        char *ls = vd;
-        while (ls > text && *(ls-1) != '\n') ls--;
-        char *le = strchr(vd, '\n');
-        if (!le) le = vd + strlen(vd); else le++;
-        /* Skip blank lines after $vd */
-        while (*le == '\n') le++;
-        size_t before = (size_t)(ls - text);
-        size_t after = strlen(le);
-        clean = malloc(before + after + 1);
-        memcpy(clean, text, before);
-        memcpy(clean + before, le, after + 1);
-        free(text);
+    if (mesh_src) {
+        clean = mesh_src;
+    } else {
+        char *text = dc_code_editor_get_text(pv->code_ed);
+        if (!text || !*text) { free(text); return; }
+
+        /* Strip $vd line before wrapping — it will be re-prepended by do_render */
+        clean = text;
+        char *vd = strstr(text, "$vd");
+        if (vd) {
+            char *ls = vd;
+            while (ls > text && *(ls-1) != '\n') ls--;
+            char *le = strchr(vd, '\n');
+            if (!le) le = vd + strlen(vd); else le++;
+            while (*le == '\n') le++;
+            size_t before = (size_t)(ls - text);
+            size_t after = strlen(le);
+            clean = malloc(before + after + 1);
+            memcpy(clean, text, before);
+            memcpy(clean + before, le, after + 1);
+            free(text);
+        }
     }
 
     /* Wrap in to_solid */
@@ -620,12 +637,13 @@ static void on_to_solid_clicked(GtkButton *b, gpointer d)
         wrapped = malloc(clen + 48);
         snprintf(wrapped, clen + 48, "to_solid(bezier_mesh{ %s });", clean);
     }
-    if (clean != text) free(clean);
+    free(clean);
 
     dc_code_editor_set_text(pv->code_ed, wrapped);
     free(wrapped);
 
-    /* Refit BOTH canvases — the solid canvas needs to fit the new voxels */
+    /* Refit BOTH canvases — the solid canvas needs to fit the new voxels.
+     * do_render() already triggers the sibling render internally. */
     pv->camera_fitted = 0;
     if (pv->sibling) pv->sibling->camera_fitted = 0;
     dc_scad_preview_render_refit(pv);
@@ -857,6 +875,40 @@ do_render(DC_ScadPreview *pv)
         } else if (grid) {
             /* Mesh mode — discard voxel output */
             dc_voxel_grid_free(grid);
+        }
+
+        /* --- FALLBACK: Cubeiform produced nothing → try full OpenSCAD --- */
+        if (!got_something && pv->render_mode != DC_RENDER_MESH) {
+            char *editor_text = dc_code_editor_get_text(pv->code_ed);
+            if (editor_text && *editor_text) {
+                ts_interpret_opts topts = {0};
+                topts.fn_override = 64;
+                topts.fa_override = 2;
+                topts.fs_override = 1.0;
+                ts_parse_error terr = {0};
+                ts_mesh mesh = ts_interpret_ex(editor_text, &terr, &topts);
+                if (mesh.tri_count > 0) {
+                    /* Write to temp STL, load into viewport as object */
+                    const char *path = "/tmp/duncad-fallback.stl";
+                    ts_mesh_write_stl(&mesh, path);
+                    dc_gl_viewport_clear_objects(pv->viewport);
+                    dc_gl_viewport_clear_mesh(pv->viewport);
+                    dc_gl_viewport_load_stl(pv->viewport, path);
+                    if (!pv->camera_fitted) {
+                        dc_gl_viewport_fit_all_objects(pv->viewport);
+                        pv->camera_fitted = 1;
+                    }
+                    char status[192];
+                    snprintf(status, sizeof(status),
+                             "Rendered (OpenSCAD fallback): %d tris",
+                             mesh.tri_count);
+                    gtk_label_set_text(GTK_LABEL(pv->status_label), status);
+                    log_append(pv, status);
+                    got_something = 1;
+                }
+                ts_mesh_free(&mesh);
+            }
+            free(editor_text);
         }
 
         if (!got_something) {
@@ -1214,6 +1266,12 @@ dc_scad_preview_free(DC_ScadPreview *pv)
 {
     if (!pv) return;
     pv->hq_cancel = 1;  /* signal any in-flight HQ to stop */
+
+    /* Wait for the render thread to finish before freeing anything
+     * it may be using.  Timeout after 2s to avoid hanging forever. */
+    for (int i = 0; i < 200 && pv->hq_running; i++)
+        g_usleep(10000); /* 10ms */
+
     progress_stop(pv);
     dc_voxel_grid_free(pv->voxel_grid);
     dc_transform_panel_free(pv->transform);
@@ -1302,4 +1360,51 @@ void
 dc_scad_preview_set_sibling(DC_ScadPreview *pv, DC_ScadPreview *sibling)
 {
     if (pv) pv->sibling = sibling;
+}
+
+int
+dc_scad_preview_export_stl(DC_ScadPreview *pv, const char *path,
+                           char **err_msg)
+{
+    if (!pv || !path) {
+        if (err_msg) *err_msg = strdup("invalid arguments");
+        return -1;
+    }
+
+    if (!pv->voxel_grid) {
+        if (err_msg) *err_msg = strdup("No voxel grid — render a solid first (use to_solid)");
+        return -1;
+    }
+
+    ts_mesh mesh = ts_mesh_init();
+    int rc = dc_marching_cubes(pv->voxel_grid, 0.0f, &mesh);
+    if (rc != 0) {
+        ts_mesh_free(&mesh);
+        if (err_msg) *err_msg = strdup("Marching cubes extraction failed");
+        return -1;
+    }
+
+    if (mesh.tri_count == 0) {
+        ts_mesh_free(&mesh);
+        if (err_msg) *err_msg = strdup("Marching cubes produced no triangles");
+        return -1;
+    }
+
+    int wrc = ts_mesh_write_stl(&mesh, path);
+    if (wrc != 0) {
+        ts_mesh_free(&mesh);
+        if (err_msg) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "Failed to write STL to %s", path);
+            *err_msg = strdup(buf);
+        }
+        return -1;
+    }
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "exported STL: %s (%d verts, %d tris)",
+           path, mesh.vert_count, mesh.tri_count);
+
+    ts_mesh_free(&mesh);
+    return 0;
 }

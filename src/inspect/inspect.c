@@ -1982,6 +1982,36 @@ dc_inspect_set_bezier_mesh(const void *mesh_ptr)
         }
     }
 }
+char *
+dc_inspect_bezier_mesh_to_cubeiform(void)
+{
+    if (!s_bezier_mesh || !s_bezier_mesh->cps) return NULL;
+
+    ts_bezier_mesh *m = s_bezier_mesh;
+
+    /* Estimate size: header + one cp line per control point */
+    int total_cps = m->cp_rows * m->cp_cols;
+    size_t buf_cap = 256 + (size_t)total_cps * 80;
+    char *buf = malloc(buf_cap);
+    if (!buf) return NULL;
+
+    int off = 0;
+    off += snprintf(buf + off, buf_cap - (size_t)off,
+                    "bezier_mesh {\n  grid(%d, %d);\n", m->rows, m->cols);
+
+    for (int r = 0; r < m->cp_rows; r++) {
+        for (int c = 0; c < m->cp_cols; c++) {
+            ts_vec3 cp = ts_bezier_mesh_get_cp(m, r, c);
+            off += snprintf(buf + off, buf_cap - (size_t)off,
+                            "  cp[%d][%d] = [%.6f, %.6f, %.6f];\n",
+                            r, c, cp.v[0], cp.v[1], cp.v[2]);
+        }
+    }
+
+    off += snprintf(buf + off, buf_cap - (size_t)off, "}\n");
+    return buf;
+}
+
 static DC_BezierViewMode s_bezier_view = DC_BEZIER_VIEW_WIREFRAME;
 static int s_selected_loop_type = -1;  /* -1=none, 0=row, 1=col */
 static int s_selected_loop_index = 0;

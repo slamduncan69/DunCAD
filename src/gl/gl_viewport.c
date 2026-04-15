@@ -204,9 +204,11 @@ static const char *LINE_VERT_SRC =
 static const char *LINE_FRAG_SRC =
     "#version 330 core\n"
     "in vec3 vColor;\n"
+    "uniform float uAlpha;\n"
     "out vec4 FragColor;\n"
     "void main() {\n"
-    "    FragColor = vec4(vColor, 1.0);\n"
+    "    float a = uAlpha > 0.0 ? uAlpha : 1.0;\n"
+    "    FragColor = vec4(vColor, a);\n"
     "}\n";
 
 /* =========================================================================
@@ -652,15 +654,7 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         glDrawArrays(GL_LINES, 0, vp->grid_vert_count);
     }
 
-    /* --- Draw axes --- */
-    if (vp->show_axes && vp->axes_vao) {
-        glUseProgram(vp->line_prog);
-        glUniformMatrix4fv(glGetUniformLocation(vp->line_prog, "uMVP"), 1, GL_FALSE, vp_mat);
-        glLineWidth(2.0f);
-        glBindVertexArray(vp->axes_vao);
-        glDrawArrays(GL_LINES, 0, 6);
-        glLineWidth(1.0f);
-    }
+    /* --- Axes drawn after all geometry (see below) --- */
 
     /* --- Draw mesh (legacy single mesh or multi-object) --- */
     {
@@ -1083,6 +1077,33 @@ on_render(GtkGLArea *area, GdkGLContext *ctx, gpointer data)
         if (mat4_invert(inv_vp, vp_mat) == 0) {
             dc_gl_voxel_buf_draw(vp->voxel_buf, inv_vp, eye, light_dir, w, h);
         }
+    }
+
+    /* --- Draw axes: two-pass so they visibly pass through geometry --- */
+    if (vp->show_axes && vp->axes_vao) {
+        glUseProgram(vp->line_prog);
+        GLint alpha_loc = glGetUniformLocation(vp->line_prog, "uAlpha");
+        glUniformMatrix4fv(glGetUniformLocation(vp->line_prog, "uMVP"), 1, GL_FALSE, vp_mat);
+
+        /* Pass 1: normal depth-tested — visible parts outside geometry */
+        glDepthFunc(GL_LESS);
+        glUniform1f(alpha_loc, 1.0f);
+        glLineWidth(2.0f);
+        glBindVertexArray(vp->axes_vao);
+        glDrawArrays(GL_LINES, 0, 6);
+
+        /* Pass 2: occluded parts — behind geometry, drawn faintly */
+        glDepthFunc(GL_GREATER);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glUniform1f(alpha_loc, 0.6f);
+        glLineWidth(1.0f);
+        glDrawArrays(GL_LINES, 0, 6);
+        glDisable(GL_BLEND);
+
+        glDepthFunc(GL_LESS);
+        glUniform1f(alpha_loc, 1.0f);
+        glLineWidth(1.0f);
     }
 
     /* Capture screenshot if requested */

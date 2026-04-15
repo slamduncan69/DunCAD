@@ -31,6 +31,9 @@ void dc_ai_chat_send(DC_AiChat *chat, const char *message);
 /* Returns TRUE if a request is in flight. */
 int dc_ai_chat_busy(const DC_AiChat *chat);
 
+/* Cancel the current AI request (kills subprocess immediately). */
+void dc_ai_chat_cancel(DC_AiChat *chat);
+
 /* Set language mode: 1 = Cubeiform, 0 = OpenSCAD.
  * Adjusts the system prompt so the AI responds in the correct language.
  * Takes effect on the next new conversation (first_call). */

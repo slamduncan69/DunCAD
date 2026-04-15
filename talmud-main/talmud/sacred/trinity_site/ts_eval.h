@@ -297,6 +297,18 @@ static inline int ts_arg_has(ts_ast *node, const char *name) {
     return 0;
 }
 
+/* Resolve $fn with per-primitive override: check named $fn arg first */
+static inline int ts_resolve_fn_prim(ts_ast *node, ts_env *e) {
+    if (e->force_fn > 0) return (int)e->force_fn;
+    if (node && ts_arg_has(node, "$fn")) {
+        ts_val v = ts_arg_get(node, e, "$fn", -1, ts_val_num(0));
+        if (v.type == TS_VAL_NUMBER && v.num > 0) return (int)v.num;
+    }
+    double fn = ts_env_get_special(e, "$fn", 0);
+    if (fn > 0) return (int)fn;
+    return 16;
+}
+
 /* ================================================================
  * EXPRESSION EVALUATION
  * ================================================================ */
@@ -1040,7 +1052,7 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
             double r = ts_val_to_num(r_v);
             if (ts_arg_has(node, "d"))
                 r = ts_val_to_num(ts_arg_get(node, env, "d", -1, ts_val_num(2))) * 0.5;
-            int fn = ts_resolve_fn(env);
+            int fn = ts_resolve_fn_prim(node, env);
             ts_gen_sphere(r, fn, &result);
             ts_apply_xform(&result, xform);
             return result;
@@ -1062,7 +1074,7 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
                 r1 = r2 = ts_val_to_num(ts_arg_get(node, env, "r", 1, ts_val_num(1)));
             }
             ts_val center = ts_arg_get(node, env, "center", -1, ts_val_bool(0));
-            int fn = ts_resolve_fn(env);
+            int fn = ts_resolve_fn_prim(node, env);
             ts_gen_cylinder(h, r1, r2, fn, &result);
             /* ts_gen_cylinder generates centered. If not center, translate up. */
             if (!ts_val_is_true(center)) {
@@ -1405,7 +1417,7 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
                     double r = ts_val_to_num(ts_arg_get(c, env, "r", 0, ts_val_num(1)));
                     if (ts_arg_has(c, "d"))
                         r = ts_val_to_num(ts_arg_get(c, env, "d", -1, ts_val_num(2))) * 0.5;
-                    int fn = ts_resolve_fn(env);
+                    int fn = ts_resolve_fn_prim(c, env);
                     pts = (double *)malloc((size_t)fn * 2 * sizeof(double));
                     npts = ts_gen_circle_points(r, fn, pts, fn);
                 } else if (strcmp(cname, "square") == 0) {
@@ -1464,7 +1476,7 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
 
         if (strcmp(name, "rotate_extrude") == 0) {
             double angle = ts_val_to_num(ts_arg_get(node, env, "angle", -1, ts_val_num(360)));
-            int fn = ts_resolve_fn(env);
+            int fn = ts_resolve_fn_prim(node, env);
 
             for (int i = 0; i < node->child_count; i++) {
                 ts_ast *c = node->children[i];
@@ -1482,7 +1494,7 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
                     double r = ts_val_to_num(ts_arg_get(c, env, "r", 0, ts_val_num(1)));
                     if (ts_arg_has(c, "d"))
                         r = ts_val_to_num(ts_arg_get(c, env, "d", -1, ts_val_num(2))) * 0.5;
-                    int cfn = ts_resolve_fn(env);
+                    int cfn = ts_resolve_fn_prim(c, env);
                     pts = (double *)malloc((size_t)cfn * 2 * sizeof(double));
                     npts = ts_gen_circle_points(r, cfn, pts, cfn);
                 } else if (strcmp(cname, "square") == 0) {
@@ -1520,7 +1532,7 @@ static ts_mesh ts_eval_geometry(ts_ast *node, ts_env *env, ts_mat4 xform) {
                         if (gc && gc->type == TS_AST_MODULE_INST &&
                             gc->str_val && strcmp(gc->str_val, "circle") == 0) {
                             double r = ts_val_to_num(ts_arg_get(gc, env, "r", 0, ts_val_num(1)));
-                            int cfn = ts_resolve_fn(env);
+                            int cfn = ts_resolve_fn_prim(gc, env);
                             pts = (double *)malloc((size_t)cfn * 2 * sizeof(double));
                             npts = ts_gen_circle_points(r, cfn, pts, cfn);
                             for (int p = 0; p < npts; p++) {

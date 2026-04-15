@@ -81,6 +81,13 @@ build_menu_model(GMenu **out_insert_menu)
     g_menu_append(file_menu, "New Project",  "win.new-project");
     g_menu_append(file_menu, "Open Project", "win.open-project");
     g_menu_append(file_menu, "Save",         "win.save");
+
+    /* Export submenu */
+    GMenu *export_menu = g_menu_new();
+    g_menu_append(export_menu, "Export as STL", "win.export-stl");
+    g_menu_append_submenu(file_menu, "Export", G_MENU_MODEL(export_menu));
+    g_object_unref(export_menu);
+
     g_menu_append(file_menu, "Quit",         "app.quit");
     g_menu_append_submenu(menu_bar, "File", G_MENU_MODEL(file_menu));
     g_object_unref(file_menu);
@@ -748,6 +755,59 @@ on_redo_activate(GSimpleAction *action, GVariant *param, gpointer data)
 }
 
 /* -------------------------------------------------------------------------
+ * Export STL — File > Export > Export as STL
+ * ---------------------------------------------------------------------- */
+static void
+on_export_stl_response(GObject *source, GAsyncResult *result, gpointer data)
+{
+    GtkFileDialog *dialog = GTK_FILE_DIALOG(source);
+    DC_ScadPreview *pv = data;
+
+    GFile *file = gtk_file_dialog_save_finish(dialog, result, NULL);
+    if (!file) return; /* user cancelled */
+
+    char *path = g_file_get_path(file);
+    g_object_unref(file);
+    if (!path) return;
+
+    char *err_msg = NULL;
+    int rc = dc_scad_preview_export_stl(pv, path, &err_msg);
+    if (rc != 0) {
+        dc_log(DC_LOG_ERROR, DC_LOG_EVENT_APP,
+               "STL export failed: %s", err_msg ? err_msg : "unknown");
+        free(err_msg);
+    }
+    g_free(path);
+}
+
+static void
+on_export_stl_activate(GSimpleAction *action, GVariant *param, gpointer data)
+{
+    (void)action; (void)param;
+    GtkWidget *window = data;
+    DC_ScadPreview *pv = g_object_get_data(G_OBJECT(window),
+                                            "dc-scad-preview-ref");
+    if (!pv) return;
+
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(dialog, "Export as STL");
+    gtk_file_dialog_set_initial_name(dialog, "export.stl");
+
+    GtkFileFilter *filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "STL files");
+    gtk_file_filter_add_pattern(filter, "*.stl");
+    GListStore *filters = g_list_store_new(GTK_TYPE_FILE_FILTER);
+    g_list_store_append(filters, filter);
+    gtk_file_dialog_set_filters(dialog, G_LIST_MODEL(filters));
+    g_object_unref(filter);
+    g_object_unref(filters);
+
+    gtk_file_dialog_save(dialog, GTK_WINDOW(window), NULL,
+                         on_export_stl_response, pv);
+    g_object_unref(dialog);
+}
+
+/* -------------------------------------------------------------------------
  * Tricanvas swap — swap canvases between foreground (center) and background
  * (right column). Uses reparenting with ref/unref to preserve widgets.
  * After swap, re-push GL data to force re-upload on next render.
@@ -826,6 +886,14 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         return TRUE;
     }
 
+    if (keyval == GDK_KEY_Escape) {
+        DC_AiChat *ai = g_object_get_data(G_OBJECT(window), "dc-ai-chat");
+        if (ai && dc_ai_chat_busy(ai)) {
+            dc_ai_chat_cancel(ai);
+            return TRUE;
+        }
+    }
+
     /* Alt+1/2/3: Tricanvas swap — swap canvases between foreground and background */
     if (mods & GDK_ALT_MASK) {
         if (keyval == GDK_KEY_1) { tricanvas_swap(window, 1); return TRUE; }
@@ -833,6 +901,26 @@ on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         if (keyval == GDK_KEY_3) { tricanvas_swap(window, 3); return TRUE; }
     }
 
+    return FALSE;
+}
+
+/* -------------------------------------------------------------------------
+ * Window close handler — clean up before GTK destroys widgets
+ * ---------------------------------------------------------------------- */
+static gboolean
+on_close_request(GtkWindow *win, gpointer data)
+{
+    (void)data;
+    GObject *obj = G_OBJECT(win);
+
+    /* Kill AI subprocess first (blocks until reaped) */
+    DC_AiChat *ai = g_object_get_data(obj, "dc-ai-chat");
+    if (ai) dc_ai_chat_cancel(ai);
+
+    /* Stop inspect socket before widgets die */
+    dc_inspect_stop();
+
+    /* Let GTK proceed with destruction */
     return FALSE;
 }
 
@@ -846,6 +934,10 @@ dc_app_window_create(GtkApplication *app)
     GtkWidget *window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(window), "DunCAD");
     gtk_window_set_default_size(GTK_WINDOW(window), 1400, 900);
+
+    /* Clean shutdown: kill AI + inspect before GTK destroys widgets */
+    g_signal_connect(window, "close-request",
+                     G_CALLBACK(on_close_request), NULL);
 
     /* Enable the application menu bar */
     gtk_application_window_set_show_menubar(GTK_APPLICATION_WINDOW(window), TRUE);
@@ -1196,6 +1288,15 @@ dc_app_window_create(GtkApplication *app)
                          G_CALLBACK(on_redo_activate), code_ed);
         g_action_map_add_action(G_ACTION_MAP(window), G_ACTION(redo_action));
         g_object_unref(redo_action);
+    }
+
+    /* --- Export STL action --- */
+    {
+        GSimpleAction *export_stl = g_simple_action_new("export-stl", NULL);
+        g_signal_connect(export_stl, "activate",
+                         G_CALLBACK(on_export_stl_activate), window);
+        g_action_map_add_action(G_ACTION_MAP(window), G_ACTION(export_stl));
+        g_object_unref(export_stl);
     }
 
     /* Keyboard shortcuts: Ctrl+Z = undo, Ctrl+Shift+Z = redo */

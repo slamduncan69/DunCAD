@@ -1281,10 +1281,19 @@ dc_scad_completion_free(DC_ScadCompletion *comp)
     if (comp->session.active)
         exit_snippet_mode(comp);
 
-    if (comp->popover)
-        gtk_widget_unparent(comp->popover);
-    if (comp->opt_popover)
-        gtk_widget_unparent(comp->opt_popover);
+    /* Unparent popovers only if their parent is still alive and mapped.
+     * During window destruction the parent GtkSourceView may already be
+     * disposed — calling unparent then floods GTK warnings and aborts. */
+    if (comp->popover) {
+        GtkWidget *parent = gtk_widget_get_parent(comp->popover);
+        if (parent && gtk_widget_get_mapped(parent))
+            gtk_widget_unparent(comp->popover);
+    }
+    if (comp->opt_popover) {
+        GtkWidget *parent = gtk_widget_get_parent(comp->opt_popover);
+        if (parent && gtk_widget_get_mapped(parent))
+            gtk_widget_unparent(comp->opt_popover);
+    }
 
     free(comp);
 }

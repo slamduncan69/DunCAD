@@ -35,4 +35,9 @@ char *dc_inspect_dispatch(const char *cmd);
  * mesh_ptr is a const ts_bezier_mesh* — borrowed, must stay alive. */
 void dc_inspect_set_bezier_mesh(const void *mesh_ptr);
 
+/* Serialize the live bezier mesh to Cubeiform source with explicit CPs.
+ * Returns a malloc'd string like "bezier_mesh {\n  grid(2, 3);\n  cp[0][0] = ...\n}\n"
+ * or NULL if no mesh exists. Caller must free(). */
+char *dc_inspect_bezier_mesh_to_cubeiform(void);
+
 #endif /* DC_INSPECT_H */

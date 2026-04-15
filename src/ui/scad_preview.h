@@ -55,6 +55,12 @@ int dc_scad_preview_is_rendering(DC_ScadPreview *pv);
 void dc_scad_preview_set_voxel_resolution(DC_ScadPreview *pv, int resolution);
 int  dc_scad_preview_get_voxel_resolution(DC_ScadPreview *pv);
 
+/* Export the current voxel grid as STL via marching cubes.
+ * Returns 0 on success, -1 on error (no grid, MC failure, write failure).
+ * If err_msg is non-NULL, it receives a malloc'd error string on failure. */
+int dc_scad_preview_export_stl(DC_ScadPreview *pv, const char *path,
+                               char **err_msg);
+
 /* Tricanvas: render mode — which output this preview accepts.
  * 0 = all (legacy), 1 = solid only (voxel grid), 2 = mesh only (bezier mesh).
  * Set sibling so F5 triggers both previews. */
