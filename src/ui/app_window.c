@@ -1186,11 +1186,13 @@ dc_app_window_create(GtkApplication *app)
     g_object_set_data_full(G_OBJECT(window), "dc-code-editor", code_ed,
                            (GDestroyNotify)dc_code_editor_free);
 
-    /* Wire the SCAD previews to the window */
+    /* Wire the SCAD previews to the window.
+     * HP6 Phase 6a: previews are NOT siblings. F5 / preview_render fires
+     * SOLID only — the holy SDF/voxel path. The mesh canvas stays empty
+     * unless explicitly invoked via debug_render_mesh (HP6 Phase 6b).
+     * Mesh rendering is an explicit-only diagnostic, never automatic. */
     dc_scad_preview_set_render_mode(preview, DC_RENDER_SOLID);
     dc_scad_preview_set_render_mode(mesh_preview, DC_RENDER_MESH);
-    dc_scad_preview_set_sibling(preview, mesh_preview);
-    dc_scad_preview_set_sibling(mesh_preview, preview);
 
     /* Set canvas types — controls selection modes */
     DC_GlViewport *solid_vp = dc_scad_preview_get_viewport(preview);
