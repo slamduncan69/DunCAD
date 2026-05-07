@@ -2568,7 +2568,12 @@ dc_cubeiform_eda_apply_voxel(DC_CubeiformEda *eda, DC_Error *err)
 
     DC_VoxelGrid *grid = dc_voxel_grid_new(sx, sy, sz, cell_size);
     if (!grid) {
-        DC_SET_ERROR(err, DC_ERROR_MEMORY, "voxel grid alloc");
+        double gib = (double)((size_t)sx * (size_t)sy * (size_t)sz *
+                              sizeof(DC_Voxel)) / (1024.0*1024.0*1024.0);
+        DC_SET_ERROR(err, DC_ERROR_MEMORY,
+                     "voxel grid alloc refused: %dx%dx%d cells (%.2f GiB). "
+                     "Lower $vd or shrink scene.",
+                     sx, sy, sz, gib);
         return NULL;
     }
 

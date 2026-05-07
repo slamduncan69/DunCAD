@@ -3,10 +3,20 @@
  */
 
 #include "voxel/voxel.h"
+#include "core/log.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Hard upper bound on a single voxel grid allocation. 8 GiB.
+ * At 8 bytes/cell this is ~1.07 G cells (e.g. ~1024^3 cubic, or 769^3
+ * with room to spare). Beyond this, dc_voxel_grid_new returns NULL
+ * without calling calloc — the caller can surface a friendly error
+ * instead of letting the allocator OOM the process. The cap is a
+ * defensive cliff against runaway $vd values; legitimate scenes
+ * should sit far below it. */
+#define DC_VOXEL_GRID_MAX_BYTES (1ULL << 33)
 
 /* =========================================================================
  * Internal structure
@@ -51,6 +61,17 @@ dc_voxel_grid_new(int sx, int sy, int sz, float cell_size)
     g->cell_size = cell_size;
 
     size_t total = (size_t)sx * (size_t)sy * (size_t)sz;
+    size_t total_bytes = total * sizeof(DC_Voxel);
+    if (total_bytes / sizeof(DC_Voxel) != total ||
+        total_bytes > DC_VOXEL_GRID_MAX_BYTES) {
+        DC_LOG_WARN_APP("voxel grid alloc refused: %dx%dx%d cells "
+                        "(%.2f GiB) exceeds %.0f GiB cap",
+                        sx, sy, sz,
+                        (double)total_bytes / (1024.0*1024.0*1024.0),
+                        (double)DC_VOXEL_GRID_MAX_BYTES / (1024.0*1024.0*1024.0));
+        free(g);
+        return NULL;
+    }
     g->cells = calloc(total, sizeof(DC_Voxel));
     if (!g->cells) { free(g); return NULL; }
 
