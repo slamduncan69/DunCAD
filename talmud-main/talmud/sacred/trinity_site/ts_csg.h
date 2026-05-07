@@ -456,7 +456,7 @@ static void ts_csg_bsp_build(ts_csg_bsp *node, ts_csg_polylist *polys) {
     /* Pass 1: Classify all polygons */
     int *classes = (int *)malloc((size_t)polys->count * sizeof(int));
     if (!classes) return;
-    int n_front = 0, n_back = 0, n_spanning = 0;
+    int n_front = 0, n_back = 0;
 
     for (int i = 0; i < polys->count; i++) {
         int type = 0;
@@ -472,7 +472,7 @@ static void ts_csg_bsp_build(ts_csg_bsp *node, ts_csg_polylist *polys) {
         classes[i] = type;
         if      (type == TS_CSG_FRONT) n_front++;
         else if (type == TS_CSG_BACK)  n_back++;
-        else if (type == TS_CSG_SPANNING) { n_front++; n_back++; n_spanning++; }
+        else if (type == TS_CSG_SPANNING) { n_front++; n_back++; }
         /* COPLANAR goes to node->polys, no pre-count needed */
     }
 
@@ -598,7 +598,7 @@ static void ts_csg_bsp_clip_polys(const ts_csg_bsp *bsp,
     /* Two-pass: classify then partition (avoids reallocs) */
     int *classes = (int *)malloc((size_t)polys->count * sizeof(int));
     if (!classes) return;
-    int n_front = 0, n_back = 0, n_spanning = 0;
+    int n_front = 0, n_back = 0;
 
     for (int i = 0; i < polys->count; i++) {
         int type = 0;
@@ -615,7 +615,7 @@ static void ts_csg_bsp_clip_polys(const ts_csg_bsp *bsp,
         if      (type == TS_CSG_FRONT) n_front++;
         else if (type == TS_CSG_BACK)  n_back++;
         else if (type == TS_CSG_COPLANAR) { n_front++; n_back++; } /* may go either way */
-        else { n_front++; n_back++; n_spanning++; }
+        else { n_front++; n_back++; }
     }
 
     ts_csg_polylist front_list = ts_csg_polylist_init();

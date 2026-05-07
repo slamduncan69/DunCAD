@@ -877,40 +877,6 @@ do_render(DC_ScadPreview *pv)
             dc_voxel_grid_free(grid);
         }
 
-        /* --- FALLBACK: Cubeiform produced nothing → try full OpenSCAD --- */
-        if (!got_something && pv->render_mode != DC_RENDER_MESH) {
-            char *editor_text = dc_code_editor_get_text(pv->code_ed);
-            if (editor_text && *editor_text) {
-                ts_interpret_opts topts = {0};
-                topts.fn_override = 64;
-                topts.fa_override = 2;
-                topts.fs_override = 1.0;
-                ts_parse_error terr = {0};
-                ts_mesh mesh = ts_interpret_ex(editor_text, &terr, &topts);
-                if (mesh.tri_count > 0) {
-                    /* Write to temp STL, load into viewport as object */
-                    const char *path = "/tmp/duncad-fallback.stl";
-                    ts_mesh_write_stl(&mesh, path);
-                    dc_gl_viewport_clear_objects(pv->viewport);
-                    dc_gl_viewport_clear_mesh(pv->viewport);
-                    dc_gl_viewport_load_stl(pv->viewport, path);
-                    if (!pv->camera_fitted) {
-                        dc_gl_viewport_fit_all_objects(pv->viewport);
-                        pv->camera_fitted = 1;
-                    }
-                    char status[192];
-                    snprintf(status, sizeof(status),
-                             "Rendered (OpenSCAD fallback): %d tris",
-                             mesh.tri_count);
-                    gtk_label_set_text(GTK_LABEL(pv->status_label), status);
-                    log_append(pv, status);
-                    got_something = 1;
-                }
-                ts_mesh_free(&mesh);
-            }
-            free(editor_text);
-        }
-
         if (!got_something) {
             /* Clear viewport when there's nothing for this canvas */
             if (pv->render_mode == DC_RENDER_SOLID) {
