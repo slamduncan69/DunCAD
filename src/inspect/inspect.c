@@ -824,13 +824,20 @@ cmd_gl_wireframe(void)
 }
 
 static char *
-cmd_gl_blocky(void)
+cmd_gl_blocky(const char *args)
 {
     DC_GlViewport *vp = get_viewport();
     if (!vp) return strdup("{\"error\":\"no gl viewport\"}\n");
 
-    int cur = dc_gl_viewport_get_voxel_blocky(vp);
-    dc_gl_viewport_set_voxel_blocky(vp, !cur);
+    /* With arg: explicit set (0 = smooth, non-zero = blocky).
+     * Without arg: toggle the current state. */
+    if (args && *args) {
+        int val = atoi(args) != 0;
+        dc_gl_viewport_set_voxel_blocky(vp, val);
+    } else {
+        int cur = dc_gl_viewport_get_voxel_blocky(vp);
+        dc_gl_viewport_set_voxel_blocky(vp, !cur);
+    }
     int on = dc_gl_viewport_get_voxel_blocky(vp);
     char *buf = malloc(64);
     snprintf(buf, 64, "{\"ok\":true,\"blocky\":%s}\n", on ? "true" : "false");
@@ -3091,31 +3098,6 @@ static char *cmd_voxel_resolution(const char *args) {
     return resp;
 }
 
-/* voxel_blocky [0|1] — toggle blocky/smooth rendering */
-static char *cmd_voxel_blocky(const char *args) {
-    DC_GlViewport *vp = get_viewport();
-    if (!vp) return strdup("{\"error\":\"no viewport\"}\n");
-
-    /* Get the voxel buf from the viewport — we need to expose it or
-     * store a reference. For now, use the global s_voxel_grid approach:
-     * the voxel_buf is managed by the viewport. We need a direct accessor. */
-
-    /* Simpler: store blocky state, apply on next upload */
-    if (args && *args) {
-        int val = atoi(args);
-        /* We need access to the DC_GlVoxelBuf. Access via viewport internals
-         * is not clean. Let's add a viewport-level API. */
-        dc_gl_viewport_set_voxel_blocky(vp, val);
-        char *resp = malloc(128);
-        snprintf(resp, 128, "{\"ok\":true,\"blocky\":%d}\n", val ? 1 : 0);
-        return resp;
-    }
-    int val = dc_gl_viewport_get_voxel_blocky(vp);
-    char *resp = malloc(128);
-    snprintf(resp, 128, "{\"blocky\":%d}\n", val);
-    return resp;
-}
-
 /* voxel_state — info about current voxel grid */
 static char *cmd_voxel_state(void) {
     if (!s_voxel_grid) return strdup("{\"loaded\":false}\n");
@@ -3188,7 +3170,7 @@ dispatch(const char *cmd)
     if (strcmp(name, "gl_select") == 0) return cmd_gl_select(args);
     if (strcmp(name, "gl_select_mode") == 0) return cmd_gl_select_mode(args);
     if (strcmp(name, "gl_wireframe") == 0) return cmd_gl_wireframe();
-    if (strcmp(name, "gl_blocky") == 0) return cmd_gl_blocky();
+    if (strcmp(name, "gl_blocky") == 0) return cmd_gl_blocky(args);
     if (strcmp(name, "gl_surface") == 0) {
         DC_GlViewport *vp = get_viewport();
         if (!vp) return strdup("{\"error\":\"no gl viewport\"}\n");
@@ -3429,7 +3411,6 @@ dispatch(const char *cmd)
     if (strcmp(name, "marching_cubes")    == 0) return cmd_marching_cubes(args);
     if (strcmp(name, "voxel_state")        == 0) return cmd_voxel_state();
     if (strcmp(name, "voxel_resolution")   == 0) return cmd_voxel_resolution(args);
-    if (strcmp(name, "voxel_blocky")      == 0) return cmd_voxel_blocky(args);
 
     /* Meta */
     if (strcmp(name, "help") == 0) return cmd_help();
