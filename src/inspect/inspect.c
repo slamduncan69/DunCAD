@@ -33,6 +33,10 @@
 #include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_mesh.h"
 #include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_primitives.h"
 #include "../../talmud-main/talmud/sacred/trinity_site/ts_bezier_voxel.h"
+/* ts_eval.h gives us ts_interpret_ex / ts_mesh / ts_interpret_opts —
+ * used ONLY by the debug_render_mesh diagnostic command. The holy
+ * render path goes through scad_preview's SDF pipeline. */
+#include "../../talmud-main/talmud/sacred/trinity_site/ts_eval.h"
 #include "eda/eda_ratsnest.h"
 #include "core/string_builder.h"
 #include "core/error.h"
@@ -3027,6 +3031,88 @@ static char *cmd_voxel_csg(const char *args) {
     return resp;
 }
 
+/* debug_render_mesh [path.stl] — explicit-only OpenSCAD-mesh diagnostic.
+ *
+ * The ONLY sanctioned mesh-rendering path in DunCAD. Runs the editor's
+ * code through the OpenSCAD-style ts_interpret_ex interpreter (NOT the
+ * holy SDF/voxel pipeline), writes the resulting triangle mesh to STL,
+ * loads the STL into the MESH canvas viewport, and prefixes the mesh
+ * canvas's status label with [DEBUG MESH] so a screenshot can never be
+ * confused with the holy modes (smooth, surface, blocky).
+ *
+ * This is the troubleshooting door per HP6 Phase 6. It NEVER fires
+ * automatically; it must be explicitly invoked. The next preview_render
+ * overwrites the [DEBUG MESH] banner. The SOLID canvas is unaffected. */
+static char *cmd_debug_render_mesh(const char *args) {
+    if (!s_window) return strdup("{\"error\":\"no window\"}\n");
+
+    DC_ScadPreview *mesh_pv = dc_app_window_get_mesh_preview(s_window);
+    if (!mesh_pv) return strdup("{\"error\":\"no mesh canvas\"}\n");
+
+    DC_GlViewport *mesh_vp = dc_scad_preview_get_viewport(mesh_pv);
+    if (!mesh_vp) return strdup("{\"error\":\"no mesh viewport\"}\n");
+
+    DC_CodeEditor *code_ed = get_code_ed();
+    if (!code_ed) return strdup("{\"error\":\"no code editor\"}\n");
+
+    char *text = dc_code_editor_get_text(code_ed);
+    if (!text || !*text) {
+        free(text);
+        return strdup("{\"error\":\"editor is empty\"}\n");
+    }
+
+    ts_interpret_opts opts = {0};
+    opts.fn_override = 64;
+    opts.fa_override = 2;
+    opts.fs_override = 1.0;
+    opts.force_quality = 0;
+
+    ts_parse_error perr = {0};
+    ts_mesh mesh = ts_interpret_ex(text, &perr, &opts);
+    free(text);
+
+    if (mesh.tri_count == 0) {
+        char *resp = malloc(512);
+        snprintf(resp, 512,
+                 "{\"error\":\"OpenSCAD produced no triangles: %s\"}\n",
+                 perr.msg[0] ? perr.msg : "unknown");
+        ts_mesh_free(&mesh);
+        return resp;
+    }
+
+    const char *path = (args && *args) ? args : "/tmp/duncad_debug_mesh.stl";
+    int wrc = ts_mesh_write_stl(&mesh, path);
+    if (wrc != 0) {
+        char *resp = malloc(512);
+        snprintf(resp, 512, "{\"error\":\"failed to write %s\"}\n", path);
+        ts_mesh_free(&mesh);
+        return resp;
+    }
+    int tris = mesh.tri_count;
+    ts_mesh_free(&mesh);
+
+    /* Load into the MESH canvas viewport (NOT the SOLID canvas).
+     * Clear any prior debug mesh first. */
+    dc_gl_viewport_clear_objects(mesh_vp);
+    dc_gl_viewport_clear_mesh(mesh_vp);
+    dc_gl_viewport_load_stl(mesh_vp, path);
+
+    char banner[224];
+    snprintf(banner, sizeof(banner),
+             "[DEBUG MESH] %d tris  ->  %s", tris, path);
+    dc_scad_preview_set_status(mesh_pv, banner);
+
+    dc_log(DC_LOG_INFO, DC_LOG_EVENT_APP,
+           "debug_render_mesh: %d tris loaded into MESH canvas (%s)",
+           tris, path);
+
+    char *resp = malloc(512);
+    snprintf(resp, 512,
+             "{\"ok\":true,\"path\":\"%s\",\"tris\":%d,\"banner\":\"[DEBUG MESH]\"}\n",
+             path, tris);
+    return resp;
+}
+
 /* marching_cubes [path.stl] — extract isosurface from current voxel grid.
  * If path given, writes STL. If no path, writes to /tmp/duncad_mc.stl
  * and loads into viewport. */
@@ -3409,6 +3495,7 @@ dispatch(const char *cmd)
     if (strcmp(name, "voxel_csg")          == 0) return cmd_voxel_csg(args);
     if (strcmp(name, "voxel_clear")        == 0) return cmd_voxel_clear();
     if (strcmp(name, "marching_cubes")    == 0) return cmd_marching_cubes(args);
+    if (strcmp(name, "debug_render_mesh") == 0) return cmd_debug_render_mesh(args);
     if (strcmp(name, "voxel_state")        == 0) return cmd_voxel_state();
     if (strcmp(name, "voxel_resolution")   == 0) return cmd_voxel_resolution(args);
 

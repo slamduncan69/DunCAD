@@ -70,4 +70,10 @@ int dc_scad_preview_export_stl(DC_ScadPreview *pv, const char *path,
 void dc_scad_preview_set_render_mode(DC_ScadPreview *pv, int mode);
 void dc_scad_preview_set_sibling(DC_ScadPreview *pv, DC_ScadPreview *sibling);
 
+/* Set the status label text directly. Used by the debug_render_mesh
+ * inspect command to display the [DEBUG MESH] banner so a screenshot
+ * cannot be confused with the holy SDF/voxel modes. The next
+ * successful render through do_render() overwrites this. */
+void dc_scad_preview_set_status(DC_ScadPreview *pv, const char *text);
+
 #endif /* DC_SCAD_PREVIEW_H */

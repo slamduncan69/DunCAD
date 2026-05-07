@@ -1328,6 +1328,13 @@ dc_scad_preview_get_voxel_resolution(DC_ScadPreview *pv)
 }
 
 void
+dc_scad_preview_set_status(DC_ScadPreview *pv, const char *text)
+{
+    if (!pv || !pv->status_label) return;
+    gtk_label_set_text(GTK_LABEL(pv->status_label), text ? text : "");
+}
+
+void
 dc_scad_preview_set_render_mode(DC_ScadPreview *pv, int mode)
 {
     if (pv) pv->render_mode = mode;
