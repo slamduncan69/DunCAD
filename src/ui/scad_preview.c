@@ -444,9 +444,12 @@ render_done_cb(GObject *source_obj, GAsyncResult *result, gpointer userdata)
         unlink(res->objs[i].stl_path);
 
         if (grid) {
-            /* Free previous grid */
+            /* Drop inspect's borrow before freeing the old grid; publish the
+             * new one so marching_cubes/voxel_state see the same truth. */
+            dc_inspect_set_voxel_grid(NULL);
             dc_voxel_grid_free(pv->voxel_grid);
             pv->voxel_grid = grid;
+            dc_inspect_set_voxel_grid(grid);
             dc_gl_viewport_set_voxel_grid(pv->viewport, grid);
             voxelized++;
             DC_LOG_INFO_APP("voxelized object %d: %zu active voxels (res=%d)",
@@ -828,8 +831,12 @@ do_render(DC_ScadPreview *pv)
         if (grid && pv->render_mode != DC_RENDER_MESH) {
             dc_gl_viewport_clear_objects(pv->viewport);
             dc_gl_viewport_clear_mesh(pv->viewport);
+            /* Drop inspect's borrow before freeing the old grid; publish the
+             * new one so marching_cubes / voxel_state read the same truth. */
+            dc_inspect_set_voxel_grid(NULL);
             dc_voxel_grid_free(pv->voxel_grid);
             pv->voxel_grid = grid;
+            dc_inspect_set_voxel_grid(grid);
             dc_gl_viewport_set_voxel_grid(pv->viewport, grid);
 
             /* If source bezier mesh is available, set up direct
@@ -883,6 +890,8 @@ do_render(DC_ScadPreview *pv)
                 dc_gl_viewport_clear_objects(pv->viewport);
                 dc_gl_viewport_clear_mesh(pv->viewport);
                 dc_gl_viewport_set_voxel_grid(pv->viewport, NULL);
+                /* Drop inspect's borrow before freeing the underlying grid. */
+                dc_inspect_set_voxel_grid(NULL);
                 dc_voxel_grid_free(pv->voxel_grid);
                 pv->voxel_grid = NULL;
             } else if (pv->render_mode == DC_RENDER_MESH) {
@@ -1239,6 +1248,8 @@ dc_scad_preview_free(DC_ScadPreview *pv)
         g_usleep(10000); /* 10ms */
 
     progress_stop(pv);
+    /* Drop inspect's borrow before freeing pv->voxel_grid. */
+    dc_inspect_set_voxel_grid(NULL);
     dc_voxel_grid_free(pv->voxel_grid);
     dc_transform_panel_free(pv->transform);
     dc_gl_viewport_free(pv->viewport);

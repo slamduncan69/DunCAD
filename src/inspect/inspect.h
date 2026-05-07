@@ -40,4 +40,12 @@ void dc_inspect_set_bezier_mesh(const void *mesh_ptr);
  * or NULL if no mesh exists. Caller must free(). */
 char *dc_inspect_bezier_mesh_to_cubeiform(void);
 
+/* Publish a borrowed voxel grid for read-only inspect commands
+ * (voxel_state, marching_cubes). Caller retains ownership and must
+ * keep the grid alive until publishing NULL or a new pointer.
+ * Pass NULL to clear the borrow. If the inspect module currently
+ * owns a grid (from voxel_sphere/box/csg/etc.), that grid is freed
+ * before adopting the borrow. */
+void dc_inspect_set_voxel_grid(const void *grid);
+
 #endif /* DC_INSPECT_H */

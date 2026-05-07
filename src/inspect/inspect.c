@@ -51,6 +51,32 @@
 static GSocketService  *s_service = NULL;
 static GtkWidget       *s_window  = NULL;
 static DC_VoxelGrid    *s_voxel_grid = NULL;
+/* Ownership of s_voxel_grid:
+ *   1 = inspect-owned (allocated by voxel_sphere/box/csg/etc. — we free it).
+ *   0 = borrowed from scad_preview via dc_inspect_set_voxel_grid()
+ *       — preview owns the lifetime; we must not free it.
+ * The voxel_state and marching_cubes commands read s_voxel_grid in
+ * either mode; only writes care about ownership. */
+static int              s_voxel_grid_owned = 0;
+
+/* Replace s_voxel_grid with new_grid, taking ownership.
+ * If we previously owned a grid, free it. If we previously borrowed
+ * one from scad_preview, drop the borrow without freeing. Pass NULL
+ * to clear. After the call, s_voxel_grid_owned reflects whether we
+ * own the new grid (non-NULL ⇒ owned). */
+static void inspect_grid_take_owned(DC_VoxelGrid *new_grid) {
+    if (s_voxel_grid_owned && s_voxel_grid) dc_voxel_grid_free(s_voxel_grid);
+    s_voxel_grid = new_grid;
+    s_voxel_grid_owned = (new_grid != NULL);
+}
+
+void dc_inspect_set_voxel_grid(const void *grid) {
+    /* Caller-owned borrow: free any inspect-owned grid first, then
+     * adopt the pointer without taking ownership. */
+    if (s_voxel_grid_owned && s_voxel_grid) dc_voxel_grid_free(s_voxel_grid);
+    s_voxel_grid = (DC_VoxelGrid *)grid;
+    s_voxel_grid_owned = 0;
+}
 
 /* Forward declarations for bezier mesh state (defined later in file) */
 static ts_bezier_mesh *s_bezier_mesh;
@@ -1155,8 +1181,7 @@ static char *cmd_cubeiform_exec(const char *args) {
             DC_GlViewport *vp = get_viewport();
             if (vp) dc_gl_viewport_set_voxel_grid(vp, vox_grid);
             /* Store globally for lifetime */
-            dc_voxel_grid_free(s_voxel_grid);
-            s_voxel_grid = vox_grid;
+            inspect_grid_take_owned(vox_grid);
         }
     }
 
@@ -1819,8 +1844,7 @@ static char *cmd_bezier_sphere(const char *args) {
     float cx = gsz * cell * 0.5f;
     float cy = cx, cz = cx;
 
-    dc_voxel_grid_free(s_voxel_grid);
-    s_voxel_grid = dc_voxel_grid_new(gsz, gsz, gsz, cell);
+    inspect_grid_take_owned(dc_voxel_grid_new(gsz, gsz, gsz, cell));
     if (!s_voxel_grid) return strdup("{\"error\":\"grid alloc failed\"}\n");
 
     dc_sdf_sphere(s_voxel_grid, cx, cy, cz, radius);
@@ -1865,8 +1889,7 @@ static char *cmd_bezier_torus(const char *args) {
     float cy = cx;
     float cz = gz * cell * 0.5f;
 
-    dc_voxel_grid_free(s_voxel_grid);
-    s_voxel_grid = dc_voxel_grid_new(gxy, gxy, gz, cell);
+    inspect_grid_take_owned(dc_voxel_grid_new(gxy, gxy, gz, cell));
     if (!s_voxel_grid) return strdup("{\"error\":\"grid alloc failed\"}\n");
 
     dc_sdf_torus(s_voxel_grid, cx, cy, cz, major_r, minor_r);
@@ -1912,8 +1935,7 @@ static char *cmd_bezier_triclaude(const char *args) {
     float cx = gsz * cell * 0.5f;
     float cy = cx, cz = cx;
 
-    dc_voxel_grid_free(s_voxel_grid);
-    s_voxel_grid = dc_voxel_grid_new(gsz, gsz, gsz, cell);
+    inspect_grid_take_owned(dc_voxel_grid_new(gsz, gsz, gsz, cell));
     if (!s_voxel_grid) return strdup("{\"error\":\"grid alloc failed\"}\n");
 
     /* Outer sphere centered in grid */
@@ -2028,9 +2050,8 @@ static void bezier_mesh_refresh(void) {
     /* Re-voxelize if mode includes voxels */
     if (s_bezier_view & DC_BEZIER_VIEW_VOXEL) {
         DC_Error err = {0};
-        dc_voxel_grid_free(s_voxel_grid);
-        s_voxel_grid = dc_voxelize_bezier(s_bezier_mesh, s_bezier_resolution,
-                                            2, 15, &err);
+        inspect_grid_take_owned(dc_voxelize_bezier(s_bezier_mesh, s_bezier_resolution,
+                                                    2, 15, &err));
         if (s_voxel_grid) {
             dc_gl_viewport_set_voxel_grid(vp, s_voxel_grid);
         }
@@ -2910,8 +2931,7 @@ static char *cmd_voxel_sphere(const char *args) {
     float cs = 1.0f;
     sscanf(args, "%f %f %f %f %d %f", &cx, &cy, &cz, &radius, &res, &cs);
 
-    dc_voxel_grid_free(s_voxel_grid);
-    s_voxel_grid = dc_voxel_grid_new(res, res, res, cs);
+    inspect_grid_take_owned(dc_voxel_grid_new(res, res, res, cs));
     if (!s_voxel_grid) return strdup("{\"error\":\"grid alloc failed\"}\n");
 
     dc_sdf_sphere(s_voxel_grid, cx, cy, cz, radius);
@@ -2937,8 +2957,7 @@ static char *cmd_voxel_box(const char *args) {
     float cs = 1.0f;
     sscanf(args, "%f %f %f %f %f %f %d %f", &x0, &y0, &z0, &x1, &y1, &z1, &res, &cs);
 
-    dc_voxel_grid_free(s_voxel_grid);
-    s_voxel_grid = dc_voxel_grid_new(res, res, res, cs);
+    inspect_grid_take_owned(dc_voxel_grid_new(res, res, res, cs));
     if (!s_voxel_grid) return strdup("{\"error\":\"grid alloc failed\"}\n");
 
     dc_sdf_box(s_voxel_grid, x0, y0, z0, x1, y1, z1);
@@ -2990,8 +3009,7 @@ static char *cmd_voxel_csg(const char *args) {
     dc_sdf_activate(out);
     dc_sdf_color_by_normal(out);
 
-    dc_voxel_grid_free(s_voxel_grid);
-    s_voxel_grid = out;
+    inspect_grid_take_owned(out);
 
     DC_GlViewport *vp = get_viewport();
     if (vp) dc_gl_viewport_set_voxel_grid(vp, s_voxel_grid);
@@ -3047,8 +3065,7 @@ static char *cmd_marching_cubes(const char *args) {
 static char *cmd_voxel_clear(void) {
     DC_GlViewport *vp = get_viewport();
     if (vp) dc_gl_viewport_set_voxel_grid(vp, NULL);
-    dc_voxel_grid_free(s_voxel_grid);
-    s_voxel_grid = NULL;
+    inspect_grid_take_owned(NULL);
     return strdup("{\"ok\":true}\n");
 }
 
